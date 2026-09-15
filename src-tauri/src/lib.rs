@@ -1,6 +1,8 @@
 use known_hosts::KnownHosts;
 
 mod batcher;
+/// decode 对外可见，tests/local_pty.rs 要用 ShellDecoder 验证真实 PTY 输出
+pub mod decode;
 mod known_hosts;
 mod local;
 /// sftp 模块对外可见，tests/ 里的端到端测试要用 list_dir

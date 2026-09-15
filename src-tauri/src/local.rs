@@ -12,6 +12,7 @@ use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize}
 use tauri::ipc::Channel as IpcChannel;
 use tauri::State;
 
+use crate::decode::ShellDecoder;
 use crate::ssh::ShellEvent;
 
 /// 跟 ssh 侧保持一致的攒批帧长
@@ -114,26 +115,37 @@ pub fn local_open(
     }
 
     tauri::async_runtime::spawn(async move {
+        // 本地 shell 的输出编码跟着控制台代码页走，Windows 默认是 936（GBK）。
+        // 交给 ShellDecoder 统一转成 UTF-8 —— 前端拿到的就一定是合法 UTF-8，
+        // xterm 按 UTF-8 解释才不会把中文显示成乱码。
+        let mut decoder = ShellDecoder::new();
+
         loop {
             tokio::time::sleep(FRAME).await;
 
             let batch: Vec<u8> = std::mem::take(&mut *buf.lock().unwrap());
             if !batch.is_empty() {
-                let payload = ShellEvent::Data {
-                    data: B64.encode(&batch[..]),
-                };
-                if on_data.send(payload).is_err() {
-                    // 前端没了，退出。读线程会一直阻塞到 pty 关闭，届时自行结束
-                    return;
+                let text = decoder.push(&batch);
+                if !text.is_empty() {
+                    let payload = ShellEvent::Data {
+                        data: B64.encode(text.as_bytes()),
+                    };
+                    if on_data.send(payload).is_err() {
+                        // 前端没了，退出。读线程会一直阻塞到 pty 关闭，届时自行结束
+                        return;
+                    }
                 }
             }
 
             if finished.load(Ordering::SeqCst) {
-                // 退出前再排一次，别把最后那点输出落下
+                // 退出前再排一次，别把最后那点输出落下。
+                // finish() 是必须的：末尾可能还卡着半个汉字没解完
                 let rest: Vec<u8> = std::mem::take(&mut *buf.lock().unwrap());
-                if !rest.is_empty() {
+                let mut text = decoder.push(&rest);
+                text.push_str(&decoder.finish());
+                if !text.is_empty() {
                     let _ = on_data.send(ShellEvent::Data {
-                        data: B64.encode(&rest[..]),
+                        data: B64.encode(text.as_bytes()),
                     });
                 }
                 let _ = on_data.send(ShellEvent::Closed);

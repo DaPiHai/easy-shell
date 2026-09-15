@@ -21,6 +21,9 @@ serde_json = "1"
 russh = { version = "0.63.3", default-features = false, features = ["flate2", "ring", "rsa"] }
 tokio = { version = "1.53.1", features = ["full"] }
 base64 = "0.23.1"
+# 本地 Shell 的 GBK 输出转 UTF-8。Windows 控制台默认代码页 936，
+# PowerShell / cmd 输出的中文不是 UTF-8，xterm 按 UTF-8 解码会全乱码
+encoding_rs = "0.8"
 uuid = { version = "1.20.0", features = ["v4"] }
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 argon2 = "0.5.3"
