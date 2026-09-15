@@ -10,6 +10,7 @@ use russh::ChannelMsg;
 
 use crate::batcher::FrameBatcher;
 use crate::known_hosts::{take_mismatch, KeyCheck, KnownHosts};
+use crate::sftp::SftpState;
 use serde::{Deserialize, Serialize};
 use tauri::ipc::Channel as IpcChannel;
 use tauri::State;
@@ -444,7 +445,14 @@ pub async fn ssh_resize(
 }
 
 #[tauri::command]
-pub async fn ssh_close(state: State<'_, SshState>, session_id: String) -> Result<(), String> {
+pub async fn ssh_close(
+    state: State<'_, SshState>,
+    sftp: State<'_, SftpState>,
+    session_id: String,
+) -> Result<(), String> {
+    // 先摘掉这条会话名下挂的 SFTP 通道。它们是另一张表里的条目，
+    // 不清理的话 SSH 断了它们还留在内存里，前端又不会再去关一次
+    sftp.close_for_session(&session_id).await;
     drop_channels(&state, &session_id).await;
 
     if let Some(entry) = state.sessions.lock().await.remove(&session_id) {

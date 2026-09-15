@@ -41,9 +41,86 @@ pub enum TransferEvent {
     Error { message: String },
 }
 
+/**
+ * SFTP 会话的复用与引用计数，跟真实连接无关，所以单独成结构 —— 这样能直接单测。
+ *
+ * 为什么需要复用：一条 SSH 会话上可以开多个 sftp 通道，但每开一条就占服务端一个
+ * session 槽位（sshd 默认 `MaxSessions 10`）。前端允许对同一台主机开多个 SFTP 标签
+ * （每个标签一个），不复用就会一条条堆上去，开关十几次之后新通道直接开不出来。
+ *
+ * 为什么需要引用计数：多个标签共用同一个 sftpId，其中一个关掉时不能真的关通道，
+ * 否则兄弟标签会一起失效。只有最后一个引用释放时才真正关闭。
+ */
+#[derive(Default)]
+pub struct SftpRegistry {
+    /// SSH sessionId -> sftpId。同一条 SSH 会话上的 SFTP 标签共用一条通道
+    by_session: Mutex<HashMap<String, u32>>,
+    /// sftpId -> 还有多少个使用者
+    refs: Mutex<HashMap<u32, usize>>,
+}
+
+impl SftpRegistry {
+    /** 这条 SSH 会话上已经有 SFTP 通道的话返回它的 id（调用方据此复用） */
+    async fn find(&self, session_id: &str) -> Option<u32> {
+        self.by_session.lock().await.get(session_id).copied()
+    }
+
+    async fn register(&self, session_id: &str, id: u32) {
+        self.by_session.lock().await.insert(session_id.to_string(), id);
+        *self.refs.lock().await.entry(id).or_insert(0) += 1;
+    }
+
+    /// 复用已有通道时也要 +1，否则先关的那个标签会把别人一起带走
+    async fn acquire(&self, id: u32) {
+        *self.refs.lock().await.entry(id).or_insert(0) += 1;
+    }
+
+    /** 释放一个引用。返回 true 表示归零了，调用方需要真正关掉这条通道 */
+    async fn release(&self, session_id: &str, id: u32) -> bool {
+        let mut refs = self.refs.lock().await;
+        let n = refs.entry(id).or_insert(0);
+        *n = n.saturating_sub(1);
+        if *n > 0 {
+            return false;
+        }
+        refs.remove(&id);
+        drop(refs);
+        // 映射可能已经被 take_session 摘走了，这里只是顺手清掉自己的那份
+        self.by_session.lock().await.remove(session_id);
+        true
+    }
+
+    /// 反查这个 sftpId 挂在哪个 SSH 会话上
+    async fn session_of(&self, id: u32) -> Option<String> {
+        self.by_session
+            .lock()
+            .await
+            .iter()
+            .find(|(_, v)| **v == id)
+            .map(|(k, _)| k.clone())
+    }
+
+    /**
+     * SSH 会话断开时清理它名下的 SFTP 通道，返回要关掉的 sftpId。
+     * 这是兜底：前端漏调 sftpClose（崩溃、异常路径）时不至于永久泄漏。
+     */
+    async fn take_session(&self, session_id: &str) -> Option<u32> {
+        let id = self.by_session.lock().await.remove(session_id)?;
+        self.refs.lock().await.remove(&id);
+        Some(id)
+    }
+
+    /// 测试用：当前还活着几条通道
+    #[cfg(test)]
+    async fn live_count(&self) -> usize {
+        self.refs.lock().await.len()
+    }
+}
+
 #[derive(Default)]
 pub struct SftpState {
     sessions: Mutex<HashMap<u32, Arc<SftpSession>>>,
+    registry: SftpRegistry,
     next_id: AtomicU32,
 }
 
@@ -56,6 +133,13 @@ impl SftpState {
             .cloned()
             .ok_or_else(|| "SFTP 会话不存在".to_string())
     }
+
+    /// 断开一条 SSH 会话时调用：清掉它名下的 SFTP 通道
+    pub async fn close_for_session(&self, session_id: &str) {
+        if let Some(id) = self.registry.take_session(session_id).await {
+            self.sessions.lock().await.remove(&id);
+        }
+    }
 }
 
 /// 在已建立的 SSH 会话上开一个 sftp 子系统通道
@@ -65,6 +149,13 @@ pub async fn sftp_open(
     state: State<'_, SftpState>,
     session_id: String,
 ) -> Result<u32, String> {
+    // 同一条 SSH 会话上已经有 SFTP 通道就直接复用：每多开一条就多占服务端一个
+    // session 槽位，而前端允许对同一台主机开好几个 SFTP 标签
+    if let Some(id) = state.registry.find(&session_id).await {
+        state.registry.acquire(id).await;
+        return Ok(id)
+    }
+
     let channel = {
         let sessions = ssh.sessions.lock().await;
         let entry = sessions.get(&session_id).ok_or("SSH 会话不存在")?;
@@ -86,6 +177,7 @@ pub async fn sftp_open(
 
     let id = state.next_id.fetch_add(1, Ordering::SeqCst);
     state.sessions.lock().await.insert(id, Arc::new(sftp));
+    state.registry.register(&session_id, id).await;
     Ok(id)
 }
 
@@ -675,7 +767,12 @@ pub async fn sftp_rename(
 /// 关掉一个 sftp 子系统通道。关掉后对应的 sftpId 立即失效
 #[tauri::command]
 pub async fn sftp_close(state: State<'_, SftpState>, sftp_id: u32) -> Result<(), String> {
-    state.sessions.lock().await.remove(&sftp_id);
+    // 只有最后一个使用者释放才真关 —— 共用同一条通道的兄弟标签还在用着。
+    // 要先反查它挂在哪个 SSH 会话上，才能把 by_session 里的映射一起摘掉
+    let session_id = state.registry.session_of(sftp_id).await.unwrap_or_default();
+    if state.registry.release(&session_id, sftp_id).await {
+        state.sessions.lock().await.remove(&sftp_id);
+    }
     Ok(())
 }
 
@@ -1037,5 +1134,103 @@ mod tests {
 
         local_copy(vec![dir.to_string_lossy().to_string()], dst.path()).unwrap();
         assert!(dst.0.join("empty").is_dir());
+    }
+}
+
+/**
+ * 复用与引用计数的测试。
+ *
+ * 这些行为不依赖真实 SSH 连接，所以能直接单测 —— 这正是把 registry 从
+ * SftpState 里抽出来的理由。靠真服务器验证"开关十几次会不会泄漏"太慢也太脆。
+ */
+#[cfg(test)]
+mod registry_tests {
+    use super::SftpRegistry;
+
+    #[tokio::test]
+    async fn 同一会话第二次开返回同一个_id() {
+        let r = SftpRegistry::default();
+        r.register("s1", 7).await;
+        assert_eq!(r.find("s1").await, Some(7));
+        // 复用之后再查还是同一条，而不是新开一条
+        r.acquire(7).await;
+        assert_eq!(r.find("s1").await, Some(7));
+        assert_eq!(r.live_count().await, 1, "复用不该增加通道数");
+    }
+
+    #[tokio::test]
+    async fn 不同会话各开各的() {
+        let r = SftpRegistry::default();
+        r.register("s1", 7).await;
+        r.register("s2", 8).await;
+        assert_eq!(r.find("s1").await, Some(7));
+        assert_eq!(r.find("s2").await, Some(8));
+        assert_eq!(r.live_count().await, 2);
+    }
+
+    #[tokio::test]
+    async fn 还有别人在用就不真关() {
+        let r = SftpRegistry::default();
+        r.register("s1", 7).await;
+        r.acquire(7).await;
+
+        assert!(!r.release("s1", 7).await, "两个引用，释放一个不该归零");
+        assert_eq!(r.live_count().await, 1, "兄弟标签还在用，通道必须留着");
+        assert_eq!(r.find("s1").await, Some(7), "映射也还在");
+
+        assert!(r.release("s1", 7).await, "最后一个释放才归零");
+        assert_eq!(r.live_count().await, 0);
+        assert_eq!(r.find("s1").await, None);
+    }
+
+    #[tokio::test]
+    async fn 释放不存在的_id_不会把计数搞成负数() {
+        let r = SftpRegistry::default();
+        assert!(r.release("s1", 99).await);
+        assert_eq!(r.live_count().await, 0);
+    }
+
+    #[tokio::test]
+    async fn ssh_会话断开时把它的通道摘走() {
+        let r = SftpRegistry::default();
+        r.register("s1", 7).await;
+        r.register("s2", 8).await;
+
+        assert_eq!(r.take_session("s1").await, Some(7));
+        assert_eq!(r.find("s1").await, None, "映射要清掉，否则复用会拿到已关的通道");
+        // 只影响这一条，别的会话不受牵连
+        assert_eq!(r.find("s2").await, Some(8));
+        assert_eq!(r.live_count().await, 1);
+    }
+
+    #[tokio::test]
+    async fn 摘走之后再查不到() {
+        let r = SftpRegistry::default();
+        assert_eq!(r.take_session("没连过").await, None);
+    }
+
+    #[tokio::test]
+    async fn 反查通道属于哪个会话() {
+        let r = SftpRegistry::default();
+        r.register("s1", 7).await;
+        assert_eq!(r.session_of(7).await, Some("s1".to_string()));
+        assert_eq!(r.session_of(404).await, None);
+    }
+
+    #[tokio::test]
+    async fn 反复开关不会堆积() {
+        let r = SftpRegistry::default();
+        // 模拟开十个标签又全部关掉：每次开都复用同一条通道
+        for _ in 0..10 {
+            match r.find("s1").await {
+                Some(id) => r.acquire(id).await,
+                None => r.register("s1", 42).await,
+            }
+        }
+        assert_eq!(r.live_count().await, 1, "十个标签只占一条通道");
+        for _ in 0..10 {
+            r.release("s1", 42).await;
+        }
+        assert_eq!(r.live_count().await, 0, "全关掉之后一条都不剩");
     }
 }

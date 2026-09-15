@@ -7,6 +7,7 @@ import {
   localMkdir,
   localRemove,
   localRename,
+  sftpClose,
   sftpDownload,
   sftpList,
   sftpMkdir,
@@ -70,10 +71,21 @@ export function SftpPanel({ sessionId }: Props) {
   // 开一个 sftp 子系统通道，挂在已有 SSH 会话上
   useEffect(() => {
     let alive = true
+    /**
+     * 卸载时要关掉谁。必须记在局部变量里，不能依赖 sftpId 这个 state：
+     * 打开是异步的，组件可能在 sftpOpen 返回之前就卸载了，那时 sftpId 还是 null。
+     */
+    let opened: number | null = null
+
     void (async () => {
       try {
         const id = await sftpOpen(sessionId)
-        if (!alive) return
+        if (!alive) {
+          // 打开完成时组件已经没了 —— 立刻还回去，否则这条通道永远没人关
+          void sftpClose(id)
+          return
+        }
+        opened = id
         const home = await sftpPwd(id).catch(() => '/')
         if (!alive) return
         setSftpId(id)
@@ -82,8 +94,15 @@ export function SftpPanel({ sessionId }: Props) {
         if (alive) setError(`打开 SFTP 失败：${String(e)}`)
       }
     })()
+
     return () => {
       alive = false
+      /**
+       * 归还通道。后端按引用计数，只有最后一个使用者释放才真关 ——
+       * 所以对同一台主机开多个 SFTP 标签时，关掉一个不会影响其余的。
+       * 不关的话每开一次就永久占服务端一个 session 槽位（sshd 默认上限 10）。
+       */
+      if (opened != null) void sftpClose(opened)
     }
   }, [sessionId, setError])
 
