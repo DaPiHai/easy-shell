@@ -64,6 +64,7 @@ pub fn run() {
             sftp::local_mkdir,
             sftp::local_remove,
             sftp::local_rename,
+            sftp::local_copy,
             sftp::sftp_read_text,
             sftp::sftp_write_text,
             sftp::local_read_text,

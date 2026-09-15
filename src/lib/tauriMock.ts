@@ -214,6 +214,10 @@ export async function invoke<T>(cmd: string, args: Record<string, unknown> = {})
     case 'local_rename':
     case 'local_write_text':
       return later(undefined as T)
+    case 'local_copy': {
+      const n = Array.isArray(args.paths) ? (args.paths as string[]).length : 0
+      return later(n as unknown as T)
+    }
     case 'local_read_text':
       return later(EDIT_CONTENT as T)
 

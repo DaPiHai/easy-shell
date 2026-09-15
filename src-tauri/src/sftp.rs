@@ -1,4 +1,6 @@
 use std::collections::HashMap;
+use std::ffi::OsStr;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::UNIX_EPOCH;
@@ -758,4 +760,282 @@ pub fn local_home() -> Result<String, String> {
     dirs::home_dir()
         .map(|p| p.to_string_lossy().to_string())
         .ok_or_else(|| "无法定位用户主目录".to_string())
+}
+
+/// 把一批本地文件/目录复制进 `dest_dir`，返回复制的顶层条目数。
+///
+/// 这是给「从资源管理器拖文件到本地栏」用的：系统拖拽只能给出绝对路径，
+/// 落到本地栏就只能靠复制落地。远端那侧不需要它 —— 上传走 `sftp_upload`。
+#[tauri::command]
+pub fn local_copy(paths: Vec<String>, dest_dir: String) -> Result<usize, String> {
+    let dest = PathBuf::from(&dest_dir);
+    if !dest.is_dir() {
+        return Err(format!("目标目录不存在: {dest_dir}"));
+    }
+    let dest_canon = dest
+        .canonicalize()
+        .map_err(|e| format!("无法解析目标目录 {dest_dir}: {e}"))?;
+
+    let mut copied = 0usize;
+    for raw in &paths {
+        let src = PathBuf::from(raw);
+        if !src.exists() {
+            return Err(format!("源不存在: {raw}"));
+        }
+        let src_canon = src
+            .canonicalize()
+            .map_err(|e| format!("无法解析源 {raw}: {e}"))?;
+
+        // 把目录复制进它自己的子目录，递归永远走不到底，直接挡掉
+        if dest_canon.starts_with(&src_canon) {
+            return Err(format!("不能把 {raw} 复制进它自己的子目录"));
+        }
+
+        let name = src
+            .file_name()
+            .ok_or_else(|| format!("取不到文件名: {raw}"))?;
+        let target = unique_path(&dest, name);
+        copy_entry(&src, &target)?;
+        copied += 1;
+    }
+    Ok(copied)
+}
+
+/// 目标已存在就往后找空位：`a.txt` → `a (2).txt` → `a (3).txt`
+fn unique_path(dir: &Path, name: &OsStr) -> PathBuf {
+    let direct = dir.join(name);
+    if !direct.exists() {
+        return direct;
+    }
+
+    let file_name = name.to_string_lossy().to_string();
+    // 只有最后一个点后面还有字符、且不在开头（比如 `.gitignore`），才当扩展名切出来
+    let (stem, ext) = match file_name.rfind('.') {
+        Some(i) if i > 0 && i < file_name.len() - 1 => {
+            let (s, e) = file_name.split_at(i);
+            (s.to_string(), e.to_string())
+        }
+        _ => (file_name, String::new()),
+    };
+
+    for n in 2..1000 {
+        let candidate = dir.join(format!("{stem} ({n}){ext}"));
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+    // 撞名一千次这种事大概不会发生，真发生了用时间戳兜底，也比覆盖用户文件强
+    let stamp = std::time::SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    dir.join(format!("{stem} ({stamp}){ext}"))
+}
+
+fn copy_entry(src: &Path, dst: &Path) -> Result<(), String> {
+    // 用 symlink_metadata：符号链接本身不展开成目录，交给 fs::copy 去跟随
+    let meta = std::fs::symlink_metadata(src)
+        .map_err(|e| format!("读取 {} 的元信息失败: {e}", src.display()))?;
+
+    if !meta.is_dir() {
+        return std::fs::copy(src, dst)
+            .map_err(|e| format!("复制 {} 失败: {e}", src.display()))
+            .map(|_| ());
+    }
+
+    std::fs::create_dir_all(dst).map_err(|e| format!("创建目录 {} 失败: {e}", dst.display()))?;
+    let rd =
+        std::fs::read_dir(src).map_err(|e| format!("读取目录 {} 失败: {e}", src.display()))?;
+    for entry in rd {
+        let entry = entry.map_err(|e| format!("遍历 {} 失败: {e}", src.display()))?;
+        copy_entry(&entry.path(), &dst.join(entry.file_name()))?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    /// 测试用的临时目录，Drop 时自己清掉，别在系统临时区里堆垃圾
+    struct TempDir(PathBuf);
+
+    impl TempDir {
+        fn new(tag: &str) -> Self {
+            let stamp = std::time::SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0);
+            let p = std::env::temp_dir().join(format!(
+                "easy-shell-copy-{tag}-{}-{stamp}",
+                std::process::id()
+            ));
+            fs::create_dir_all(&p).expect("建临时目录失败");
+            TempDir(p)
+        }
+
+        fn path(&self) -> String {
+            self.0.to_string_lossy().to_string()
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn write(path: &Path, content: &str) {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+        fs::write(path, content).unwrap();
+    }
+
+    #[test]
+    fn 复制单个文件() {
+        let src = TempDir::new("src");
+        let dst = TempDir::new("dst");
+        let file = src.0.join("a.txt");
+        write(&file, "hello");
+
+        let n = local_copy(vec![file.to_string_lossy().to_string()], dst.path()).unwrap();
+        assert_eq!(n, 1);
+        assert_eq!(fs::read_to_string(dst.0.join("a.txt")).unwrap(), "hello");
+    }
+
+    #[test]
+    fn 复制目录会连子目录一起带走() {
+        let src = TempDir::new("src");
+        let dst = TempDir::new("dst");
+        let dir = src.0.join("pkg");
+        write(&dir.join("a.txt"), "a");
+        write(&dir.join("sub").join("b.txt"), "b");
+
+        let n = local_copy(vec![dir.to_string_lossy().to_string()], dst.path()).unwrap();
+        assert_eq!(n, 1);
+        assert_eq!(fs::read_to_string(dst.0.join("pkg").join("a.txt")).unwrap(), "a");
+        assert_eq!(
+            fs::read_to_string(dst.0.join("pkg").join("sub").join("b.txt")).unwrap(),
+            "b"
+        );
+    }
+
+    #[test]
+    fn 同名时自动改名而不是覆盖() {
+        let src = TempDir::new("src");
+        let dst = TempDir::new("dst");
+        let file = src.0.join("a.txt");
+        write(&file, "first");
+        write(&dst.0.join("a.txt"), "existing");
+
+        local_copy(vec![file.to_string_lossy().to_string()], dst.path()).unwrap();
+
+        // 原来那个必须原封不动
+        assert_eq!(fs::read_to_string(dst.0.join("a.txt")).unwrap(), "existing");
+        assert_eq!(
+            fs::read_to_string(dst.0.join("a (2).txt")).unwrap(),
+            "first"
+        );
+    }
+
+    #[test]
+    fn 连续复制同名会一直往后排号() {
+        let src = TempDir::new("src");
+        let dst = TempDir::new("dst");
+        let file = src.0.join("a.txt");
+        write(&file, "x");
+
+        let p = file.to_string_lossy().to_string();
+        local_copy(vec![p.clone()], dst.path()).unwrap();
+        local_copy(vec![p.clone()], dst.path()).unwrap();
+        local_copy(vec![p], dst.path()).unwrap();
+
+        // 目标目录一开始是空的：第一次落 a.txt，第二次 a (2).txt，第三次 a (3).txt
+        assert!(dst.0.join("a.txt").exists());
+        assert!(dst.0.join("a (2).txt").exists());
+        assert!(dst.0.join("a (3).txt").exists());
+        assert!(!dst.0.join("a (4).txt").exists());
+    }
+
+    #[test]
+    fn 没有扩展名的文件改名时不会多点一个点() {
+        let src = TempDir::new("src");
+        let dst = TempDir::new("dst");
+        let file = src.0.join("Makefile");
+        write(&file, "all:");
+        write(&dst.0.join("Makefile"), "old");
+
+        local_copy(vec![file.to_string_lossy().to_string()], dst.path()).unwrap();
+        assert!(dst.0.join("Makefile (2)").exists());
+    }
+
+    #[test]
+    fn 复制目录进自己的子目录会被拒绝() {
+        let src = TempDir::new("src");
+        let dir = src.0.join("pkg");
+        write(&dir.join("a.txt"), "a");
+        let inner = dir.join("inner");
+        fs::create_dir_all(&inner).unwrap();
+
+        let err = local_copy(vec![dir.to_string_lossy().to_string()], inner.to_string_lossy().to_string())
+            .unwrap_err();
+        assert!(err.contains("子目录"), "错误信息应说明原因，实际: {err}");
+    }
+
+    #[test]
+    fn 源不存在时报错() {
+        let src = TempDir::new("src");
+        let dst = TempDir::new("dst");
+        let missing = src.0.join("nope.txt");
+
+        let err =
+            local_copy(vec![missing.to_string_lossy().to_string()], dst.path()).unwrap_err();
+        assert!(err.contains("源不存在"), "实际: {err}");
+    }
+
+    #[test]
+    fn 目标目录不存在时报错() {
+        let src = TempDir::new("src");
+        let file = src.0.join("a.txt");
+        write(&file, "x");
+
+        let err = local_copy(
+            vec![file.to_string_lossy().to_string()],
+            src.0.join("no-such-dir").to_string_lossy().to_string(),
+        )
+        .unwrap_err();
+        assert!(err.contains("目标目录不存在"), "实际: {err}");
+    }
+
+    #[test]
+    fn 一次复制多个源() {
+        let src = TempDir::new("src");
+        let dst = TempDir::new("dst");
+        let a = src.0.join("a.txt");
+        let b = src.0.join("b.txt");
+        write(&a, "a");
+        write(&b, "b");
+
+        let n = local_copy(
+            vec![a.to_string_lossy().to_string(), b.to_string_lossy().to_string()],
+            dst.path(),
+        )
+        .unwrap();
+        assert_eq!(n, 2);
+        assert!(dst.0.join("a.txt").exists());
+        assert!(dst.0.join("b.txt").exists());
+    }
+
+    #[test]
+    fn 空目录也能复制() {
+        let src = TempDir::new("src");
+        let dst = TempDir::new("dst");
+        let dir = src.0.join("empty");
+        fs::create_dir_all(&dir).unwrap();
+
+        local_copy(vec![dir.to_string_lossy().to_string()], dst.path()).unwrap();
+        assert!(dst.0.join("empty").is_dir());
+    }
 }

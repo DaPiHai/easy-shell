@@ -1,5 +1,7 @@
-import { useCallback, useEffect, useState } from 'react'
+import { type MouseEvent as ReactMouseEvent, useCallback, useEffect, useRef, useState } from 'react'
 import {
+  isDesktop,
+  localCopy,
   localHome,
   localList,
   localMkdir,
@@ -23,6 +25,11 @@ interface Props {
   sessionId: string
 }
 
+const SIDES: readonly Side[] = ['local', 'remote']
+
+/** 超过这个位移才算真在拖，不然就是手抖点了一下 */
+const DRAG_THRESHOLD = 5
+
 export function SftpPanel({ sessionId }: Props) {
   const setError = useApp((s) => s.setError)
   const runTransfer = useApp((s) => s.runTransfer)
@@ -38,6 +45,27 @@ export function SftpPanel({ sessionId }: Props) {
   const [selected, setSelected] = useState<Record<Side, string[]>>({ local: [], remote: [] })
   /** 断点续传开关。默认开：同名文件只补差量，传过的不用重来 */
   const [resume, setResume] = useState(true)
+
+  /** 当前拖拽落点在哪一栏。内部拖拽和系统拖入共用同一个高亮 */
+  const [dropSide, setDropSide] = useState<Side | null>(null)
+  /** 内部拖拽时跟着光标走的小浮标 */
+  const [ghost, setGhost] = useState<{ x: number; y: number; label: string } | null>(null)
+
+  const paneRefs = useRef<Record<Side, HTMLDivElement | null>>({ local: null, remote: null })
+  const dragRef = useRef<{
+    from: Side
+    entries: FileEntry[]
+    ox: number
+    oy: number
+    active: boolean
+  } | null>(null)
+
+  /**
+   * 拖放监听是一次性注册的长生命周期回调，而 sftpId / 当前目录这些会变。
+   * 走 ref 拿最新值，免得闭包把旧目录传进上传。
+   */
+  const latest = useRef({ sftpId, remotePath, localPath, resume })
+  latest.current = { sftpId, remotePath, localPath, resume }
 
   // 开一个 sftp 子系统通道，挂在已有 SSH 会话上
   useEffect(() => {
@@ -118,33 +146,185 @@ export function SftpPanel({ sessionId }: Props) {
     }
     // 双击文件 = 传到对侧当前目录
     if (side === 'remote') void download([entry])
-    else void upload([entry])
+    else void uploadPaths([entry.path])
   }
 
   const download = async (entries: FileEntry[]) => {
-    if (sftpId == null) return
+    const { sftpId: id, localPath: dir, resume: rs } = latest.current
+    if (id == null) return
     for (const entry of entries) {
       await runTransfer('download', entry.name, (ch) =>
-        sftpDownload(sftpId, entry.path, localPath, resume, ch),
+        sftpDownload(id, entry.path, dir, rs, ch),
       )
     }
-    void refreshLocal(localPath)
+    void refreshLocal(dir)
   }
 
-  const upload = async (entries: FileEntry[]) => {
-    if (sftpId == null) return
-    for (const entry of entries) {
-      await runTransfer('upload', entry.name, (ch) =>
-        sftpUpload(sftpId, entry.path, remotePath, resume, ch),
-      )
+  /** 按**本地绝对路径**上传。双栏互拖给的是 FileEntry，系统拖入给的是裸路径，统一走这里 */
+  const uploadPaths = useCallback(
+    async (paths: string[]) => {
+      const { sftpId: id, remotePath: dir, resume: rs } = latest.current
+      if (id == null) return
+      for (const p of paths) {
+        const name = p.split(/[\\/]/).filter(Boolean).pop() ?? p
+        await runTransfer('upload', name, (ch) => sftpUpload(id, p, dir, rs, ch))
+      }
+      void refreshRemote(dir)
+    },
+    [runTransfer, refreshRemote],
+  )
+
+  /** 从资源管理器拖进来的文件落进本地栏：复制到本地当前目录 */
+  const copyToLocal = useCallback(
+    async (paths: string[]) => {
+      const dir = latest.current.localPath
+      try {
+        await localCopy(paths, dir)
+        void refreshLocal(dir)
+      } catch (e) {
+        setError(`复制失败：${String(e)}`)
+      }
+    },
+    [refreshLocal, setError],
+  )
+
+  const handleDrop = useCallback(
+    (entries: FileEntry[], from: Side) => {
+      if (from === 'local') void uploadPaths(entries.map((e) => e.path))
+      else void download(entries)
+    },
+    // download 每次渲染都是新函数，放进来会让这个回调每次都变；它内部只读 latest，用谁都一样
+    [uploadPaths],
+  )
+
+  const handleDropRef = useRef(handleDrop)
+  handleDropRef.current = handleDrop
+
+  /** 从系统拖进来的：落到远程栏就上传，落到本地栏就复制 */
+  const dropExternal = useCallback(
+    async (paths: string[], side: Side) => {
+      if (paths.length === 0) return
+      if (side === 'remote') await uploadPaths(paths)
+      else await copyToLocal(paths)
+    },
+    [uploadPaths, copyToLocal],
+  )
+
+  const dropExternalRef = useRef(dropExternal)
+  dropExternalRef.current = dropExternal
+
+  /** 命中测试：客户端坐标落在哪一栏。落在传输队列之类返回 null */
+  const sideAt = useCallback((x: number, y: number): Side | null => {
+    for (const side of SIDES) {
+      const el = paneRefs.current[side]
+      if (!el) continue
+      const r = el.getBoundingClientRect()
+      if (x >= r.left && x <= r.right && y >= r.top && y <= r.bottom) return side
     }
-    void refreshRemote(remotePath)
-  }
+    return null
+  }, [])
 
-  const handleDrop = (entries: FileEntry[], from: Side) => {
-    if (from === 'local') void upload(entries)
-    else void download(entries)
-  }
+  // 系统文件拖入。Tauri 给的是物理像素坐标，要按 dpr 折算回 CSS 像素
+  useEffect(() => {
+    if (!isDesktop()) return
+    let cancelled = false
+    let unlisten: (() => void) | undefined
+
+    void (async () => {
+      try {
+        const { getCurrentWindow } = await import('@tauri-apps/api/window')
+        const stop = await getCurrentWindow().onDragDropEvent((event) => {
+          const p = event.payload
+          if (p.type === 'leave') {
+            setDropSide(null)
+            return
+          }
+          const scale = window.devicePixelRatio || 1
+          const side = sideAt(p.position.x / scale, p.position.y / scale)
+          if (p.type === 'drop') {
+            setDropSide(null)
+            // 落在两栏之外就不动，别把文件传到用户没打算传的地方
+            if (side) void dropExternalRef.current(p.paths, side)
+            return
+          }
+          setDropSide(side)
+        })
+        if (cancelled) stop()
+        else unlisten = stop
+      } catch (e) {
+        console.warn('[easy-shell] 注册文件拖放监听失败:', e)
+      }
+    })()
+
+    return () => {
+      cancelled = true
+      unlisten?.()
+    }
+  }, [sideAt])
+
+  // 双栏互拖：鼠标事件自己实现，不碰 HTML5 dataTransfer（原因写在 FilePane 的注释里）
+  useEffect(() => {
+    const finish = () => {
+      dragRef.current = null
+      document.body.style.userSelect = ''
+      setGhost(null)
+      setDropSide(null)
+    }
+
+    const onMove = (e: MouseEvent) => {
+      const st = dragRef.current
+      if (!st) return
+      if (!st.active) {
+        if (Math.abs(e.clientX - st.ox) + Math.abs(e.clientY - st.oy) < DRAG_THRESHOLD) return
+        st.active = true
+        document.body.style.userSelect = 'none'
+      }
+      const side = sideAt(e.clientX, e.clientY)
+      setDropSide(side && side !== st.from ? side : null)
+      const first = st.entries[0]
+      setGhost({
+        x: e.clientX,
+        y: e.clientY,
+        label: st.entries.length > 1 ? `${first.name} 等 ${st.entries.length} 项` : first.name,
+      })
+    }
+
+    const onUp = (e: MouseEvent) => {
+      const st = dragRef.current
+      if (!st) return
+      const side = sideAt(e.clientX, e.clientY)
+      const moved = st.active
+      finish()
+      if (!moved) return
+      if (side && side !== st.from) void handleDropRef.current(st.entries, st.from)
+    }
+
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && dragRef.current) finish()
+    }
+
+    window.addEventListener('mousemove', onMove)
+    window.addEventListener('mouseup', onUp)
+    window.addEventListener('keydown', onKeyDown)
+    return () => {
+      window.removeEventListener('mousemove', onMove)
+      window.removeEventListener('mouseup', onUp)
+      window.removeEventListener('keydown', onKeyDown)
+      document.body.style.userSelect = ''
+    }
+  }, [sideAt])
+
+  const beginDrag =
+    (side: Side) =>
+    (e: ReactMouseEvent, entry: FileEntry): void => {
+      if (e.button !== 0) return
+      const pool = side === 'local' ? localEntries : remoteEntries
+      const picked = selected[side]
+      const entries = picked.includes(entry.path)
+        ? pool.filter((x) => picked.includes(x.path))
+        : [entry]
+      dragRef.current = { from: side, entries, ox: e.clientX, oy: e.clientY, active: false }
+    }
 
   const mkdir = async (side: Side) => {
     const name = window.prompt('新目录名称')
@@ -260,7 +440,11 @@ export function SftpPanel({ sessionId }: Props) {
           onDelete={() => void remove('local')}
           onRename={() => void rename('local')}
           onEdit={() => openEditor('local')}
-          onDropEntries={handleDrop}
+          onRowMouseDown={beginDrag('local')}
+          dropActive={dropSide === 'local'}
+          paneRef={(el) => {
+            paneRefs.current.local = el
+          }}
         />
         <div className="w-px shrink-0 bg-hairline" />
         <FilePane
@@ -278,10 +462,23 @@ export function SftpPanel({ sessionId }: Props) {
           onDelete={() => void remove('remote')}
           onRename={() => void rename('remote')}
           onEdit={() => openEditor('remote')}
-          onDropEntries={handleDrop}
+          onRowMouseDown={beginDrag('remote')}
+          dropActive={dropSide === 'remote'}
+          paneRef={(el) => {
+            paneRefs.current.remote = el
+          }}
         />
       </div>
       <TransferQueue resume={resume} onToggleResume={() => setResume((v) => !v)} />
+
+      {ghost && (
+        <div
+          className="pointer-events-none fixed z-50 rounded border border-hairline bg-surface-2 px-2 py-1 text-[11px] text-ink shadow-lg"
+          style={{ left: ghost.x + 12, top: ghost.y + 12 }}
+        >
+          {ghost.label}
+        </div>
+      )}
     </div>
   )
 }

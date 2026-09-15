@@ -262,6 +262,11 @@ export function localRename(from: string, to: string): Promise<void> {
   return invoke<void>('local_rename', { from, to })
 }
 
+/** 把系统里拖进来的文件/目录复制进 destDir。目标已存在会自动改名，不覆盖 */
+export function localCopy(paths: string[], destDir: string): Promise<number> {
+  return invoke<number>('local_copy', { paths, destDir })
+}
+
 export function sftpReadText(sftpId: number, path: string): Promise<string> {
   return invoke<string>('sftp_read_text', { sftpId, path })
 }
