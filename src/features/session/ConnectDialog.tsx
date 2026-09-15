@@ -62,15 +62,19 @@ export function ConnectDialog() {
         privateKeyPath: authMode === 'key' ? privateKeyPath : undefined,
         passphrase: authMode === 'key' ? passphrase || undefined : undefined,
       })
+      // 存进 vault 的才给 hostId：会话树靠它找到这条已建立的连接，
+      // 点 SFTP 时直接复用，不必再拨一次
+      const hostId = saveToVault ? crypto.randomUUID() : undefined
       addTab({
         title: `${username}@${host}`,
         kind: 'terminal',
         sessionId,
+        hostId,
       })
 
       if (saveToVault) {
         await saveHost({
-          id: crypto.randomUUID(),
+          id: hostId as string,
           name: host,
           address: host,
           port: Number(port) || 22,

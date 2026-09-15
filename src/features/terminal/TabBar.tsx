@@ -1,4 +1,4 @@
-import { Columns2, FileCode2, FolderTree, RotateCw, Terminal, X } from 'lucide-react'
+import { Columns2, FileCode2, FolderOpen, FolderTree, RotateCw, Terminal, X } from 'lucide-react'
 import { useApp } from '@/lib/store'
 
 export function TabBar() {
@@ -44,6 +44,28 @@ export function TabBar() {
                     e.stopPropagation()
                     // 分屏时左右都注册了，一次全触发
                     reconnectSinks[tab.id]?.forEach((fn) => fn())
+                  }}
+                />
+              </span>
+            )}
+            {/*
+              就地开 SFTP，复用本标签这条连接。
+              必须常驻而不是 hover 才出现：Ctrl+N 快速连接的机器不进会话树，
+              这个按钮就是它唯一的可见入口 —— 藏起来等于没有。
+            */}
+            {tab.kind === 'terminal' && tab.sessionId && (
+              <span title="打开 SFTP 文件管理器" className="flex shrink-0">
+                <FolderOpen
+                  size={12}
+                  className="text-ink-muted transition-colors hover:text-accent"
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    useApp.getState().addTab({
+                      title: `${tab.title} · 文件`,
+                      kind: 'sftp',
+                      sessionId: tab.sessionId,
+                      hostId: tab.hostId,
+                    })
                   }}
                 />
               </span>

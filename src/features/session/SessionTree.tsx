@@ -1,8 +1,8 @@
 import {
   ChevronDown,
   ChevronRight,
+  FolderOpen,
   FolderPlus,
-  FolderTree,
   Pencil,
   Plus,
   SquareTerminal,
@@ -47,6 +47,7 @@ export function SessionTree() {
         title: kind === 'sftp' ? `${host.name} · 文件` : `${host.username}@${host.address}`,
         kind,
         sessionId,
+        hostId: host.id,
       })
     } catch (e) {
       const failure = parseConnectError(e)
@@ -60,6 +61,28 @@ export function SessionTree() {
       }
       setError(`连接 ${host.name} 失败：${failure.message}`)
     }
+  }
+
+  /**
+   * 打开这台主机的 SFTP 双栏。
+   *
+   * 先找有没有已经连上的标签能复用 —— 直接重拨意味着要重新认证一次，
+   * 有些服务端还限制单用户连接数，多拨一条会把先前那条顶掉。
+   * 断线了（deadTabs）的不算，那条连接已经废了，得重新连。
+   */
+  const openSftp = (host: HostRecord) => {
+    const s = useApp.getState()
+    const existing = s.tabs.find((t) => t.hostId === host.id && t.sessionId && !s.deadTabs[t.id])
+    if (existing?.sessionId) {
+      s.addTab({
+        title: `${host.name} · 文件`,
+        kind: 'sftp',
+        sessionId: existing.sessionId,
+        hostId: host.id,
+      })
+      return
+    }
+    void connect(host, 'sftp')
   }
 
   const createGroup = () => {
@@ -107,13 +130,13 @@ export function SessionTree() {
         <span className="truncate text-[13px]">{host.name}</span>
         <span className="ml-auto truncate text-[11px] text-ink-tertiary">{host.address}</span>
       </div>
-      {/* SFTP 是主操作，不能只在 hover 时才露出来 —— 藏在 hover 里等于没有入口 */}
+      {/* 常驻 + 有 hover 反馈：只有 12px 的淡灰图标等于没有入口，用户根本不会去点 */}
       <button
-        onClick={() => void connect(host, 'sftp')}
-        className="ml-1 shrink-0 rounded p-0.5 text-ink-tertiary transition-colors hover:text-ink"
-        title="连接并打开 SFTP 文件管理器"
+        onClick={() => openSftp(host)}
+        className="ml-1 shrink-0 rounded p-1 text-ink-muted transition-colors hover:bg-surface-3 hover:text-accent"
+        title="打开 SFTP 文件管理器（复用已有的连接，不再拨一次）"
       >
-        <FolderTree size={12} />
+        <FolderOpen size={13} />
       </button>
       <button
         onClick={() => void removeHost(host.id)}

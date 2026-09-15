@@ -128,18 +128,24 @@ export function CommandPalette() {
               <Command.Item
                 onSelect={() => {
                   const s = useApp.getState()
-                  // SFTP 复用当前终端那条的 SSH 连接，没连上就无从谈起
+                  // SFTP 复用已有 SSH 连接。优先用当前标签那条；
+                  // 停在别的标签（本地 Shell、编辑器）时 current 没有 sessionId，
+                  // 但机器可能还连着 —— 这时该复用任意一条活着的，
+                  // 而不是报「先连一台主机」，那句提示在明明连着的时候是错的。
                   const current = s.tabs.find((t) => t.id === s.activeTabId)
-                  const sessionId = current?.sessionId
-                  if (!sessionId) {
-                    s.setError('先连一台主机 —— SFTP 要复用它的 SSH 连接')
+                  const target =
+                    (current?.sessionId && !s.deadTabs[current.id] ? current : undefined) ??
+                    s.tabs.find((t) => t.sessionId && !s.deadTabs[t.id])
+                  if (!target?.sessionId) {
+                    s.setError('还没有连上的主机 —— SFTP 要复用 SSH 连接，先 Ctrl+N 连一台')
                     close()
                     return
                   }
                   s.addTab({
-                    title: `${current?.title ?? 'SFTP'} · 文件`,
+                    title: `${target.title} · 文件`,
                     kind: 'sftp',
-                    sessionId,
+                    sessionId: target.sessionId,
+                    hostId: target.hostId,
                   })
                   close()
                 }}

@@ -34,6 +34,13 @@ export interface Tab {
   title: string
   kind: TabKind
   sessionId?: string
+  /**
+   * 这条标签属于哪台主机（vault 里的 HostRecord.id）。
+   * 用来在会话树上点「打开 SFTP」时找到已经建好的连接复用，
+   * 而不是再拨一次 —— 二次连接意味着二次认证，还可能撞上服务端的连接数限制。
+   * 快速连接（没存进 vault）的标签没有这个字段。
+   */
+  hostId?: string
   /** 是否左右分屏（同一会话开两个 shell 通道） */
   split?: boolean
   /** kind 为 editor 时的打开目标 */
