@@ -1,0 +1,107 @@
+@import 'tailwindcss';
+@import './styles/tokens.css';
+
+@theme inline {
+  --color-canvas: var(--canvas);
+  --color-surface-1: var(--surface-1);
+  --color-surface-2: var(--surface-2);
+  --color-surface-3: var(--surface-3);
+  --color-surface-4: var(--surface-4);
+
+  --color-hairline: var(--hairline);
+  --color-hairline-strong: var(--hairline-strong);
+  --color-hairline-tertiary: var(--hairline-tertiary);
+
+  --color-ink: var(--ink);
+  --color-ink-muted: var(--ink-muted);
+  --color-ink-subtle: var(--ink-subtle);
+  --color-ink-tertiary: var(--ink-tertiary);
+
+  --color-accent: var(--accent);
+  --color-accent-hover: var(--accent-hover);
+  --color-on-accent: var(--on-accent);
+
+  --color-success: var(--success);
+  --color-danger: var(--danger);
+  --color-warning: var(--warning);
+
+  --font-sans: var(--font-ui);
+  --font-mono: var(--font-mono);
+}
+
+@layer base {
+  * {
+    border-color: var(--hairline);
+  }
+
+  html,
+  body,
+  #root {
+    height: 100%;
+    margin: 0;
+  }
+
+  body {
+    background: var(--canvas);
+    color: var(--ink);
+    font-family: var(--font-ui);
+    font-size: 13px;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+    overflow: hidden;
+    user-select: none;
+    cursor: default;
+  }
+
+  :focus-visible {
+    outline: none;
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 25%, transparent);
+    border-radius: var(--radius-sm);
+  }
+
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    background: var(--hairline-strong);
+    border-radius: var(--radius-pill);
+    border: 2px solid var(--canvas);
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    background: var(--hairline-tertiary);
+  }
+}
+
+@layer components {
+  [cmdk-group-heading] {
+    padding: 6px 8px 4px;
+    font-size: 11px;
+    font-weight: 500;
+    letter-spacing: 0.4px;
+    color: var(--ink-tertiary);
+  }
+
+  [cmdk-item] {
+    display: flex;
+    height: 32px;
+    cursor: pointer;
+    align-items: center;
+    gap: 8px;
+    border-radius: var(--radius-sm);
+    padding: 0 8px;
+    font-size: 13px;
+    color: var(--ink-muted);
+  }
+
+  [cmdk-item][data-selected='true'] {
+    background: var(--surface-3);
+    color: var(--ink);
+  }
+}

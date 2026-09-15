@@ -1,0 +1,11 @@
+# 统一用 LF 落盘。
+#
+# 仓库里有 tools/*.sh，Windows 下 core.autocrlf 会把它们检出成 CRLF，
+# Git Bash 执行时会报 `/bin/bash^M: bad interpreter`，构建脚本直接废掉。
+# .gitattributes 优先级高于 core.autocrlf，这里锁死 LF。
+* text=auto eol=lf
+
+# 二进制不要做任何转换
+*.png binary
+*.ico binary
+*.icns binary

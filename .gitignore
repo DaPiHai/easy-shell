@@ -1,0 +1,21 @@
+node_modules/
+node_modules.bak/
+.pnpm-store/
+dist/
+dist.bak/
+.vite/
+
+src-tauri/target/
+src-tauri/gen/
+
+*.log
+.DS_Store
+Thumbs.db
+desktop.ini
+
+.env
+.env.local
+
+# WorkBuddy 的工具数据（会话日志、ui.sh 的截图产物）
+.workbuddy/
+.workbuddy-ai/

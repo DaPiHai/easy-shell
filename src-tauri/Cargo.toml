@@ -1,0 +1,43 @@
+[package]
+name = "easy-shell"
+version = "0.1.0"
+description = "A minimal SSH and SFTP client"
+edition = "2021"
+rust-version = "1.77.2"
+
+[lib]
+name = "easy_shell_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+# 选私钥文件用的原生文件对话框
+tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+russh = { version = "0.63.3", default-features = false, features = ["flate2", "ring", "rsa"] }
+tokio = { version = "1.53.1", features = ["full"] }
+base64 = "0.23.1"
+uuid = { version = "1.20.0", features = ["v4"] }
+rusqlite = { version = "0.40.2", features = ["bundled"] }
+argon2 = "0.5.3"
+aes-gcm = "0.10.3"
+rand = "0.9.5"
+dirs = "7.0.0"
+russh-sftp = "3.0.0"
+portable-pty = "0.9.0"
+
+[dev-dependencies]
+# russh 0.63 依赖 rand 0.10，而主代码用的是 0.9，两边 semver 不兼容只能并存。
+# 测试里生成临时 host key 需要它，所以单独引一份并改名
+rand10 = { package = "rand", version = "0.10", features = ["thread_rng"] }
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+panic = "abort"
+strip = true

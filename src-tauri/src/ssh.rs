@@ -1,0 +1,491 @@
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
+
+use base64::engine::general_purpose::STANDARD as B64;
+use base64::Engine as _;
+use russh::client::{self, AuthResult, Config, Handle, Handler};
+use russh::ChannelMsg;
+
+use crate::batcher::FrameBatcher;
+use crate::known_hosts::{take_mismatch, KeyCheck, KnownHosts};
+use serde::{Deserialize, Serialize};
+use tauri::ipc::Channel as IpcChannel;
+use tauri::State;
+use tokio::sync::{mpsc, Mutex};
+use uuid::Uuid;
+
+const POLL_TIMEOUT: Duration = Duration::from_millis(20);
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConnectConfig {
+    pub host: String,
+    #[serde(default = "default_port")]
+    pub port: u16,
+    pub username: String,
+    pub password: Option<String>,
+    pub private_key_path: Option<String>,
+    pub passphrase: Option<String>,
+}
+
+fn default_port() -> u16 {
+    22
+}
+
+/// 前端兜底用的标记。
+///
+/// Tauri 把 `Err` 传回去时，理论上保留我们序列化的对象，但万一哪天被压成
+/// 字符串，前端还能靠这个前缀认出"是密钥不匹配"，不至于退化成一句没救的红字。
+pub const MISMATCH_MARK: &str = "__HOST_KEY_MISMATCH__";
+
+/// 建连失败的原因。
+///
+/// 为什么要分类型而不是一律 String：主机密钥不匹配时前端必须能给出
+/// "忘掉旧密钥并重连"这个补救动作。只甩一句红字的话，用户连一台重装过的
+/// 服务器都再也连不上 —— 除非手动去删 known_hosts 文件。
+#[derive(Debug, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ConnectError {
+    /// 主机密钥变了：可能是中间人，也可能是服务器重装了
+    HostKeyMismatch { host: String, detail: String },
+    /// 其余情况，前端把 message 显示出来就行
+    Other { message: String },
+}
+
+impl ConnectError {
+    pub fn other(message: impl Into<String>) -> Self {
+        ConnectError::Other {
+            message: message.into(),
+        }
+    }
+}
+
+impl std::fmt::Display for ConnectError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ConnectError::HostKeyMismatch { host, detail } => {
+                write!(f, "{MISMATCH_MARK} {host}\n{detail}")
+            }
+            ConnectError::Other { message } => f.write_str(message),
+        }
+    }
+}
+
+/// 连接时要记住"这仗打的是谁"，check_server_key 才知道该查哪条记录
+pub struct ClientHandler {
+    host_key: String,
+}
+
+impl Handler for ClientHandler {
+    type Error = russh::Error;
+
+    async fn check_server_key(
+        &mut self,
+        key: &russh::keys::PublicKeyOrCertificate,
+    ) -> Result<bool, Self::Error> {
+        // known_hosts 没初始化（比如集成测试）就退回全盘接受
+        let Some(known) = KnownHosts::global() else {
+            return Ok(true)
+        };
+
+        // 证书那条路返回的是 &KeyData，跟 &PublicKey 不是一回事，得转成同一种类型
+        let key: russh::keys::PublicKey = match key {
+            russh::keys::PublicKeyOrCertificate::PublicKey { key, .. } => key.clone(),
+            russh::keys::PublicKeyOrCertificate::Certificate(cert) => {
+                cert.public_key().clone().into()
+            }
+        };
+        let Ok(openssh) = key.to_openssh() else {
+            return Ok(true)
+        };
+
+        match known.check(&self.host_key, &openssh) {
+            KeyCheck::Matches => Ok(true),
+            KeyCheck::Unknown => {
+                // TOFU：第一次见就记下并放行
+                if let Err(e) = known.add(&self.host_key, &openssh) {
+                    eprintln!("写入 known_hosts 失败: {e}");
+                }
+                Ok(true)
+            }
+            KeyCheck::Mismatch { expected } => {
+                // 密钥变了。要么服务器重装了，要么有人在中间 —— 两种情况都该拦一下
+                eprintln!(
+                    "警告：{} 的主机密钥变了！\n  记录的是: {}\n  现在收到: {}\n\
+                     如果确认服务器重装过，删掉 known_hosts 里这一行再连。",
+                    self.host_key, expected, openssh
+                );
+                Ok(false)
+            }
+        }
+    }
+}
+
+enum ShellCmd {
+    Input(Vec<u8>),
+    Resize { cols: u32, rows: u32 },
+    Close,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(tag = "type")]
+pub enum ShellEvent {
+    #[serde(rename = "data")]
+    Data { data: String },
+    #[serde(rename = "error")]
+    Error { message: String },
+    #[serde(rename = "closed")]
+    Closed,
+}
+
+pub(crate) struct SessionEntry {
+    /// Arc 包一层，好让端口转发之类的长任务 clone 出去自己用
+    pub(crate) handle: Arc<Mutex<Handle<ClientHandler>>>,
+    /// 保存连接参数，断线后用它自动重连
+    config: ConnectConfig,
+}
+
+#[derive(Default)]
+pub struct SshState {
+    pub(crate) sessions: Mutex<HashMap<String, SessionEntry>>,
+    /// Arc 包一层：shell 任务结束时得自己把通道摘掉，否则会漏（见 ssh_open_shell）
+    channels: Arc<Mutex<HashMap<u32, mpsc::UnboundedSender<ShellCmd>>>>,
+    channel_owners: Arc<Mutex<HashMap<u32, String>>>,
+    next_channel_id: AtomicU32,
+}
+
+/// 建连 + 认证。抽成 pub 是为了让集成测试能直接打真实 SSH 服务端验证这条链路
+pub async fn connect_and_auth(config: &ConnectConfig) -> Result<Handle<ClientHandler>, ConnectError> {
+    // keepalive 这里**刻意不开**。
+    //
+    // 开着的代价：russh 的 alive_timeouts 只在收到服务端数据时才清零，一旦对方
+    // 不回 keepalive@openssh.com（不少非 OpenSSH 的设备是静默忽略的），
+    // 一个空闲几分钟的终端会被判 KeepaliveTimeout 直接掐断 —— 正在跑的东西就没了。
+    // 误杀的代价远大于"探出半开连接"的收益，所以默认关。
+    // TODO: 真要做半开检测，应该做成连接级可配项，并且只在用户显式开启时才发。
+    let cfg = Arc::new(Config::default());
+
+    let addr = (config.host.as_str(), config.port);
+
+    let handler = ClientHandler {
+        host_key: format!("{}:{}", config.host, config.port),
+    };
+    // 主机密钥不匹配时 russh 只给个通用错误，把详情捞出来拼上
+    let handle = match client::connect(cfg, addr, handler).await {
+        Ok(h) => h,
+        Err(e) => {
+            return Err(match take_mismatch() {
+                Some(detail) => ConnectError::HostKeyMismatch {
+                    host: format!("{}:{}", config.host, config.port),
+                    detail,
+                },
+                None => ConnectError::other(format!(
+                    "连接 {}:{} 失败: {e}",
+                    config.host, config.port
+                )),
+            });
+        }
+    };
+    let mut handle = handle;
+
+    if let Some(password) = &config.password {
+        let result = handle
+            .authenticate_password(config.username.as_str(), password.as_str())
+            .await
+            .map_err(|e| ConnectError::other(format!("认证失败: {e}")))?;
+        match result {
+            AuthResult::Success => {}
+            _ => return Err(ConnectError::other("密码认证被拒绝")),
+        }
+    } else if let Some(path) = &config.private_key_path {
+        let key = russh::keys::load_secret_key(path, config.passphrase.as_deref())
+            .map_err(|e| ConnectError::other(format!("读取私钥失败: {e}")))?;
+        let with_alg = russh::keys::PrivateKeyWithHashAlg::new(Arc::new(key), None);
+        let result = handle
+            .authenticate_publickey(config.username.as_str(), with_alg)
+            .await
+            .map_err(|e| ConnectError::other(format!("密钥认证失败: {e}")))?;
+        match result {
+            AuthResult::Success => {}
+            _ => return Err(ConnectError::other("密钥认证被拒绝")),
+        }
+    } else {
+        return Err(ConnectError::other("必须提供密码或私钥"));
+    }
+
+    Ok(handle)
+}
+
+/// 通知并清掉属于某个会话的所有 shell 通道
+async fn drop_channels(state: &SshState, session_id: &str) {
+    let mut channels = state.channels.lock().await;
+    let mut owners = state.channel_owners.lock().await;
+    let owned: Vec<u32> = owners
+        .iter()
+        .filter(|(_, owner)| owner.as_str() == session_id)
+        .map(|(id, _)| *id)
+        .collect();
+    for id in owned {
+        if let Some(tx) = channels.remove(&id) {
+            let _ = tx.send(ShellCmd::Close);
+        }
+        owners.remove(&id);
+    }
+}
+
+/// 关掉单个 shell 通道 + 回收 channelId。
+/// 如果这个 session 名下再没有别的通道了，整个 SSH 连接也一起断掉。
+async fn drop_one_channel(state: &SshState, channel_id: u32) -> Option<String> {
+    let tx = state.channels.lock().await.remove(&channel_id);
+    if let Some(tx) = tx {
+        let _ = tx.send(ShellCmd::Close);
+    }
+    let owner = state.channel_owners.lock().await.remove(&channel_id)?;
+    // 数一下这个 session 还剩几条通道 —— 没了就连锅端掉，免得资源漏
+    let still_has_channels = state
+        .channel_owners
+        .lock()
+        .await
+        .values()
+        .any(|s| s == &owner);
+    if !still_has_channels {
+        if let Some(entry) = state.sessions.lock().await.remove(&owner) {
+            let handle = entry.handle.lock().await;
+            let _ = handle
+                .disconnect(russh::Disconnect::ByApplication, "", "en")
+                .await;
+        }
+    }
+    Some(owner)
+}
+
+#[tauri::command]
+pub async fn ssh_connect(
+    state: State<'_, SshState>,
+    config: ConnectConfig,
+) -> Result<String, ConnectError> {
+    let handle = connect_and_auth(&config).await?;
+
+    let id = Uuid::new_v4().to_string();
+    state.sessions.lock().await.insert(
+        id.clone(),
+        SessionEntry {
+            handle: Arc::new(Mutex::new(handle)),
+            config,
+        },
+    );
+
+    Ok(id)
+}
+
+/// 用保存的参数重新连接，替换掉已经失效的 handle。前端拿到成功结果后
+/// 再调一次 ssh_open_shell 即可恢复终端。
+#[tauri::command]
+pub async fn ssh_reconnect(state: State<'_, SshState>, session_id: String) -> Result<(), ConnectError> {
+    let config = {
+        let sessions = state.sessions.lock().await;
+        sessions
+            .get(&session_id)
+            .ok_or_else(|| ConnectError::other("会话不存在，无法重连"))?
+            .config
+            .clone()
+    };
+
+    drop_channels(&state, &session_id).await;
+    let handle = connect_and_auth(&config).await?;
+
+    let sessions = state.sessions.lock().await;
+    if let Some(entry) = sessions.get(&session_id) {
+        let mut guard = entry.handle.lock().await;
+        *guard = handle;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn ssh_open_shell(
+    state: State<'_, SshState>,
+    session_id: String,
+    cols: u32,
+    rows: u32,
+    on_data: IpcChannel<ShellEvent>,
+) -> Result<u32, String> {
+    let mut channel = {
+        let sessions = state.sessions.lock().await;
+        let entry = sessions.get(&session_id).ok_or("会话不存在或已断开")?;
+        let handle = entry.handle.lock().await;
+        handle
+            .channel_open_session()
+            .await
+            .map_err(|e| format!("打开会话通道失败: {e}"))?
+    };
+
+    channel
+        .request_pty(true, "xterm-256color", cols, rows, 0, 0, &[])
+        .await
+        .map_err(|e| format!("请求 PTY 失败: {e}"))?;
+    channel
+        .request_shell(true)
+        .await
+        .map_err(|e| format!("请求 shell 失败: {e}"))?;
+
+    let (tx, mut rx) = mpsc::unbounded_channel::<ShellCmd>();
+    let channel_id = state.next_channel_id.fetch_add(1, Ordering::SeqCst);
+    state.channels.lock().await.insert(channel_id, tx);
+    state
+        .channel_owners
+        .lock()
+        .await
+        .insert(channel_id, session_id);
+
+    // 让 shell 任务能在自己退出时把通道摘掉
+    let channels = state.channels.clone();
+    let owners = state.channel_owners.clone();
+
+    tauri::async_runtime::spawn(async move {
+        let mut batch = FrameBatcher::new();
+        // batch 当参数传而不是捕获进来：不然可变借用会跟下面的 push 打架
+        let flush = |batch: &mut FrameBatcher| {
+            if let Some(frame) = batch.take() {
+                let _ = on_data.send(ShellEvent::Data {
+                    data: B64.encode(&frame[..]),
+                });
+            }
+        };
+
+        loop {
+            while let Ok(cmd) = rx.try_recv() {
+                match cmd {
+                    ShellCmd::Input(bytes) => {
+                        if let Err(e) = channel.data(&bytes[..]).await {
+                            flush(&mut batch);
+                            let _ = on_data.send(ShellEvent::Error {
+                                message: format!("写入失败: {e}"),
+                            });
+                            return;
+                        }
+                    }
+                    ShellCmd::Resize { cols, rows } => {
+                        let _ = channel.window_change(cols, rows, 0, 0).await;
+                    }
+                    ShellCmd::Close => {
+                        flush(&mut batch);
+                        let _ = channel.close().await;
+                        return;
+                    }
+                }
+            }
+
+            if batch.ready() {
+                flush(&mut batch);
+            }
+
+            match tokio::time::timeout(POLL_TIMEOUT, channel.wait()).await {
+                Ok(Some(ChannelMsg::Data { data })) => batch.push(&data[..]),
+                Ok(Some(ChannelMsg::ExtendedData { data, .. })) => batch.push(&data[..]),
+                Ok(Some(ChannelMsg::ExitStatus { .. })) => {}
+                Ok(Some(ChannelMsg::Eof | ChannelMsg::Close)) => {
+                    // 退出前把攒着的尾巴发出去，别丢最后几个字节
+                    flush(&mut batch);
+                    let _ = on_data.send(ShellEvent::Closed);
+                    break;
+                }
+                Ok(Some(_)) => {}
+                Ok(None) => {
+                    flush(&mut batch);
+                    let _ = on_data.send(ShellEvent::Closed);
+                    break;
+                }
+                // 超时说明这一轮没数据了，攒着的发掉，别让用户干等下一帧
+                Err(_) => flush(&mut batch),
+            }
+        }
+        let _ = channel.close().await;
+
+        // 通道已经结束了，把自己从表里摘掉。
+        //
+        // 不摘的后果有两个：
+        // 1. 断线重连会分配新的 channel_id，旧的永远留在表里 —— 纯泄漏
+        // 2. 更要命的是 drop_one_channel 靠"这个 session 还剩几条通道"来决定
+        //    要不要断 SSH，数到这些死条目就会以为还有通道在，于是关了标签
+        //    也不关连接 —— 进程和 TCP 一直挂在后台
+        channels.lock().await.remove(&channel_id);
+        owners.lock().await.remove(&channel_id);
+    });
+
+    Ok(channel_id)
+}
+
+#[tauri::command]
+pub async fn ssh_input(
+    state: State<'_, SshState>,
+    channel_id: u32,
+    data: String,
+) -> Result<(), String> {
+    let channels = state.channels.lock().await;
+    let tx = channels.get(&channel_id).ok_or("通道不存在")?;
+    tx.send(ShellCmd::Input(data.into_bytes()))
+        .map_err(|e| format!("发送输入失败: {e}"))
+}
+
+#[tauri::command]
+pub async fn ssh_resize(
+    state: State<'_, SshState>,
+    channel_id: u32,
+    cols: u32,
+    rows: u32,
+) -> Result<(), String> {
+    let channels = state.channels.lock().await;
+    let tx = channels.get(&channel_id).ok_or("通道不存在")?;
+    tx.send(ShellCmd::Resize { cols, rows })
+        .map_err(|e| format!("调整尺寸失败: {e}"))
+}
+
+#[tauri::command]
+pub async fn ssh_close(state: State<'_, SshState>, session_id: String) -> Result<(), String> {
+    drop_channels(&state, &session_id).await;
+
+    if let Some(entry) = state.sessions.lock().await.remove(&session_id) {
+        let handle = entry.handle.lock().await;
+        let _ = handle
+            .disconnect(russh::Disconnect::ByApplication, "", "en")
+            .await;
+    }
+    Ok(())
+}
+
+/// 只关一个标签自己的 shell 通道，**不影响共用同一个 SSH session 的兄弟标签**。
+/// 这是关标签的正常路径 —— `ssh_close` 是"我主动想断掉整条 SSH"才用。
+#[tauri::command]
+pub async fn ssh_close_channel(state: State<'_, SshState>, channel_id: u32) -> Result<(), String> {
+    drop_one_channel(&state, channel_id).await;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 前端的 parseConnectError 靠这个前缀兜底（万一 Tauri 把 Err 压成字符串），
+    /// 格式不能随便改
+    #[test]
+    fn mismatch_的文本带可识别标记() {
+        let e = ConnectError::HostKeyMismatch {
+            host: "1.2.3.4:22".to_string(),
+            detail: "记录: AAAA\n收到: BBBB".to_string(),
+        };
+        let text = e.to_string();
+        assert!(text.starts_with(MISMATCH_MARK), "缺了兜底标记: {text}");
+        assert!(text.contains("1.2.3.4:22"), "host 没进文本: {text}");
+        assert!(text.contains("BBBB"), "detail 没进文本: {text}");
+    }
+
+    #[test]
+    fn 普通错误不带标记() {
+        let text = ConnectError::other("密码认证被拒绝").to_string();
+        assert!(!text.starts_with(MISMATCH_MARK));
+        assert_eq!(text, "密码认证被拒绝");
+    }
+}

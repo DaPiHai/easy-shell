@@ -1,0 +1,97 @@
+/* Linear-inspired design tokens — 来源 design-md/linear.app */
+
+:root {
+  --canvas: #010102;
+  --surface-1: #0f1011;
+  --surface-2: #141516;
+  --surface-3: #18191a;
+  --surface-4: #191a1b;
+
+  --hairline: #23252a;
+  --hairline-strong: #34343a;
+  --hairline-tertiary: #3e3e44;
+
+  --ink: #f7f8f8;
+  --ink-muted: #d0d6e0;
+  --ink-subtle: #8a8f98;
+  --ink-tertiary: #62666d;
+
+  --accent: #5e6ad2;
+  --accent-hover: #828fff;
+  --accent-focus: #5e69d1;
+  --on-accent: #ffffff;
+
+  --success: #27a644;
+  --danger: #e5484d;
+  --warning: #e2a03f;
+
+  --font-ui: Inter, system-ui, -apple-system, 'Segoe UI', 'Microsoft YaHei UI',
+    'Microsoft YaHei', sans-serif;
+  --font-mono: 'JetBrains Mono', 'Cascadia Code', 'Cascadia Mono', Consolas,
+    'Microsoft YaHei Mono', monospace;
+
+  --radius-xs: 4px;
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --radius-xl: 16px;
+  --radius-pill: 9999px;
+
+  /* terminal ansi 16 */
+  --term-bg: #010102;
+  --term-fg: #d0d6e0;
+  --term-cursor: #5e6ad2;
+  --term-black: #0f1011;
+  --term-red: #e5484d;
+  --term-green: #3dd68c;
+  --term-yellow: #e2a03f;
+  --term-blue: #5e6ad2;
+  --term-magenta: #a855f7;
+  --term-cyan: #3ddbd9;
+  --term-white: #d0d6e0;
+  --term-bright-black: #62666d;
+  --term-bright-red: #ff6369;
+  --term-bright-green: #56e39f;
+  --term-bright-yellow: #ffb224;
+  --term-bright-blue: #828fff;
+  --term-bright-magenta: #c084fc;
+  --term-bright-cyan: #56e1e1;
+  --term-bright-white: #f7f8f8;
+}
+
+[data-theme='light'] {
+  --canvas: #ffffff;
+  --surface-1: #f5f6f6;
+  --surface-2: #f6f7f7;
+  --surface-3: #eceef0;
+  --surface-4: #e3e5e8;
+
+  --hairline: #e3e4e6;
+  --hairline-strong: #d0d2d5;
+  --hairline-tertiary: #b8bbc0;
+
+  --ink: #000000;
+  --ink-muted: #3d3d3d;
+  --ink-subtle: #6b6f76;
+  --ink-tertiary: #8a8f98;
+
+  --term-bg: #ffffff;
+  --term-fg: #3d3d3d;
+  --term-cursor: #5e6ad2;
+  --term-black: #1a1a1a;
+  --term-red: #d1344e;
+  --term-green: #1a7f37;
+  --term-yellow: #9a6700;
+  --term-blue: #185fa5;
+  --term-magenta: #8250df;
+  --term-cyan: #096d74;
+  --term-white: #6b6f76;
+  --term-bright-black: #8a8f98;
+  --term-bright-red: #b3263a;
+  --term-bright-green: #14682c;
+  --term-bright-yellow: #7d5600;
+  --term-bright-blue: #22458a;
+  --term-bright-magenta: #6b3fc4;
+  --term-bright-cyan: #07575d;
+  --term-bright-white: #000000;
+}
