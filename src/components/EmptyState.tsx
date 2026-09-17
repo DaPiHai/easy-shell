@@ -1,4 +1,4 @@
-import { Terminal } from 'lucide-react'
+import { Lock, Terminal } from 'lucide-react'
 import { useApp } from '@/lib/store'
 
 const isMac = navigator.platform.toLowerCase().includes('mac')
@@ -44,7 +44,7 @@ export function EmptyState() {
 }
 
 export function StatusBar() {
-  const { theme, toggleTheme, tabs, activeTabId } = useApp()
+  const { theme, toggleTheme, tabs, activeTabId, lockVault } = useApp()
   // 写死"未连接"是纯假信息 —— 至少把当前这个标签是什么说清楚
   const active = tabs.find((t) => t.id === activeTabId)
   const kindLabel = !active
@@ -68,6 +68,14 @@ export function StatusBar() {
         </span>
       </div>
       <div className="flex items-center gap-3">
+        <button
+          onClick={() => void lockVault()}
+          className="flex items-center gap-1 transition-colors hover:text-ink"
+          title="锁定密钥库并关闭所有连接"
+        >
+          <Lock size={11} />
+          锁定
+        </button>
         <button
           onClick={toggleTheme}
           className="transition-colors hover:text-ink"

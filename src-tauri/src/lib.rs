@@ -34,8 +34,8 @@ pub fn run() {
             ssh::ssh_open_shell,
             ssh::ssh_input,
             ssh::ssh_resize,
-            // 前端目前不调它（关标签走 ssh_close_channel，避免带死兄弟标签），
-            // 但它是「关闭这台主机的全部标签」的现成后端，保留并在校验脚本里开了白名单
+            // 整条会话连锅端。只给「锁定密钥库」用：平时关标签走 ssh_close_channel，
+            // 用这个会把共用同一条 SSH 的兄弟标签一起带死
             ssh::ssh_close,
             ssh::ssh_close_channel,
             known_hosts::known_hosts_forget,

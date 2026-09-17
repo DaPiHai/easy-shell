@@ -4,6 +4,7 @@ import {
   Columns,
   FileCode2,
   FolderOpen,
+  Lock,
   Plus,
   ScrollText,
   SunMoon,
@@ -171,6 +172,19 @@ export function CommandPalette() {
               >
                 <SunMoon size={14} />
                 切换到{theme === 'dark' ? '浅色' : '深色'}主题
+              </Command.Item>
+            </Command.Group>
+
+            <Command.Group heading="安全">
+              <Command.Item
+                onSelect={() => {
+                  close()
+                  void useApp.getState().lockVault()
+                }}
+              >
+                <Lock size={14} />
+                锁定密钥库
+                <span className="ml-auto text-[11px] text-ink-tertiary">关闭所有连接</span>
               </Command.Item>
             </Command.Group>
           </Command.List>

@@ -63,6 +63,7 @@ React 前端  ──Tauri IPC(invoke + Channel)──  Rust 核心  ──russh 
 | 文件 | 内容 |
 | --- | --- |
 | `PLAN.md` | 产品决策、里程碑与进度、风险与对策，**动架构前必读** |
-| `DESIGN.md` | Linear 设计系统落地（色板、圆角、间距、终端配色），**改 UI 前必读** |
+| `TODO.md` | 已完成之外的功能缺口，按优先级排序（唯一待办清单） |
+| `DESIGN.md` | Linear 设计系统落地（从 Linear 抽取的 token），**改 UI 前必读** |
 | `AGENTS.md` | 给 AI 助手的工作指引：命令、模块职责、高危坑位 |
 | `CODEBUDDY.md` | 同上但更详细的历史坑位清单 |

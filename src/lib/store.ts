@@ -11,6 +11,7 @@ import {
   hostsDelete,
   hostsList,
   hostsSave,
+  sshClose,
   vaultLock,
   vaultSetup,
   vaultStatus,
@@ -250,9 +251,31 @@ export const useApp = create<AppState>((set, get) => ({
     }
   },
 
+  /**
+   * 锁定密钥库。
+   *
+   * 不只是「回到解锁界面」：锁了库还把已认证的连接留在后端，等于门锁了人还在屋里 ——
+   * 会话在界面上消失了，服务端却仍占着槽位（sshd 默认 MaxSessions 10），
+   * 何况它本来就是用这把现在已被清掉的钥匙开的。
+   *
+   * 标签卸载时各自会关掉自己的通道，但那一步只覆盖「有 shell 通道的」标签：
+   * 连上了却没开出终端的会话（open_shell 失败、或只开了 SFTP 的）会留在后端，
+   * 所以锁完再按 sessionId 逐条明确断开。
+   *
+   * 顺序是刻意的：先清标签再收连接。反过来的话，终端还挂着时会收到 closed 事件
+   * 去走重连流程，凭空制造一次竞态。
+   */
   lockVault: async () => {
+    const sessionIds = [
+      ...new Set(
+        get()
+          .tabs.map((t) => t.sessionId)
+          .filter((id): id is string => !!id),
+      ),
+    ]
     await vaultLock()
     set({ phase: 'locked', hosts: [], groups: [], tabs: [], activeTabId: null })
+    for (const id of sessionIds) void sshClose(id)
   },
 
   hosts: [],

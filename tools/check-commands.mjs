@@ -26,17 +26,13 @@ import { fileURLToPath } from 'node:url'
 const root = fileURLToPath(new URL('..', import.meta.url))
 
 /**
- * 刻意不调用、但也不该删的命令。
+ * 刻意保留、暂时没有调用点的命令。
  *
  * 每一项都必须写清理由 —— 这个白名单是「已知的例外」，不是「暂时眼不见为净」。
+ * 现在它是空的：曾经的 `sshClose` 已经用上了（锁定密钥库时统一收连接），
+ * 留着白名单会掩盖它又变回死命令。
  */
-const ALLOW_UNUSED = new Map([
-  [
-    'sshClose',
-    '关标签只关自己那条通道（sshCloseChannel），调它会带死共用 SSH 的兄弟标签；' +
-      '保留给还没做的「关闭这台主机的全部标签」',
-  ],
-])
+const ALLOW_UNUSED = new Map([])
 
 const read = (p) => readFileSync(join(root, p), 'utf8')
 

@@ -134,10 +134,8 @@ export function sshResize(channelId: number, cols: number, rows: number): Promis
 /**
  * 关掉整条 SSH 会话（连带它名下所有通道）。
  *
- * **目前没有任何地方调用它，这是故意的**：关标签只该关自己那条通道，用
- * `sshCloseChannel`；调这个会把共用同一条 SSH 的兄弟标签一起带死。
- * 留着是因为「关闭这台主机的全部标签」需要它 —— 那是个还没做的功能。
- * tools/check-commands.mjs 里为它开了白名单，别当成死命令删掉。
+ * **只该在锁定密钥库时用它**（`store.lockVault` 统一收连接）。
+ * 平时关标签只能用 `sshCloseChannel` —— 调这个会把共用同一条 SSH 的兄弟标签一起带死。
  */
 export function sshClose(sessionId: string): Promise<void> {
   return invoke<void>('ssh_close', { sessionId })
