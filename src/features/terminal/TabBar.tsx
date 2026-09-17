@@ -101,8 +101,15 @@ export function TabBar() {
                 requestCloseTab(tab.id)
               }}
             />
+            {/*
+              高亮线必须用 inset-x-0 卡住左右两边，**别写成 w-full**：
+              绝对定位子元素的 left 是 auto，此时它取的是 flex 容器内容盒的起点，
+              于是整条线被 padding-left 顶到右边去了（宽 100% 算的却是 padding 盒，
+              结果左边差 12px、右边又多探出去 12px，正好压在隔壁）。inset-x-0 两头对齐，
+              宽度由包含块直接算出，跟 padding 无关。
+            */}
             {active && (
-              <span className="absolute bottom-0 h-0.5 w-full bg-accent" aria-hidden />
+              <span className="absolute inset-x-0 bottom-0 h-0.5 bg-accent" aria-hidden />
             )}
           </div>
         )
