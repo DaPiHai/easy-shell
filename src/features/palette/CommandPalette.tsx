@@ -6,6 +6,8 @@ import {
   FolderOpen,
   FolderPlus,
   Lock,
+  PanelLeftClose,
+  PanelLeftOpen,
   Plus,
   RotateCcw,
   ScrollText,
@@ -29,6 +31,7 @@ export function CommandPalette() {
     termScheme,
     setTermScheme,
     customSchemes,
+    sidebarCollapsed,
     setConnectOpen,
     setTunnelOpen,
     setSnippetsOpen,
@@ -96,6 +99,18 @@ export function CommandPalette() {
             </Command.Group>
 
             <Command.Group heading="视图">
+              <Command.Item
+                // cmdk 只按条目文字过滤，不写 keywords 的话搜「侧栏」「收起」都找不到它
+                keywords={['侧栏', '侧边栏', '会话树', '收起', '展开', '布局', 'sidebar']}
+                onSelect={() => {
+                  useApp.getState().toggleSidebar()
+                  close()
+                }}
+              >
+                {sidebarCollapsed ? <PanelLeftOpen size={14} /> : <PanelLeftClose size={14} />}
+                {sidebarCollapsed ? '展开会话侧栏' : '收起会话侧栏'}
+                <span className="ml-auto text-[11px] text-ink-tertiary">Ctrl Shift B</span>
+              </Command.Item>
               <Command.Item
                 onSelect={() => {
                   useApp.getState().bumpTermFontSize(1)

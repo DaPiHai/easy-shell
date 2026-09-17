@@ -37,6 +37,18 @@ export default function App() {
         setConnectOpen(!connectOpen)
         return
       }
+      /**
+       * Ctrl+Shift+B 收起/展开会话侧栏（VS Code 的肌肉记忆；mac 上是 Cmd+Shift+B）。
+       *
+       * 跟 Ctrl+W 不同，这条**不看焦点在哪**：它管的是窗口布局，不是文本编辑，
+       * 终端里敲 Ctrl+Shift+B 也只是把 Ctrl+B 重复一遍（readline 里是"后退一个字符"，
+       * 没人会用带 Shift 的那版），犯不着为它让路。
+       */
+      if ((e.metaKey || e.ctrlKey) && e.shiftKey && !e.altKey && e.key.toLowerCase() === 'b') {
+        e.preventDefault()
+        useApp.getState().toggleSidebar()
+        return
+      }
       if (e.key === 'Escape') {
         // 所有自绘弹窗都要能被 Esc 关掉 —— 只关一部分的话，
         // 用户在端口转发/命令片段上按 Esc 会以为按键坏了

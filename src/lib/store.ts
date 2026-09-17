@@ -274,6 +274,15 @@ interface AppState {
   collapsed: Record<string, boolean>
   toggleGroup: (id: string) => void
 
+  /**
+   * 会话侧栏收没收起。
+   *
+   * 终端一开宽，左边 240px 就是纯浪费 —— 而侧栏只在一开始选主机时有用。
+   * 收起状态跟其他偏好一样持久化：这是"我平时怎么用"，不该每次启动重设。
+   */
+  sidebarCollapsed: boolean
+  toggleSidebar: () => void
+
   tabs: Tab[]
   activeTabId: string | null
   setActiveTab: (id: string) => void
@@ -574,6 +583,20 @@ export const useApp = create<AppState>((set, get) => ({
 
   collapsed: {},
   toggleGroup: (id) => set((s) => ({ collapsed: { ...s.collapsed, [id]: !s.collapsed[id] } })),
+
+  sidebarCollapsed: (() => {
+    try {
+      return localStorage.getItem('sidebarCollapsed') === '1'
+    } catch {
+      return false
+    }
+  })(),
+  toggleSidebar: () =>
+    set((s) => {
+      const next = !s.sidebarCollapsed
+      writeLocal('sidebarCollapsed', next ? '1' : '0')
+      return { sidebarCollapsed: next }
+    }),
 
   tabs: [],
   activeTabId: null,

@@ -5,6 +5,7 @@ import {
   FileCode2,
   FolderOpen,
   FolderPlus,
+  PanelLeftClose,
   Pencil,
   Plus,
   ScrollText,
@@ -37,6 +38,8 @@ export function SessionTree() {
     hosts,
     collapsed,
     toggleGroup,
+    sidebarCollapsed,
+    toggleSidebar,
     setConnectOpen,
     setSnippetsOpen,
     setTunnelOpen,
@@ -152,6 +155,9 @@ export function SessionTree() {
 
   const ungrouped = hosts.filter((h) => !h.groupId)
 
+  // 收起时整块不渲染：一块 0 宽的壳留着也没意义，回来有状态栏那个按钮
+  if (sidebarCollapsed) return null
+
   const renderHost = (host: HostRecord) => (
     <div
       key={host.id}
@@ -207,6 +213,14 @@ export function SessionTree() {
             title="新建会话"
           >
             <Plus size={14} />
+          </button>
+          {/* 收起侧栏。收起后入口在状态栏，这里只管关 */}
+          <button
+            onClick={toggleSidebar}
+            className="grid h-5 w-5 place-items-center rounded text-ink-subtle transition-colors hover:bg-surface-3 hover:text-ink"
+            title="收起侧栏（Ctrl+Shift+B）"
+          >
+            <PanelLeftClose size={14} />
           </button>
         </div>
       </div>

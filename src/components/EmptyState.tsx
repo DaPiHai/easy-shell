@@ -1,4 +1,4 @@
-import { FileCode2, Lock, SquareTerminal, Terminal } from 'lucide-react'
+import { FileCode2, Lock, PanelLeftClose, PanelLeftOpen, SquareTerminal, Terminal } from 'lucide-react'
 import { MAX_FONT_SIZE, MIN_FONT_SIZE, useApp } from '@/lib/store'
 import { SchemeMenu } from '@/features/settings/SchemeMenu'
 
@@ -6,7 +6,7 @@ const isMac = navigator.platform.toLowerCase().includes('mac')
 const modKey = isMac ? '⌘' : 'Ctrl'
 
 export function EmptyState() {
-  const { setPaletteOpen, setConnectOpen, openLocalFileDialog, addTab } = useApp()
+  const { setPaletteOpen, setConnectOpen, openLocalFileDialog, addTab, sidebarCollapsed } = useApp()
 
   const rowClass =
     'flex items-center gap-2 rounded px-2 py-1 transition-colors hover:bg-surface-1 hover:text-ink-muted'
@@ -20,11 +20,20 @@ export function EmptyState() {
           <Terminal size={20} className="text-ink-subtle" />
         </div>
         <p className="text-[14px] text-ink-muted">没有打开的会话</p>
+        {/* 侧栏收起时还写「从左侧选择主机」就是在指一个不存在的东西 */}
         <p className="mt-1 text-[12px] text-ink-subtle">
-          从左侧选择主机，或打开命令面板
+          {sidebarCollapsed ? '侧栏已收起，展开后选主机，或打开命令面板' : '从左侧选择主机，或打开命令面板'}
         </p>
 
         <div className="mx-auto mt-6 flex w-fit flex-col gap-2 text-[12px] text-ink-tertiary">
+          {/* 收起侧栏后空状态就是唯一的落点，这里补一条回去的路 */}
+          {sidebarCollapsed && (
+            <button onClick={() => useApp.getState().toggleSidebar()} className={rowClass}>
+              <PanelLeftOpen size={13} className="shrink-0" />
+              <span>展开会话侧栏</span>
+              <kbd className={kbdClass}>{modKey} ⇧ B</kbd>
+            </button>
+          )}
           <button onClick={() => setPaletteOpen(true)} className={rowClass}>
             <kbd className={kbdClass}>{modKey} K</kbd>
             <span>命令面板</span>
@@ -52,8 +61,17 @@ export function EmptyState() {
 }
 
 export function StatusBar() {
-  const { theme, toggleTheme, tabs, activeTabId, lockVault, termFontSize, bumpTermFontSize } =
-    useApp()
+  const {
+    theme,
+    toggleTheme,
+    tabs,
+    activeTabId,
+    lockVault,
+    termFontSize,
+    bumpTermFontSize,
+    sidebarCollapsed,
+    toggleSidebar,
+  } = useApp()
   // 写死"未连接"是纯假信息 —— 至少把当前这个标签是什么说清楚
   const active = tabs.find((t) => t.id === activeTabId)
   const kindLabel = !active
@@ -77,6 +95,18 @@ export function StatusBar() {
         </span>
       </div>
       <div className="flex items-center gap-3">
+        {/*
+          侧栏收起后这里就是唯一的常驻入口 —— 快捷键和命令面板都是"知道才用得上"的，
+          侧栏一没就再没有看得见的把手了。图标方向跟着当前状态走：现在开着就是往左收。
+        */}
+        <button
+          onClick={toggleSidebar}
+          className="flex items-center gap-1 transition-colors hover:text-ink"
+          title={`${sidebarCollapsed ? '展开' : '收起'}会话侧栏（Ctrl+Shift+B）`}
+        >
+          {sidebarCollapsed ? <PanelLeftOpen size={11} /> : <PanelLeftClose size={11} />}
+          侧栏
+        </button>
         {/* 字号以前只有 Ctrl+= / Ctrl+- / Ctrl+0 三个快捷键，界面上没有任何入口 */}
         <div className="flex items-center gap-1" title={`终端字号 ${termFontSize}px`}>
           <button
