@@ -26,6 +26,10 @@ export LIB="$MSVC_LIB;$SDK_UM;$SDK_UCRT"
 
 cd "$(dirname "$0")/.."
 
+# 先过命令面校验：后端注册、api.ts 包装、预览 mock 三方对齐。
+# 打包是交付前的最后一道门，死命令（注册了没人调 / 调了没注册）不该跟着安装包出去
+npm run check:commands
+
 # vite 配了 emptyOutDir:false，所以这里手动把旧产物挪走，避免历史文件混进安装包。
 # 备份固定叫 dist.bak 且只留上一版 —— 早先按时间戳命名，打几次包就堆一地目录
 if [ -d dist.bak ]; then

@@ -9,6 +9,7 @@
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
+    "check:commands": "node tools/check-commands.mjs",
     "tauri": "tauri"
   },
   "dependencies": {
