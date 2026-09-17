@@ -9,6 +9,9 @@
  * `npm run dev:web` 能在普通浏览器里把整个界面跑起来，截图就能看问题。
  */
 
+// 只借类型：`import type` 编译后被完全擦除，不会和 api.ts 形成运行时循环
+import type { TransferEvent } from './api'
+
 // ---- 假数据 ----------------------------------------------------------------
 
 const GROUPS = [
@@ -53,7 +56,25 @@ const HOSTS = [
     groupId: null,
     auth: { type: 'key' as const, privateKeyPath: 'C:\\Users\\hhdlj\\.ssh\\ops.pem' },
   },
+  {
+    id: 'h-5',
+    name: '老交换机',
+    address: '10.0.0.1',
+    port: 22,
+    username: 'admin',
+    groupId: 'g-intra',
+    auth: { type: 'password' as const, password: '' },
+  },
 ]
+
+/**
+ * 只认已废弃算法的假设备。
+ *
+ * 不勾兼容模式连它必然失败（返回真实的 algorithms_unsupported 形状），
+ * 勾了才放行 —— 这样老设备那条恢复路径在浏览器预览里也能整条跑通，
+ * 不用真去借一台老交换机。
+ */
+const OLD_DEVICE = '10.0.0.1'
 
 const SNIPPETS = [
   { id: 's-1', name: '看磁盘', command: 'df -h' },
@@ -166,8 +187,22 @@ export async function invoke<T>(cmd: string, args: Record<string, unknown> = {})
     case 'snippets_delete':
       return later(undefined as T)
 
-    case 'ssh_connect':
+    case 'ssh_connect': {
+      // 参数是 `{ config }`（见 api.ts 的 sshConnect），不是平铺的
+      const cfg = (args.config ?? {}) as { host?: string; compat?: boolean }
+      if (cfg.host === OLD_DEVICE && !cfg.compat) {
+        return Promise.reject({
+          kind: 'algorithms_unsupported',
+          compatHint: true,
+          message:
+            '算法协商失败：双方没有共同的密钥交换算法。\n' +
+            '服务端支持：diffie-hellman-group1-sha1\n' +
+            '我们支持：curve25519-sha256, ecdh-sha2-nistp256, diffie-hellman-group14-sha256\n' +
+            '这台设备可能比较老 —— 可以用兼容模式（放开 dh-group1/14-sha1 与 aes-cbc）再试一次。',
+        }) as Promise<T>
+      }
       return later('mock-session' as T)
+    }
     case 'ssh_reconnect':
       return later(undefined as T)
     case 'ssh_open_shell': {
@@ -178,6 +213,13 @@ export async function invoke<T>(cmd: string, args: Record<string, unknown> = {})
     case 'ssh_input':
     case 'ssh_resize':
     case 'ssh_close':
+    case 'ssh_close_channel':
+      return later(undefined as T)
+
+    case 'known_hosts_forget':
+      // 真后端会从 known_hosts 里删掉这一行。预览里没有文件可删，
+      // 但**必须显式返回**，否则落到 default 的 console.warn，
+      // 「忘掉旧密钥并重连」按钮会静默地假装成功
       return later(undefined as T)
 
     case 'local_open': {
@@ -204,6 +246,29 @@ export async function invoke<T>(cmd: string, args: Record<string, unknown> = {})
       return later(undefined as T)
     case 'sftp_read_text':
       return later(EDIT_CONTENT as T)
+
+    /**
+     * 传输。之前这两个命令没有 case，落到 default 直接 resolve(undefined)，
+     * 而 runTransfer 把「没报错」当成成功 —— 预览里传输会显示「完成但 0 字节」，
+     * 是个会骗人的假象。现在分几步把进度推出去，进度条真的会动。
+     */
+    case 'sftp_download':
+    case 'sftp_upload': {
+      const progress = args.onProgress as Channel<TransferEvent> | undefined
+      const total = 2_411_724
+      for (const ratio of [0.25, 0.6, 1]) {
+        setTimeout(
+          () =>
+            progress?.emit(
+              ratio < 1
+                ? { type: 'progress', transferred: Math.round(total * ratio), total }
+                : { type: 'done', transferred: total },
+            ),
+          DELAY * (1 + ratio * 8),
+        )
+      }
+      return later(undefined as T)
+    }
 
     case 'local_list':
       return later(LOCAL_FILES as T)
