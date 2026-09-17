@@ -83,6 +83,9 @@ const SNIPPETS = [
 ]
 
 const REMOTE_FILES = [
+  // 带上点文件：隐藏文件开关要有东西可藏，预览里才看得出效果
+  { name: '.ssh', path: '/home/hhdlj/.ssh', isDir: true, size: 0, modified: 1_784_500_000, mode: 'rwx------' },
+  { name: '.bashrc', path: '/home/hhdlj/.bashrc', isDir: false, size: 3_772, modified: 1_784_400_000, mode: 'rw-r--r--' },
   { name: 'app.log', path: '/home/hhdlj/app.log', isDir: false, size: 2_411_724, modified: 1_785_000_000, mode: 'rw-r--r--' },
   { name: 'deploy.sh', path: '/home/hhdlj/deploy.sh', isDir: false, size: 1_842, modified: 1_784_900_000, mode: 'rwxr-xr-x' },
   { name: 'notes.md', path: '/home/hhdlj/notes.md', isDir: false, size: 6_310, modified: 1_784_800_000, mode: 'rw-r--r--' },
