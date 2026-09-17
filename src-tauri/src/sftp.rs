@@ -7,7 +7,7 @@ use std::time::UNIX_EPOCH;
 
 use russh_sftp::client::SftpSession;
 use russh_sftp::protocol::OpenFlags;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::ipc::Channel as IpcChannel;
 use tauri::State;
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
@@ -37,8 +37,34 @@ pub enum TransferEvent {
     Progress { transferred: u64, total: u64 },
     #[serde(rename = "done")]
     Done { transferred: u64 },
+    /**
+     * 这个文件没传。
+     *
+     * 单独一种事件，是因为前端既不能把它算成失败，也不能像以前那样发个 progress
+     * 假装传过了 —— 用户需要知道「这次有几个文件其实没动、为什么没动」。
+     */
+    #[serde(rename = "skip")]
+    Skip { name: String, reason: String },
     #[serde(rename = "error")]
     Error { message: String },
+}
+
+/**
+ * 目标已存在时怎么办。
+ *
+ * 做成传输选项而不是逐文件弹窗：传输是串行循环，每碰到一个同名文件弹一次框会没法用。
+ * 放在 SFTP 面板上与「断点续传」并排，用户一眼能看到当前策略。
+ */
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub enum ConflictPolicy {
+    /// 直接覆盖（默认，与改造前行为一致）
+    #[default]
+    Overwrite,
+    /// 目标已存在就跳过，什么都不动
+    Skip,
+    /// 保留两者：目标改名成 `xxx (2)`，两边都留下
+    KeepBoth,
 }
 
 /**
@@ -242,6 +268,116 @@ struct Item {
     rel: String,
     size: u64,
     is_dir: bool,
+    /**
+     * 源端的最后修改时间（秒）。
+     *
+     * 判断目标那份是不是已经和源端一致时要用：只比大小会把「内容变了但大小没变」
+     * 误判成已传完，那样用户拿到的是一份旧的却显示成功。
+     */
+    modified: Option<u64>,
+}
+
+/// 从 SystemTime 取秒。拿不到（时钟异常、服务端没给 mtime）就是 None，判定时退回只比大小
+fn secs(t: std::io::Result<std::time::SystemTime>) -> Option<u64> {
+    t.ok()
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
+}
+
+/// 临时文件名：`<目标>.part`。
+///
+/// 它是「上次没传完」的**唯一凭据**。改造前是拿目标文件的大小去猜，结果把内容
+/// 完全不同的旧文件当成半截，从偏移处接着写，拼出一份谁都不认识的垃圾。
+fn part_path(target: &Path) -> PathBuf {
+    let mut s = target.as_os_str().to_os_string();
+    s.push(".part");
+    PathBuf::from(s)
+}
+
+/**
+ * 目标那份是不是已经和源端一致：大小相同，且目标不早于源端的修改时间。
+ *
+ * 只比大小不够 —— 源端改了内容但大小没变时会被误判成已传完，用户拿到的是一份
+ * 旧的却显示成功。取不到 mtime 就退回只比大小（比原来多一层保护，不会更差）。
+ */
+fn is_up_to_date(target_size: u64, target_mtime: Option<u64>, item: &Item) -> bool {
+    if target_size != item.size {
+        return false;
+    }
+    match (target_mtime, item.modified) {
+        (Some(target_t), Some(src_t)) => target_t >= src_t,
+        _ => true,
+    }
+}
+
+/**
+ * `.part` 是不是源文件的前缀（只比前 64KB）。
+ *
+ * 用来挡住「上次中断之后源文件被换掉了」：那种情况下按偏移续写会拼出一份
+ * 谁都不认识的混合体。只探前 64KB 是个刻意的折中 —— 把已传部分整个重读一遍
+ * 的代价比重新下一遍还大。
+ */
+const PREFIX_CHECK: usize = 64 * 1024;
+
+async fn part_is_prefix(tmp: &Path, src: &str, offset: u64, sftp: &SftpSession) -> bool {
+    let probe = offset.min(PREFIX_CHECK as u64) as usize;
+    let Ok(mut local) = tokio::fs::File::open(tmp).await else {
+        return false;
+    };
+    let mut local_buf = vec![0u8; probe];
+    if local.read_exact(&mut local_buf).await.is_err() {
+        return false;
+    }
+    let Ok(mut remote) = sftp.open(src).await else {
+        return false;
+    };
+    let mut remote_buf = vec![0u8; probe];
+    remote.read_exact(&mut remote_buf).await.is_ok() && remote_buf == local_buf
+}
+
+/// 上传侧的对称校验：远端 `.part` 的前 64KB 必须和本地源文件一致。
+/// 不然上次中断之后本地改了文件，续写会在服务端拼出一份混合体
+async fn remote_part_is_prefix(sftp: &SftpSession, tmp: &str, src: &str, offset: u64) -> bool {
+    let probe = offset.min(PREFIX_CHECK as u64) as usize;
+    let Ok(mut local) = tokio::fs::File::open(src).await else {
+        return false;
+    };
+    let mut local_buf = vec![0u8; probe];
+    if local.read_exact(&mut local_buf).await.is_err() {
+        return false;
+    }
+    let Ok(mut part) = sftp.open(tmp).await else {
+        return false;
+    };
+    let mut part_buf = vec![0u8; probe];
+    part.read_exact(&mut part_buf).await.is_ok() && part_buf == local_buf
+}
+
+/// 远端版的 unique_path：目标已存在就往后找空位。远端没法 exists()，只能一条条探
+async fn remote_unique_path(sftp: &SftpSession, target: &str) -> String {
+    if sftp.metadata(target).await.is_err() {
+        return target.to_string();
+    }
+    let (dir, file_name) = match target.rfind('/') {
+        Some(i) => (&target[..=i], &target[i + 1..]),
+        None => ("", target),
+    };
+    // 只有最后一个点后面还有字符、且不在开头（`.gitignore` 这类），才当扩展名切出来
+    let (stem, ext) = match file_name.rfind('.') {
+        Some(i) if i > 0 && i < file_name.len() - 1 => file_name.split_at(i),
+        _ => (file_name, ""),
+    };
+    for n in 2..1000 {
+        let candidate = format!("{dir}{stem} ({n}){ext}");
+        if sftp.metadata(&candidate).await.is_err() {
+            return candidate;
+        }
+    }
+    let stamp = std::time::SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    format!("{dir}{stem} ({stamp}){ext}")
 }
 
 /// 递归展开远端目录。async fn 不能直接递归，只能靠 Box::pin 打住
@@ -275,6 +411,7 @@ fn collect_remote(
                     rel: child_rel.clone(),
                     size: 0,
                     is_dir: true,
+                    modified: None,
                 });
                 out.extend(collect_remote(sftp.clone(), full, child_rel).await?);
             } else {
@@ -283,6 +420,7 @@ fn collect_remote(
                     rel: child_rel,
                     size: meta.len(),
                     is_dir: false,
+                    modified: secs(meta.modified()),
                 });
             }
         }
@@ -314,6 +452,7 @@ fn collect_local(dir: &std::path::Path, rel: &str) -> Result<Vec<Item>, String> 
                 rel: child_rel.clone(),
                 size: 0,
                 is_dir: true,
+                modified: None,
             });
             out.extend(collect_local(std::path::Path::new(&src), &child_rel)?);
         } else {
@@ -322,6 +461,7 @@ fn collect_local(dir: &std::path::Path, rel: &str) -> Result<Vec<Item>, String> 
                 rel: child_rel,
                 size: meta.len(),
                 is_dir: false,
+                modified: secs(meta.modified()),
             });
         }
     }
@@ -353,6 +493,7 @@ pub async fn download_to<F>(
     remote: &str,
     local_dir: &str,
     resume: bool,
+    conflict: ConflictPolicy,
     on_progress: F,
 ) -> Result<(), String>
 where
@@ -378,6 +519,7 @@ where
             rel: name.clone(),
             size: 0,
             is_dir: true,
+            modified: None,
         }];
         v.extend(
             collect_remote(sftp.clone(), remote.clone(), name)
@@ -392,6 +534,7 @@ where
             rel: name,
             size: meta.len(),
             is_dir: false,
+            modified: secs(meta.modified()),
         }]
     };
 
@@ -408,24 +551,69 @@ where
     }
 
     for item in items.iter().filter(|i| !i.is_dir) {
-        let target = std::path::Path::new(&local_dir).join(&item.rel);
+        let mut target = std::path::Path::new(&local_dir).join(&item.rel);
         if let Some(parent) = target.parent() {
             tokio::fs::create_dir_all(parent)
                 .await
                 .map_err(|e| fail(format!("创建本地目录 {} 失败: {e}", parent.display())))?;
         }
 
-        // 断点续传：本地已经有了一部分就接着传，传完了就整个跳过
-        let existing = tokio::fs::metadata(&target)
-            .await
-            .map(|m| m.len())
-            .unwrap_or(0);
-        if resume && existing >= item.size && item.size > 0 {
-            transferred += item.size;
-            on_progress(TransferEvent::Progress { transferred, total });
-            continue;
+        // 目标已存在时先做两个判断，顺序不能反：
+        //   1. 已经和远端一致（大小相同 + 不早于远端 mtime）→ 不传，报「已是最新」
+        //   2. 否则按用户的冲突策略处理（跳过 / 改名保留两者 / 覆盖）
+        // 「一致」必须排在策略之前：策略管的是「两份不同该怎么办」，
+        // 而这里两份本来就一样，不该因为选了「跳过」就显得像出了问题。
+        if let Ok(existing) = tokio::fs::metadata(&target).await {
+            if is_up_to_date(existing.len(), secs(existing.modified()), item) {
+                transferred += item.size;
+                on_progress(TransferEvent::Progress { transferred, total });
+                on_progress(TransferEvent::Skip {
+                    name: item.rel.clone(),
+                    reason: "已是最新".to_string(),
+                });
+                continue;
+            }
+            match conflict {
+                ConflictPolicy::Skip => {
+                    transferred += item.size;
+                    on_progress(TransferEvent::Progress { transferred, total });
+                    on_progress(TransferEvent::Skip {
+                        name: item.rel.clone(),
+                        reason: "目标已存在".to_string(),
+                    });
+                    continue;
+                }
+                ConflictPolicy::KeepBoth => {
+                    let parent = target.parent().unwrap_or_else(|| Path::new("."));
+                    let name = target.file_name().unwrap_or_else(|| OsStr::new("download"));
+                    target = unique_path(parent, name);
+                }
+                ConflictPolicy::Overwrite => {}
+            }
         }
-        let offset = if resume && existing > 0 { existing } else { 0 };
+
+        // 一律先写 `<目标>.part`，传完再改名。
+        // 这样「目标文件」只可能是完整的：改造前直接往目标写，中断后留下的半截
+        // 与完整文件无法区分，下次还会被当成半截接着追加。
+        // 续传也只认 `.part` —— 它是「上次没传完」的唯一凭据。
+        let tmp = part_path(&target);
+        let mut offset = 0u64;
+        match tokio::fs::metadata(&tmp).await {
+            Ok(m) if resume && m.len() < item.size => offset = m.len(),
+            // 关掉续传、或者残留的 .part 已经不比源端小（那是上次留下的垃圾）→ 从头来
+            Ok(_) => {
+                let _ = tokio::fs::remove_file(&tmp).await;
+            }
+            Err(_) => {}
+        }
+
+        // 续传前确认 .part 真的是这个文件的前缀：只看「它比源端小」不够 ——
+        // 上次中断之后远端换了文件的话，接着写会拼出一份混合体。
+        // 只比前 64KB：够挡住换文件，又不用为了续传把已传部分整个重读一遍。
+        if offset > 0 && !part_is_prefix(&tmp, &item.src, offset, &sftp).await {
+            offset = 0;
+            let _ = tokio::fs::remove_file(&tmp).await;
+        }
 
         let mut reader = sftp
             .open(&item.src)
@@ -441,13 +629,13 @@ where
         let mut writer = if offset > 0 {
             tokio::fs::OpenOptions::new()
                 .append(true)
-                .open(&target)
+                .open(&tmp)
                 .await
-                .map_err(|e| fail(format!("打开本地文件 {} 失败: {e}", target.display())))?
+                .map_err(|e| fail(format!("打开临时文件 {} 失败: {e}", tmp.display())))?
         } else {
-            tokio::fs::File::create(&target)
+            tokio::fs::File::create(&tmp)
                 .await
-                .map_err(|e| fail(format!("创建本地文件 {} 失败: {e}", target.display())))?
+                .map_err(|e| fail(format!("创建临时文件 {} 失败: {e}", tmp.display())))?
         };
 
         // offset 那部分是上次传完的，也得算进总量，否则进度条到不了 100%
@@ -463,7 +651,7 @@ where
             writer
                 .write_all(&buf[..n])
                 .await
-                .map_err(|e| fail(format!("写入本地文件失败: {e}")))?;
+                .map_err(|e| fail(format!("写入临时文件失败: {e}")))?;
             transferred += n as u64;
             on_progress(TransferEvent::Progress {
                 transferred,
@@ -474,7 +662,12 @@ where
         writer
             .flush()
             .await
-            .map_err(|e| fail(format!("刷新本地文件失败: {e}")))?;
+            .map_err(|e| fail(format!("刷新临时文件失败: {e}")))?;
+        // Windows 上文件还开着句柄是改不了名的，必须显式关掉再 rename
+        drop(writer);
+        tokio::fs::rename(&tmp, &target)
+            .await
+            .map_err(|e| fail(format!("改名 {} 失败: {e}", target.display())))?;
     }
 
     on_progress(TransferEvent::Done { transferred });
@@ -488,10 +681,11 @@ pub async fn sftp_download(
     remote: String,
     local_dir: String,
     resume: bool,
+    conflict: ConflictPolicy,
     on_progress: IpcChannel<TransferEvent>,
 ) -> Result<(), String> {
     let sftp = state.get(sftp_id).await?;
-    download_to(sftp, &remote, &local_dir, resume, |e| {
+    download_to(sftp, &remote, &local_dir, resume, conflict, |e| {
         let _ = on_progress.send(e);
     })
     .await
@@ -504,6 +698,7 @@ pub async fn upload_from<F>(
     local: &str,
     remote_dir: &str,
     resume: bool,
+    conflict: ConflictPolicy,
     on_progress: F,
 ) -> Result<(), String>
 where
@@ -531,6 +726,7 @@ where
             rel: name.clone(),
             size: 0,
             is_dir: true,
+            modified: None,
         }];
         v.extend(collect_local(local_path, &name).map_err(&fail)?);
         v
@@ -544,6 +740,7 @@ where
             rel: name,
             size: meta.len(),
             is_dir: false,
+            modified: secs(meta.modified()),
         }]
     };
 
@@ -557,20 +754,52 @@ where
     }
 
     for item in items.iter().filter(|i| !i.is_dir) {
-        let target = remote_join(&remote_dir, &item.rel);
+        let mut target = remote_join(&remote_dir, &item.rel);
 
-        // 断点续传：远端已经有了一部分就接着传
-        let existing = sftp
-            .metadata(&target)
-            .await
-            .map(|m| m.len())
-            .unwrap_or(0);
-        if resume && existing >= item.size && item.size > 0 {
-            transferred += item.size;
-            on_progress(TransferEvent::Progress { transferred, total });
-            continue;
+        // 与下载同一套判断：先看目标是不是已经和本地一致，再按冲突策略处理
+        if let Ok(existing) = sftp.metadata(&target).await {
+            if is_up_to_date(existing.len(), secs(existing.modified()), item) {
+                transferred += item.size;
+                on_progress(TransferEvent::Progress { transferred, total });
+                on_progress(TransferEvent::Skip {
+                    name: item.rel.clone(),
+                    reason: "已是最新".to_string(),
+                });
+                continue;
+            }
+            match conflict {
+                ConflictPolicy::Skip => {
+                    transferred += item.size;
+                    on_progress(TransferEvent::Progress { transferred, total });
+                    on_progress(TransferEvent::Skip {
+                        name: item.rel.clone(),
+                        reason: "目标已存在".to_string(),
+                    });
+                    continue;
+                }
+                ConflictPolicy::KeepBoth => {
+                    target = remote_unique_path(&sftp, &target).await;
+                }
+                ConflictPolicy::Overwrite => {}
+            }
         }
-        let offset = if resume && existing > 0 { existing } else { 0 };
+
+        // 远端也先写 `<目标>.part`，传完 rename。理由同下载侧：目标文件只可能是完整的
+        let tmp = format!("{target}.part");
+        let mut offset = 0u64;
+        match sftp.metadata(&tmp).await {
+            Ok(m) if resume && m.len() < item.size => offset = m.len(),
+            Ok(_) => {
+                let _ = sftp.remove_file(&tmp).await;
+            }
+            Err(_) => {}
+        }
+
+        // 与下载侧对称：远端那份 .part 必须真的是本地文件的前缀，否则重传
+        if offset > 0 && !remote_part_is_prefix(&sftp, &tmp, &item.src, offset).await {
+            offset = 0;
+            let _ = sftp.remove_file(&tmp).await;
+        }
 
         let mut reader = tokio::fs::File::open(&item.src)
             .await
@@ -584,15 +813,13 @@ where
 
         let mut writer = if offset > 0 {
             // 不加 TRUNCATE，否则会把已传的部分清掉
-            sftp
-                .open_with_flags(&target, OpenFlags::WRITE | OpenFlags::CREATE)
+            sftp.open_with_flags(&tmp, OpenFlags::WRITE | OpenFlags::CREATE)
                 .await
-                .map_err(|e| fail(format!("打开远端文件 {target} 失败: {e}")))?
+                .map_err(|e| fail(format!("打开远端临时文件 {tmp} 失败: {e}")))?
         } else {
-            sftp
-                .create(&target)
+            sftp.create(&tmp)
                 .await
-                .map_err(|e| fail(format!("创建远端文件 {target} 失败: {e}")))?
+                .map_err(|e| fail(format!("创建远端临时文件 {tmp} 失败: {e}")))?
         };
         if offset > 0 {
             writer
@@ -618,10 +845,14 @@ where
             on_progress(TransferEvent::Progress { transferred, total });
         }
 
+        // 关掉远端的写句柄再改名：先把数据刷出去，也避免服务端还持着旧名字
         writer
-            .flush()
+            .close()
             .await
-            .map_err(|e| fail(format!("刷新远端文件失败: {e}")))?;
+            .map_err(|e| fail(format!("关闭远端临时文件失败: {e}")))?;
+        sftp.rename(&tmp, &target)
+            .await
+            .map_err(|e| fail(format!("改名到 {target} 失败: {e}")))?;
     }
 
     on_progress(TransferEvent::Done { transferred });
@@ -635,10 +866,11 @@ pub async fn sftp_upload(
     local: String,
     remote_dir: String,
     resume: bool,
+    conflict: ConflictPolicy,
     on_progress: IpcChannel<TransferEvent>,
 ) -> Result<(), String> {
     let sftp = state.get(sftp_id).await?;
-    upload_from(sftp, &local, &remote_dir, resume, |e| {
+    upload_from(sftp, &local, &remote_dir, resume, conflict, |e| {
         let _ = on_progress.send(e);
     })
     .await

@@ -234,7 +234,15 @@ export interface FileEntry {
 export type TransferEvent =
   | { type: 'progress'; transferred: number; total: number }
   | { type: 'done'; transferred: number }
+  /** 这个文件没传：目标已存在按策略跳过，或者本地那份已经是最新的 */
+  | { type: 'skip'; name: string; reason: string }
   | { type: 'error'; message: string }
+
+/**
+ * 目标已存在时怎么办。默认覆盖，与改造前一致。
+ * 做成传输选项而不是逐文件弹窗 —— 传输是串行循环，每个同名文件弹一次没法用。
+ */
+export type ConflictPolicy = 'overwrite' | 'skip' | 'keepBoth'
 
 export function sftpOpen(sessionId: string): Promise<number> {
   return invoke<number>('sftp_open', { sessionId })
@@ -253,9 +261,10 @@ export function sftpDownload(
   remote: string,
   localDir: string,
   resume: boolean,
+  conflict: ConflictPolicy,
   onProgress: Channel<TransferEvent>,
 ): Promise<void> {
-  return invoke<void>('sftp_download', { sftpId, remote, localDir, resume, onProgress })
+  return invoke<void>('sftp_download', { sftpId, remote, localDir, resume, conflict, onProgress })
 }
 
 export function sftpUpload(
@@ -263,9 +272,10 @@ export function sftpUpload(
   local: string,
   remoteDir: string,
   resume: boolean,
+  conflict: ConflictPolicy,
   onProgress: Channel<TransferEvent>,
 ): Promise<void> {
-  return invoke<void>('sftp_upload', { sftpId, local, remoteDir, resume, onProgress })
+  return invoke<void>('sftp_upload', { sftpId, local, remoteDir, resume, conflict, onProgress })
 }
 
 export function sftpPwd(sftpId: number): Promise<string> {

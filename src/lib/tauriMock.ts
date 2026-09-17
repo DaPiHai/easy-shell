@@ -274,6 +274,18 @@ export async function invoke<T>(cmd: string, args: Record<string, unknown> = {})
     case 'sftp_upload': {
       const progress = args.onProgress as Channel<TransferEvent> | undefined
       const total = 2_411_724
+      // 选了「跳过」就演一遍跳过：队列里那个「跳过 N」的标记在预览里才看得到
+      if (args.conflict === 'skip') {
+        setTimeout(
+          () =>
+            progress?.emit({
+              type: 'skip',
+              name: String(args.remote ?? args.local ?? 'file'),
+              reason: '目标已存在',
+            }),
+          DELAY * 2,
+        )
+      }
       for (const ratio of [0.25, 0.6, 1]) {
         setTimeout(
           () =>

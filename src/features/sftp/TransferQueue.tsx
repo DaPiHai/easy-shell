@@ -1,13 +1,23 @@
-import { Check, Loader2, AlertTriangle, ArrowDown, ArrowUp } from 'lucide-react'
+import { Check, Loader2, AlertTriangle, ArrowDown, ArrowUp, MinusCircle } from 'lucide-react'
 import { useApp } from '@/lib/store'
+import type { ConflictPolicy } from '@/lib/api'
 import { formatSize } from './FilePane'
 
 interface Props {
   resume: boolean
   onToggleResume: () => void
+  conflict: ConflictPolicy
+  onConflictChange: (next: ConflictPolicy) => void
 }
 
-export function TransferQueue({ resume, onToggleResume }: Props) {
+/** 同名文件的三种处理方式，按「用户看到选项时的直觉」排序 */
+const CONFLICT_OPTIONS: Array<{ value: ConflictPolicy; label: string; hint: string }> = [
+  { value: 'overwrite', label: '覆盖', hint: '目标已存在就直接覆盖' },
+  { value: 'skip', label: '跳过', hint: '目标已存在就不动它，并在队列里标出来' },
+  { value: 'keepBoth', label: '保留两者', hint: '目标改名为「xxx (2)」，两份都留下' },
+]
+
+export function TransferQueue({ resume, onToggleResume, conflict, onConflictChange }: Props) {
   const transfers = useApp((s) => s.transfers)
   const clearFinished = useApp((s) => s.clearFinished)
 
@@ -23,7 +33,7 @@ export function TransferQueue({ resume, onToggleResume }: Props) {
           <button
             onClick={onToggleResume}
             className="flex items-center gap-1 text-[11px] text-ink-tertiary transition-colors hover:text-ink"
-            title="同名文件只补差量，不从头重传"
+            title="只从上次没传完的 .part 文件接着传，不从头重传"
           >
             <span
               className={`h-2.5 w-2.5 rounded-sm border transition-colors ${
@@ -32,6 +42,28 @@ export function TransferQueue({ resume, onToggleResume }: Props) {
             />
             断点续传
           </button>
+
+          {/* 同名文件怎么办做成面板级选项：传输是串行循环，逐文件弹框没法用 */}
+          <div className="flex items-center gap-1 text-[11px] text-ink-tertiary">
+            <span>同名文件</span>
+            <div className="flex overflow-hidden rounded border border-hairline">
+              {CONFLICT_OPTIONS.map((o) => (
+                <button
+                  key={o.value}
+                  onClick={() => onConflictChange(o.value)}
+                  title={o.hint}
+                  className={`px-1.5 py-0.5 transition-colors ${
+                    conflict === o.value
+                      ? 'bg-surface-3 text-ink'
+                      : 'text-ink-tertiary hover:text-ink-muted'
+                  }`}
+                >
+                  {o.label}
+                </button>
+              ))}
+            </div>
+          </div>
+
           <button
             onClick={clearFinished}
             className="text-[11px] text-ink-tertiary transition-colors hover:text-ink"
@@ -85,6 +117,17 @@ export function TransferQueue({ resume, onToggleResume }: Props) {
               {t.status === 'error' && t.message && (
                 <span className="max-w-40 shrink-0 truncate text-[11px] text-danger" title={t.message}>
                   {t.message}
+                </span>
+              )}
+
+              {/* 跳过的文件要显出来：以前是发个 progress 假装传过了，用户以为传上了 */}
+              {t.skipped > 0 && t.status !== 'error' && (
+                <span
+                  className="flex shrink-0 items-center gap-1 text-[11px] text-ink-tertiary"
+                  title={t.skipHint ? `最近一个：${t.skipHint}` : undefined}
+                >
+                  <MinusCircle size={11} />
+                  跳过 {t.skipped}
                 </span>
               )}
             </div>

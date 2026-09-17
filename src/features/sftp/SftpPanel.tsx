@@ -21,6 +21,7 @@ import {
 import { useApp } from '@/lib/store'
 import { FilePane, type Side } from './FilePane'
 import { TransferQueue } from './TransferQueue'
+import type { ConflictPolicy } from '@/lib/api'
 
 interface Props {
   sessionId: string
@@ -44,8 +45,10 @@ export function SftpPanel({ sessionId }: Props) {
   const [localEntries, setLocalEntries] = useState<FileEntry[]>([])
   const [loading, setLoading] = useState<Side | null>(null)
   const [selected, setSelected] = useState<Record<Side, string[]>>({ local: [], remote: [] })
-  /** 断点续传开关。默认开：同名文件只补差量，传过的不用重来 */
+  /** 断点续传开关。默认开：只从上次没传完的 .part 接着传，传过的不用重来 */
   const [resume, setResume] = useState(true)
+  /** 同名文件策略。默认覆盖，与改造前一致；做成面板级选项，批内不逐个问 */
+  const [conflict, setConflict] = useState<ConflictPolicy>('overwrite')
 
   /** 当前拖拽落点在哪一栏。内部拖拽和系统拖入共用同一个高亮 */
   const [dropSide, setDropSide] = useState<Side | null>(null)
@@ -65,8 +68,8 @@ export function SftpPanel({ sessionId }: Props) {
    * 拖放监听是一次性注册的长生命周期回调，而 sftpId / 当前目录这些会变。
    * 走 ref 拿最新值，免得闭包把旧目录传进上传。
    */
-  const latest = useRef({ sftpId, remotePath, localPath, resume })
-  latest.current = { sftpId, remotePath, localPath, resume }
+  const latest = useRef({ sftpId, remotePath, localPath, resume, conflict })
+  latest.current = { sftpId, remotePath, localPath, resume, conflict }
 
   // 开一个 sftp 子系统通道，挂在已有 SSH 会话上
   useEffect(() => {
@@ -169,11 +172,11 @@ export function SftpPanel({ sessionId }: Props) {
   }
 
   const download = async (entries: FileEntry[]) => {
-    const { sftpId: id, localPath: dir, resume: rs } = latest.current
+    const { sftpId: id, localPath: dir, resume: rs, conflict: cf } = latest.current
     if (id == null) return
     for (const entry of entries) {
       await runTransfer('download', entry.name, (ch) =>
-        sftpDownload(id, entry.path, dir, rs, ch),
+        sftpDownload(id, entry.path, dir, rs, cf, ch),
       )
     }
     void refreshLocal(dir)
@@ -182,11 +185,11 @@ export function SftpPanel({ sessionId }: Props) {
   /** 按**本地绝对路径**上传。双栏互拖给的是 FileEntry，系统拖入给的是裸路径，统一走这里 */
   const uploadPaths = useCallback(
     async (paths: string[]) => {
-      const { sftpId: id, remotePath: dir, resume: rs } = latest.current
+      const { sftpId: id, remotePath: dir, resume: rs, conflict: cf } = latest.current
       if (id == null) return
       for (const p of paths) {
         const name = p.split(/[\\/]/).filter(Boolean).pop() ?? p
-        await runTransfer('upload', name, (ch) => sftpUpload(id, p, dir, rs, ch))
+        await runTransfer('upload', name, (ch) => sftpUpload(id, p, dir, rs, cf, ch))
       }
       void refreshRemote(dir)
     },
@@ -488,7 +491,12 @@ export function SftpPanel({ sessionId }: Props) {
           }}
         />
       </div>
-      <TransferQueue resume={resume} onToggleResume={() => setResume((v) => !v)} />
+      <TransferQueue
+        resume={resume}
+        onToggleResume={() => setResume((v) => !v)}
+        conflict={conflict}
+        onConflictChange={setConflict}
+      />
 
       {ghost && (
         <div

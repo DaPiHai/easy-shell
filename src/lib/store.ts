@@ -65,6 +65,15 @@ export interface TransferItem {
   transferred: number
   total: number
   status: TransferStatus
+  /**
+   * 这次传输里有多少个文件没动（目标已存在按策略跳过，或本地那份已是最新）。
+   *
+   * 单独记账而不是塞进 message：批量传一个目录时它是个计数，
+   * 用户要的是「有几个没传」，不是一长串文件名。
+   */
+  skipped: number
+  /** 最近一次跳过的文件名 + 原因，鼠标悬停时看 */
+  skipHint?: string
   message?: string
 }
 
@@ -449,6 +458,7 @@ export const useApp = create<AppState>((set, get) => ({
           transferred: 0,
           total: 0,
           status: 'active' as TransferStatus,
+          skipped: 0,
         },
         ...s.transfers,
       ].slice(0, 50),
@@ -460,6 +470,15 @@ export const useApp = create<AppState>((set, get) => ({
         patch({ transferred: event.transferred, total: event.total })
       } else if (event.type === 'done') {
         patch({ transferred: event.transferred, status: 'done' })
+      } else if (event.type === 'skip') {
+        // 跳过不是失败：只累计，不改状态。落到下面的 else 会被标成错误
+        set((s) => ({
+          transfers: s.transfers.map((t) =>
+            t.id === id
+              ? { ...t, skipped: t.skipped + 1, skipHint: `${event.name}（${event.reason}）` }
+              : t,
+          ),
+        }))
       } else {
         patch({ status: 'error', message: event.message })
         get().setError(event.message)
