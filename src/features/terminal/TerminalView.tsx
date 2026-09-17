@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useMemo, useRef } from 'react'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import { WebglAddon } from '@xterm/addon-webgl'
@@ -20,6 +20,7 @@ import {
   type ShellEvent,
 } from '@/lib/api'
 import { useApp, DEFAULT_TERM_FONT } from '@/lib/store'
+import { resolveTermTheme } from '@/lib/termSchemes'
 import '@xterm/xterm/css/xterm.css'
 
 /** 多久没收到输出就提示一下，别让用户对着黑屏干等 */
@@ -53,37 +54,6 @@ async function copyText(text: string): Promise<boolean> {
   }
   ta.remove()
   return ok
-}
-
-function readToken(name: string, fallback: string): string {
-  const v = getComputedStyle(document.documentElement).getPropertyValue(name).trim()
-  return v || fallback
-}
-
-function buildTheme() {
-  return {
-    background: readToken('--term-bg', '#010102'),
-    foreground: readToken('--term-fg', '#d0d6e0'),
-    cursor: readToken('--term-cursor', '#5e6ad2'),
-    cursorAccent: readToken('--term-bg', '#010102'),
-    selectionBackground: 'rgba(94, 106, 210, 0.3)',
-    black: readToken('--term-black', '#0f1011'),
-    red: readToken('--term-red', '#e5484d'),
-    green: readToken('--term-green', '#3dd68c'),
-    yellow: readToken('--term-yellow', '#e2a03f'),
-    blue: readToken('--term-blue', '#5e6ad2'),
-    magenta: readToken('--term-magenta', '#a855f7'),
-    cyan: readToken('--term-cyan', '#3ddbd9'),
-    white: readToken('--term-white', '#d0d6e0'),
-    brightBlack: readToken('--term-bright-black', '#62666d'),
-    brightRed: readToken('--term-bright-red', '#ff6369'),
-    brightGreen: readToken('--term-bright-green', '#56e39f'),
-    brightYellow: readToken('--term-bright-yellow', '#ffb224'),
-    brightBlue: readToken('--term-bright-blue', '#828fff'),
-    brightMagenta: readToken('--term-bright-magenta', '#c084fc'),
-    brightCyan: readToken('--term-bright-cyan', '#56e1e1'),
-    brightWhite: readToken('--term-bright-white', '#f7f8f8'),
-  }
 }
 
 interface Props {
@@ -138,7 +108,12 @@ export function TerminalView({
       cursorStyle: useApp.getState().termCursorStyle,
       cursorWidth: 2,
       scrollback: useApp.getState().termScrollback,
-      theme: buildTheme(),
+      // 配色方案在 lib/termSchemes.ts：应用默认读 --term-*，其余走各自的色板
+      theme: resolveTermTheme(
+        useApp.getState().termScheme,
+        useApp.getState().theme,
+        useApp.getState().customSchemes,
+      ),
     })
 
     const fit = new FitAddon()
@@ -385,19 +360,9 @@ export function TerminalView({
     const observer = new ResizeObserver(() => safeFit())
     observer.observe(el)
 
-    // 切主题时重刷终端配色，否则终端会一直停在打开时的那套颜色上
-    const themeObserver = new MutationObserver(() => {
-      term.options.theme = buildTheme()
-    })
-    themeObserver.observe(document.documentElement, {
-      attributes: true,
-      attributeFilter: ['data-theme'],
-    })
-
     return () => {
       disposed = true
       clearTimeout(noDataTimer)
-      themeObserver.disconnect()
       channelIdRef.current = null
       manualReconnectRef.current = null
       termRef.current = null
@@ -451,6 +416,26 @@ export function TerminalView({
     term.options.scrollback = scrollback
   }, [cursorStyle, scrollback])
 
+  /**
+   * 配色（方案 × 深/浅模式）变了要热换，否则终端会一直停在打开时那套颜色上。
+   *
+   * 以前这里是拿 MutationObserver 盯 `data-theme`：那时配色只有 CSS 变量一个来源。
+   * 现在方案也在 store 里，直接订阅更直接 —— `applyTheme` 改属性和改 store 本来就是
+   * 同一个动作的两半，不会不同步。xterm 支持运行时换 theme（WebGL 会自己重建色卡）。
+   */
+  const termScheme = useApp((s) => s.termScheme)
+  const theme = useApp((s) => s.theme)
+  const customSchemes = useApp((s) => s.customSchemes)
+  const xtermTheme = useMemo(
+    () => resolveTermTheme(termScheme, theme, customSchemes),
+    [termScheme, theme, customSchemes],
+  )
+  useEffect(() => {
+    const term = termRef.current
+    if (!term) return
+    term.options.theme = xtermTheme
+  }, [xtermTheme])
+
   // 注册成命令片段的投递目标，同时挂上手动重连
   useEffect(() => {
     if (!tabId) return
@@ -481,7 +466,13 @@ export function TerminalView({
    * 远程终端有 SplitPane 的 overflow-hidden 兜着看不出来，本地 Shell 没有，肉眼可见。
    */
   return (
-    <div className="h-full w-full overflow-hidden bg-canvas p-2">
+    // padding 那一圈用终端自己的底色，而不是画布色：换了非默认配色之后，
+    // 画布色会在终端周围留一圈对不上的边。应用默认那套里 --term-bg 本就等于
+    // --canvas（深色都是 #010102、浅色都是 #ffffff），所以观感不变。
+    <div
+      className="h-full w-full overflow-hidden p-2"
+      style={{ background: xtermTheme.background }}
+    >
       <div ref={hostRef} className="h-full w-full" />
     </div>
   )

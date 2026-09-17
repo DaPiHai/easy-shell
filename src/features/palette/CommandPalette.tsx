@@ -17,6 +17,8 @@ import {
   ZoomOut,
 } from 'lucide-react'
 import { useApp } from '@/lib/store'
+import { listSchemeChoices } from '@/lib/termSchemes'
+import { Swatches } from '../settings/Swatches'
 
 export function CommandPalette() {
   const {
@@ -24,6 +26,9 @@ export function CommandPalette() {
     setPaletteOpen,
     toggleTheme,
     theme,
+    termScheme,
+    setTermScheme,
+    customSchemes,
     setConnectOpen,
     setTunnelOpen,
     setSnippetsOpen,
@@ -205,6 +210,26 @@ export function CommandPalette() {
                 <Settings size={14} />
                 设置
               </Command.Item>
+            </Command.Group>
+
+            <Command.Group heading="终端配色">
+              {listSchemeChoices(theme, customSchemes).map((c) => (
+                <Command.Item
+                  key={c.id}
+                  // cmdk 按条目文字过滤，只写方案名的话搜「配色」「颜色」都找不到它们
+                  keywords={['配色', '颜色', '终端配色', c.name, c.variant]}
+                  onSelect={() => {
+                    setTermScheme(c.id)
+                    close()
+                  }}
+                >
+                  <Swatches palette={c.palette} count={8} width={5} height={9} />
+                  {c.name}
+                  {c.id === termScheme && (
+                    <span className="ml-auto text-[11px] text-ink-tertiary">当前</span>
+                  )}
+                </Command.Item>
+              ))}
             </Command.Group>
 
             <Command.Group heading="安全">

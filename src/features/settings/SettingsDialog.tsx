@@ -16,6 +16,8 @@ import {
   type CursorStyle,
 } from '@/lib/store'
 import { ModalActions, ModalShell, modalButton } from '@/components/ModalShell'
+import { NumberField, Row, Section, Segmented } from './controls'
+import { TermSchemeSection } from './TermSchemeSection'
 
 /**
  * 设置面板。
@@ -31,127 +33,6 @@ export function SettingsDialog() {
   if (!settingsOpen) return null
   return <SettingsBody onClose={() => setSettingsOpen(false)} />
 }
-/** 分段按钮组：选项少、需要一眼看全，比下拉合适 */
-function Segmented<T extends string>({
-  value,
-  options,
-  onChange,
-}: {
-  value: T
-  options: Array<{ value: T; label: string }>
-  onChange: (v: T) => void
-}) {
-  return (
-    <div className="flex items-center gap-1 rounded-md border border-hairline p-0.5">
-      {options.map((o) => (
-        <button
-          key={o.value}
-          onClick={() => onChange(o.value)}
-          className={`h-6 rounded px-2 text-[12px] transition-colors ${
-            value === o.value
-              ? 'bg-accent/15 text-ink'
-              : 'text-ink-subtle hover:bg-surface-2 hover:text-ink'
-          }`}
-        >
-          {o.label}
-        </button>
-      ))}
-    </div>
-  )
-}
-
-/** 数字输入：右侧带单位，失焦/回车时夹到范围里 */
-function NumberField({
-  value,
-  min,
-  max,
-  step = 1,
-  suffix,
-  width = 88,
-  onCommit,
-}: {
-  value: number
-  min: number
-  max: number
-  step?: number
-  suffix?: string
-  width?: number
-  onCommit: (v: number) => void
-}) {
-  const [draft, setDraft] = useState(String(value))
-  // 外部改了（比如点了恢复默认）要跟上，但不能在输入过程中打断
-  const [lastValue, setLastValue] = useState(value)
-  if (value !== lastValue) {
-    setLastValue(value)
-    setDraft(String(value))
-  }
-
-  const commit = () => {
-    const n = Number(draft)
-    if (!Number.isFinite(n)) {
-      setDraft(String(value))
-      return
-    }
-    const clamped = Math.min(max, Math.max(min, n))
-    setDraft(String(clamped))
-    onCommit(clamped)
-  }
-
-  return (
-    <div className="flex items-center gap-1.5">
-      <input
-        type="number"
-        value={draft}
-        min={min}
-        max={max}
-        step={step}
-        onChange={(e) => setDraft(e.target.value)}
-        onBlur={commit}
-        onKeyDown={(e) => {
-          if (e.key === 'Enter') {
-            e.preventDefault()
-            commit()
-          }
-        }}
-        style={{ width }}
-        className="h-7 rounded-md border border-hairline bg-surface-3 px-2 text-[12px] text-ink outline-none focus:border-accent"
-      />
-      {suffix && <span className="text-[11px] text-ink-tertiary">{suffix}</span>}
-    </div>
-  )
-}
-
-function Row({
-  label,
-  hint,
-  children,
-}: {
-  label: string
-  hint?: string
-  children: React.ReactNode
-}) {
-  return (
-    <div className="flex items-start justify-between gap-3 py-2">
-      <div className="min-w-0">
-        <div className="text-[12px] text-ink-muted">{label}</div>
-        {hint && <div className="mt-0.5 text-[11px] leading-relaxed text-ink-tertiary">{hint}</div>}
-      </div>
-      <div className="shrink-0">{children}</div>
-    </div>
-  )
-}
-
-function Section({ title, children }: { title: string; children: React.ReactNode }) {
-  return (
-    <div className="mb-4">
-      <div className="mb-1 text-[11px] font-medium tracking-[0.4px] text-ink-subtle">{title}</div>
-      <div className="divide-y divide-hairline rounded-md border border-hairline px-3">
-        {children}
-      </div>
-    </div>
-  )
-}
-
 function SettingsBody({ onClose }: { onClose: () => void }) {
   const {
     theme,
@@ -205,6 +86,10 @@ function SettingsBody({ onClose }: { onClose: () => void }) {
             onCommit={setTermFontSize}
           />
         </Row>
+      </Section>
+
+      <Section title="终端配色">
+        <TermSchemeSection />
       </Section>
 
       <Section title="终端">
@@ -310,7 +195,7 @@ function SettingsBody({ onClose }: { onClose: () => void }) {
         <button
           onClick={resetSettings}
           className={`${modalButton} mr-auto flex items-center gap-1.5`}
-          title="主题、字体、连接策略、传输默认值都回到出厂状态"
+          title="主题、配色、字体、连接策略、传输默认值都回到出厂状态（自己加的配色方案会留着）"
         >
           <RotateCcw size={12} />
           恢复默认

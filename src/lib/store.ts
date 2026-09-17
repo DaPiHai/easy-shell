@@ -23,6 +23,7 @@ import {
   type GroupRecord,
   type HostRecord,
 } from './api'
+import { APP_SCHEME_ID, isKnownSchemeId, isValidScheme, type TermScheme } from './termSchemes'
 
 /** 终端字号可调范围。再小就看不清，再大一个屏幕放不下几行 */
 export const MIN_FONT_SIZE = 9
@@ -65,6 +66,32 @@ function writeLocal(key: string, value: string) {
   }
 }
 
+/** 用户自定义配色方案的 key */
+const CUSTOM_SCHEMES_KEY = 'termCustomSchemes'
+
+/**
+ * 读自定义配色。**逐套校验**：这份 JSON 是用户可能手改的、跨版本升级的，
+ * 半套色板渲染出来比没有更糟（终端会变成一片白），坏数据直接丢掉。
+ */
+function readCustomSchemes(): TermScheme[] {
+  try {
+    const raw = localStorage.getItem(CUSTOM_SCHEMES_KEY)
+    if (!raw) return []
+    const parsed: unknown = JSON.parse(raw)
+    if (!Array.isArray(parsed)) return []
+    return parsed.filter(isValidScheme).map((s) => ({ ...s, custom: true }))
+  } catch {
+    return []
+  }
+}
+
+function writeCustomSchemes(list: TermScheme[]) {
+  writeLocal(CUSTOM_SCHEMES_KEY, JSON.stringify(list))
+}
+
+/** 初始值要同时喂给 customSchemes 和 termScheme 的校验，读一次就够 */
+const initialCustomSchemes = readCustomSchemes()
+
 export type Theme = 'dark' | 'light'
 export type TabKind = 'terminal' | 'sftp' | 'local' | 'editor'
 
@@ -75,6 +102,9 @@ export type TabKind = 'terminal' | 'sftp' | 'local' | 'editor'
  * 第三个最容易漏 —— 只改前两个的话，页面是浅色的、标题栏还是系统那条深色的。
  * 所有入口都走这里（状态栏按钮、设置面板、命令面板、恢复默认、启动时那次应用），
  * 以后加新入口也不会漏。
+ *
+ * 终端的配色也挂在它上面：TerminalView 订阅 store 的 `theme`，切主题时按新主题取
+ * 配色方案里对应的那一版（见 `lib/termSchemes.ts`）。
  */
 function applyTheme(theme: Theme) {
   document.documentElement.setAttribute('data-theme', theme)
@@ -291,6 +321,18 @@ interface AppState {
   /** 回滚缓冲行数。改它不用 refit */
   termScrollback: number
   setTermScrollback: (lines: number) => void
+
+  /**
+   * 终端配色方案 id。`APP_SCHEME_ID` 表示跟随应用设计色板（改造前只有这一套），
+   * 其余是 `lib/termSchemes.ts` 里的内置方案或用户自定义方案。
+   */
+  termScheme: string
+  setTermScheme: (id: string) => void
+
+  /** 用户自定义的配色方案。跟其他偏好一样存 localStorage */
+  customSchemes: TermScheme[]
+  saveCustomScheme: (scheme: TermScheme) => void
+  deleteCustomScheme: (id: string) => void
 
   /**
    * 断线自动重连策略。0 次 = 不自动重连，直接等人点 ↻。
@@ -711,6 +753,39 @@ export const useApp = create<AppState>((set, get) => ({
     set({ termScrollback: clamped })
   },
 
+  customSchemes: initialCustomSchemes,
+  saveCustomScheme: (scheme) => {
+    const list = get().customSchemes
+    // 新方案追加在后面，改已有的就地替换 —— 列表顺序就是设置面板里的顺序
+    const next = list.some((s) => s.id === scheme.id)
+      ? list.map((s) => (s.id === scheme.id ? scheme : s))
+      : [...list, scheme]
+    writeCustomSchemes(next)
+    set({ customSchemes: next })
+  },
+  deleteCustomScheme: (id) => {
+    const next = get().customSchemes.filter((s) => s.id !== id)
+    writeCustomSchemes(next)
+    set({ customSchemes: next })
+    // 删的正好是当前这套就退回应用默认，不然终端会去查一个已经不存在的方案
+    if (get().termScheme === id) get().setTermScheme(APP_SCHEME_ID)
+  },
+
+  termScheme: (() => {
+    try {
+      const v = localStorage.getItem('termScheme')
+      // 只认当前确实存在的方案：自定义方案被删、localStorage 被手改过都不算数
+      return v && isKnownSchemeId(v, initialCustomSchemes) ? v : APP_SCHEME_ID
+    } catch {
+      return APP_SCHEME_ID
+    }
+  })(),
+  setTermScheme: (id) => {
+    const next = isKnownSchemeId(id, get().customSchemes) ? id : APP_SCHEME_ID
+    writeLocal('termScheme', next)
+    set({ termScheme: next })
+  },
+
   reconnectAttempts: readNumber(
     'reconnectAttempts',
     3,
@@ -743,6 +818,8 @@ export const useApp = create<AppState>((set, get) => ({
 
   resetSettings: () => {
     get().setTheme('dark')
+    // 自定义配色方案本身不删：那是用户自己造的东西，不是「设置」
+    get().setTermScheme(APP_SCHEME_ID)
     get().setTermFontSize(13)
     get().setTermFontFamily('')
     get().setTermLineHeight(1.5)

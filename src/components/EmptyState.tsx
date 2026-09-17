@@ -1,5 +1,6 @@
 import { FileCode2, Lock, SquareTerminal, Terminal } from 'lucide-react'
 import { MAX_FONT_SIZE, MIN_FONT_SIZE, useApp } from '@/lib/store'
+import { SchemeMenu } from '@/features/settings/SchemeMenu'
 
 const isMac = navigator.platform.toLowerCase().includes('mac')
 const modKey = isMac ? '⌘' : 'Ctrl'
@@ -104,6 +105,8 @@ export function StatusBar() {
           <Lock size={11} />
           锁定
         </button>
+        {/* 终端配色：状态栏是随手切一下的地方，详细的预览在设置面板里 */}
+        <SchemeMenu mode={theme} />
         <button
           onClick={toggleTheme}
           className="transition-colors hover:text-ink"
