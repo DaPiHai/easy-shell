@@ -166,6 +166,16 @@ impl SftpState {
             self.sessions.lock().await.remove(&id);
         }
     }
+
+    /**
+     * 这条 SSH 会话上还挂着 SFTP 通道吗。
+     *
+     * 给 `ssh_close_channel` 用：关掉最后一条 shell 通道时不能想当然地拆会话 ——
+     * SFTP 面板挂的是同一条会话，而它的通道记在这张表里，不在 channel_owners 里。
+     */
+    pub async fn has_session(&self, session_id: &str) -> bool {
+        self.registry.find(session_id).await.is_some()
+    }
 }
 
 /// 在已建立的 SSH 会话上开一个 sftp 子系统通道

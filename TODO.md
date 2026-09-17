@@ -16,12 +16,6 @@
 
 ## P1 决定「能不能连上 / 能不能用」
 
-- **P1-1 会话被提前断开（bug，不是缺失，建议先做）** —— `channel_owners` 只登记 shell 通道
-  （`ssh.rs:465` 是唯一写入点），SFTP 通道在 `SftpState` 自己的表里（`sftp.rs:164-170`）。
-  于是 `drop_one_channel` 那句「本会话没有通道了就连锅端掉」（`ssh.rs:380-387`）**看不见 SFTP 通道**：
-  同一条会话上开着 SFTP 面板时，关掉那个终端标签会把整条 SSH 会话断开、SFTP 面板随即失效。
-  修法是让 `ssh_close_channel` 像 `ssh_close` 那样把 `State<SftpState>` 一起拿进来判断，
-  并补一条集成测试（起真服务端，开 shell + sftp 两条通道，关掉 shell 断言会话还在）。
 - **P1-2 keyboard-interactive（OTP/MFA）** —— 全仓库零实现。**只提供这种认证的服务器今天完全连不上**，
   而这类服务器在内网加固环境里很常见。russh 有 `authenticate_keyboard_interactive_start/respond`，
   不是能力边界；代价是 `connect_and_auth`（`ssh.rs:279`）现在是「一次调用、认证完才返回」，
@@ -48,8 +42,6 @@
 - **P2-3** 标签重命名 / 拖动排序 / 固定 —— `Tab` 接口只有 id/title/kind/sessionId/hostId/split/editorTarget。
 - **P2-4** 会话树搜索过滤 —— 侧栏只能折叠分组，命令面板只过滤静态命令项、不含主机。
 - **P2-5** **关窗确认 / 托盘** —— 现在关窗即退出进程，所有连接一并消失，没有拦截也没有托盘常驻。
-- **P2-6** SFTP 列表排序 —— 表头点了没反应，永远是「目录在前 + 名称升序」（`sftp.rs:223,805`）。
-- **P2-7** SFTP 隐藏文件切换 —— 点文件始终显示（`list_dir` 不过滤），`.git`/`.env`/`.ssh` 一直混在列表里。
 - **P2-8** 修改远端权限 —— 权限列只读；russh-sftp 的 `setstat`/`set_metadata` 可用但没调用。
 - **P2-9** SFTP 书签/最近路径；本地栏「在系统文件管理器里打开」（需要 opener/shell 插件与新权限）。
 - **P2-10** 符号链接识别 —— `sftp.rs:205` 只看 `meta.file_type().is_dir()`，指向目录的软链会被当成文件，

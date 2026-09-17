@@ -82,6 +82,47 @@ interface FilePaneProps {
   dropActive: boolean
   paneRef: React.Ref<HTMLDivElement>
   toolbar?: ReactNode
+  /** 当前排序方式。不传就是后端给的顺序（目录在前 + 名称升序） */
+  sort?: SortState
+  onSort?: (key: SortKey) => void
+}
+
+export type SortKey = 'name' | 'size' | 'modified'
+export interface SortState {
+  key: SortKey
+  dir: 'asc' | 'desc'
+}
+
+/** 表头单元格：点了就按这一列排（再点一次反向），带个箭头说明当前状态 */
+function SortHeader({
+  label,
+  col,
+  sort,
+  onSort,
+  className,
+}: {
+  label: string
+  col: SortKey
+  sort?: SortState
+  onSort?: (key: SortKey) => void
+  className: string
+}) {
+  const active = sort?.key === col
+  return (
+    <th className={className}>
+      <button
+        onClick={() => onSort?.(col)}
+        disabled={!onSort}
+        className={`inline-flex items-center gap-0.5 transition-colors ${
+          onSort ? 'hover:text-ink' : ''
+        } ${active ? 'text-ink-muted' : ''}`}
+        title={onSort ? `按${label}排序` : undefined}
+      >
+        {label}
+        {active && <span className="text-[9px]">{sort?.dir === 'asc' ? '▲' : '▼'}</span>}
+      </button>
+    </th>
+  )
 }
 
 export function FilePane({
@@ -100,6 +141,8 @@ export function FilePane({
   onRename,
   onEdit,
   onRowMouseDown,
+  sort,
+  onSort,
   dropActive,
   paneRef,
   toolbar,
@@ -196,13 +239,27 @@ export function FilePane({
           <table className="select-none w-full border-collapse text-[12px]">
             <thead className="sticky top-0 bg-canvas">
               <tr className="text-ink-tertiary">
-                <th className="border-b border-hairline px-2 py-1.5 text-left font-medium">名称</th>
-                <th className="w-20 border-b border-hairline px-2 py-1.5 text-right font-medium">
-                  大小
-                </th>
-                <th className="w-28 border-b border-hairline px-2 py-1.5 text-left font-medium">
-                  修改时间
-                </th>
+                <SortHeader
+                  label="名称"
+                  col="name"
+                  sort={sort}
+                  onSort={onSort}
+                  className="border-b border-hairline px-2 py-1.5 text-left font-medium"
+                />
+                <SortHeader
+                  label="大小"
+                  col="size"
+                  sort={sort}
+                  onSort={onSort}
+                  className="w-20 border-b border-hairline px-2 py-1.5 text-right font-medium"
+                />
+                <SortHeader
+                  label="修改时间"
+                  col="modified"
+                  sort={sort}
+                  onSort={onSort}
+                  className="w-28 border-b border-hairline px-2 py-1.5 text-left font-medium"
+                />
                 <th className="w-20 border-b border-hairline px-2 py-1.5 text-left font-medium">
                   权限
                 </th>

@@ -1,4 +1,5 @@
 import { type MouseEvent as ReactMouseEvent, useCallback, useEffect, useRef, useState } from 'react'
+import { Eye, EyeOff } from 'lucide-react'
 import {
   isDesktop,
   localCopy,
@@ -19,7 +20,7 @@ import {
   type FileEntry,
 } from '@/lib/api'
 import { useApp } from '@/lib/store'
-import { FilePane, type Side } from './FilePane'
+import { FilePane, type Side, type SortKey, type SortState } from './FilePane'
 import { TransferQueue } from './TransferQueue'
 import type { ConflictPolicy } from '@/lib/api'
 
@@ -49,6 +50,31 @@ export function SftpPanel({ sessionId }: Props) {
   const [resume, setResume] = useState(true)
   /** 同名文件策略。默认覆盖，与改造前一致；做成面板级选项，批内不逐个问 */
   const [conflict, setConflict] = useState<ConflictPolicy>('overwrite')
+  /**
+   * 列表排序。默认按名称升序（与后端给的顺序一致），点表头切换。
+   * 放前端排而不是给后端命令加参数：省掉两个命令的签名与三方样板，
+   * 而一屏几十上百个条目在前端排完全够用。
+   */
+  const [sort, setSort] = useState<SortState>({ key: 'name', dir: 'asc' })
+  /** 远端栏是否显示点文件（.git/.env 这类）。默认显示，与改造前一致 */
+  const [showHidden, setShowHidden] = useState(true)
+
+  const toggleSort = (key: SortKey) =>
+    setSort((prev) =>
+      prev.key === key ? { key, dir: prev.dir === 'asc' ? 'desc' : 'asc' } : { key, dir: 'asc' },
+    )
+
+  /** 排序：目录永远在前，同类之间按选中的列；缺值（null）排在最后 */
+  const sortEntries = (entries: FileEntry[]): FileEntry[] =>
+    [...entries].sort((a, b) => {
+      if (a.isDir !== b.isDir) return a.isDir ? -1 : 1
+      const sign = sort.dir === 'asc' ? 1 : -1
+      if (sort.key === 'name') return a.name.localeCompare(b.name) * sign
+      if (sort.key === 'size') return ((a.size ?? 0) - (b.size ?? 0)) * sign
+      const am = a.modified ?? 0
+      const bm = b.modified ?? 0
+      return (am - bm) * sign
+    })
 
   /** 当前拖拽落点在哪一栏。内部拖拽和系统拖入共用同一个高亮 */
   const [dropSide, setDropSide] = useState<Side | null>(null)
@@ -451,7 +477,9 @@ export function SftpPanel({ sessionId }: Props) {
           side="local"
           title="本地"
           path={localPath}
-          entries={localEntries}
+          entries={sortEntries(localEntries)}
+          sort={sort}
+          onSort={toggleSort}
           loading={loading === 'local'}
           selected={selected.local}
           onSelect={(paths) => setSelected((s) => ({ ...s, local: paths }))}
@@ -473,7 +501,11 @@ export function SftpPanel({ sessionId }: Props) {
           side="remote"
           title="远程"
           path={remotePath}
-          entries={remoteEntries}
+          entries={sortEntries(
+            showHidden ? remoteEntries : remoteEntries.filter((e) => !e.name.startsWith('.')),
+          )}
+          sort={sort}
+          onSort={toggleSort}
           loading={loading === 'remote'}
           selected={selected.remote}
           onSelect={(paths) => setSelected((s) => ({ ...s, remote: paths }))}
@@ -489,6 +521,18 @@ export function SftpPanel({ sessionId }: Props) {
           paneRef={(el) => {
             paneRefs.current.remote = el
           }}
+          toolbar={
+            // 隐藏文件开关只给远端：Windows 本地栏没有点文件这套约定，加了也没意义
+            <button
+              onClick={() => setShowHidden((v) => !v)}
+              className={`transition-colors hover:text-ink ${
+                showHidden ? '' : 'text-ink-tertiary'
+              }`}
+              title={showHidden ? '隐藏以点开头的文件' : '显示以点开头的文件'}
+            >
+              {showHidden ? <Eye size={13} /> : <EyeOff size={13} />}
+            </button>
+          }
         />
       </div>
       <TransferQueue

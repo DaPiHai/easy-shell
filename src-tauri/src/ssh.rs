@@ -363,29 +363,45 @@ async fn drop_channels(state: &SshState, session_id: &str) {
 }
 
 /// 关掉单个 shell 通道 + 回收 channelId。
-/// 如果这个 session 名下再没有别的通道了，整个 SSH 连接也一起断掉。
+/// 摘掉一条通道（通知它的任务收工），返回它挂在哪个会话上
 async fn drop_one_channel(state: &SshState, channel_id: u32) -> Option<String> {
     let tx = state.channels.lock().await.remove(&channel_id);
     if let Some(tx) = tx {
         let _ = tx.send(ShellCmd::Close);
     }
-    let owner = state.channel_owners.lock().await.remove(&channel_id)?;
-    // 数一下这个 session 还剩几条通道 —— 没了就连锅端掉，免得资源漏
-    let still_has_channels = state
+    state.channel_owners.lock().await.remove(&channel_id)
+}
+
+/// 这条会话名下还剩几条 shell 通道
+async fn shell_channel_count(state: &SshState, session_id: &str) -> usize {
+    state
         .channel_owners
         .lock()
         .await
         .values()
-        .any(|s| s == &owner);
-    if !still_has_channels {
-        if let Some(entry) = state.sessions.lock().await.remove(&owner) {
-            let handle = entry.handle.lock().await;
-            let _ = handle
-                .disconnect(russh::Disconnect::ByApplication, "", "en")
-                .await;
-        }
+        .filter(|s| s.as_str() == session_id)
+        .count()
+}
+
+/**
+ * 会话上已经没有别的通道了，就把它也收掉；否则留着。
+ *
+ * `sftp_alive` 由调用方从 `SftpState` 问出来。为什么不能只看 shell 通道：
+ * SFTP 面板挂在同一条 SSH 会话上，但它的通道记在 SftpState 自己的表里 ——
+ * 早先这里只数 channel_owners，于是「关掉终端标签」会把还开着的 SFTP 面板
+ * 一起打断。抽成参数是为了能单测（真跑起来时是 SftpState 的判断）。
+ */
+async fn close_session_if_idle(state: &SshState, session_id: &str, sftp_alive: bool) -> bool {
+    if sftp_alive || shell_channel_count(state, session_id).await > 0 {
+        return false;
     }
-    Some(owner)
+    if let Some(entry) = state.sessions.lock().await.remove(session_id) {
+        let handle = entry.handle.lock().await;
+        let _ = handle
+            .disconnect(russh::Disconnect::ByApplication, "", "en")
+            .await;
+    }
+    true
 }
 
 #[tauri::command]
@@ -593,8 +609,16 @@ pub async fn ssh_close(
 /// 只关一个标签自己的 shell 通道，**不影响共用同一个 SSH session 的兄弟标签**。
 /// 这是关标签的正常路径 —— `ssh_close` 是"我主动想断掉整条 SSH"才用。
 #[tauri::command]
-pub async fn ssh_close_channel(state: State<'_, SshState>, channel_id: u32) -> Result<(), String> {
-    drop_one_channel(&state, channel_id).await;
+pub async fn ssh_close_channel(
+    state: State<'_, SshState>,
+    sftp: State<'_, SftpState>,
+    channel_id: u32,
+) -> Result<(), String> {
+    if let Some(owner) = drop_one_channel(&state, channel_id).await {
+        // 同一会话上可能还挂着 SFTP 面板，那种情况下会话不能拆
+        let sftp_alive = sftp.has_session(&owner).await;
+        close_session_if_idle(&state, &owner, sftp_alive).await;
+    }
     Ok(())
 }
 
@@ -774,5 +798,54 @@ mod tests {
         let text = ConnectError::other("密码认证被拒绝").to_string();
         assert!(!text.starts_with(MISMATCH_MARK));
         assert_eq!(text, "密码认证被拒绝");
+    }
+
+    /**
+     * 关掉最后一条 shell 通道时，只有「真的没人用了」才能拆会话。
+     *
+     * 回归的是这个场景：会话树上开着 SFTP 面板（它的通道记在 SftpState 里），
+     * 此时关掉终端标签 —— 早先这里只数 channel_owners，于是把还在用的 SFTP
+     * 一起打断了。SFTP 那侧的状态由调用方查出来传进来，所以这里能直接测。
+     */
+    #[tokio::test]
+    async fn 关最后一条通道时还有_sftp_就不拆会话() {
+        let state = SshState::default();
+        state
+            .channel_owners
+            .lock()
+            .await
+            .insert(7, "s1".to_string());
+
+        // 真实路径是「先摘通道、再判断要不要拆会话」，顺序不能反
+        let owner = drop_one_channel(&state, 7).await.expect("通道应该记着主");
+        assert_eq!(owner, "s1");
+
+        // 同会话没有别的通道、也没有 SFTP → 会话可以收
+        assert!(
+            close_session_if_idle(&state, "s1", false).await,
+            "一条通道都不剩了还不收会话，会漏连接"
+        );
+        // 同一会话上还挂着 SFTP → 不能收
+        assert!(
+            !close_session_if_idle(&state, "s1", true).await,
+            "还有 SFTP 面板在用，会话不该被拆掉"
+        );
+
+        // 分屏：同一会话两条 shell 通道，摘掉一条之后会话还得留着
+        state
+            .channel_owners
+            .lock()
+            .await
+            .insert(11, "s3".to_string());
+        state
+            .channel_owners
+            .lock()
+            .await
+            .insert(12, "s3".to_string());
+        drop_one_channel(&state, 11).await;
+        assert!(
+            !close_session_if_idle(&state, "s3", false).await,
+            "分屏的另一半还在，会话不该被拆掉"
+        );
     }
 }
