@@ -9,7 +9,7 @@ const inputClass =
 const labelClass = 'mb-1.5 block text-[11px] font-medium tracking-[0.4px] text-ink-subtle'
 
 export function ConnectDialog() {
-  const { connectOpen, setConnectOpen, addTab, saveHost, setError: showError, setHostKeyPrompt } =
+  const { connectOpen, setConnectOpen, addTab, saveHost, setError: showError, setConfirmPrompt } =
     useApp()
 
   const [host, setHost] = useState('')
@@ -22,6 +22,7 @@ export function ConnectDialog() {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [saveToVault, setSaveToVault] = useState(true)
+  const [compat, setCompat] = useState(false)
 
   if (!connectOpen) return null
 
@@ -41,7 +42,7 @@ export function ConnectDialog() {
   }
 
   /** retried：已经"忘掉旧密钥"重试过一次就别再弹窗了，否则会死循环 */
-  const submit = async (retried = false) => {
+  const submit = async (retried = false, forceCompat = false) => {
     if (!host || !username) {
       setError('主机和用户名必填')
       return
@@ -50,6 +51,10 @@ export function ConnectDialog() {
       setError('私钥模式下必须指定私钥文件')
       return
     }
+    // 兼容模式重试时把勾选框也点亮，让用户看见"这次确实降级了"
+    const useCompat = compat || forceCompat
+    if (forceCompat && !compat) setCompat(true)
+
     setBusy(true)
     setError(null)
     try {
@@ -61,6 +66,7 @@ export function ConnectDialog() {
         password: authMode === 'password' ? password || undefined : undefined,
         privateKeyPath: authMode === 'key' ? privateKeyPath : undefined,
         passphrase: authMode === 'key' ? passphrase || undefined : undefined,
+        compat: useCompat,
       })
       // 存进 vault 的才给 hostId：会话树靠它找到这条已建立的连接，
       // 点 SFTP 时直接复用，不必再拨一次
@@ -90,7 +96,8 @@ export function ConnectDialog() {
     } catch (e) {
       const failure = parseConnectError(e)
       if (failure.kind === 'host_key_mismatch' && !retried) {
-        setHostKeyPrompt({
+        setConfirmPrompt({
+          kind: 'host_key_mismatch',
           host: failure.host,
           detail: failure.detail,
           retry: () => void submit(true),

@@ -7,6 +7,11 @@ export interface ConnectConfig {
   password?: string
   privateKeyPath?: string
   passphrase?: string
+  /**
+   * 兼容模式：额外接受 dh-group1/14-sha1 与 aes-cbc 等已废弃算法。
+   * 只该在明确知道对面是老设备时开 —— 默认关，避免把所有连接都降级。
+   */
+  compat?: boolean
 }
 
 /**
@@ -18,6 +23,12 @@ const MISMATCH_MARK = '__HOST_KEY_MISMATCH__'
 
 export type ConnectFailure =
   | { kind: 'host_key_mismatch'; host: string; detail: string; message: string }
+  | {
+      kind: 'algorithms_unsupported'
+      message: string
+      /** true 表示换兼容模式再试有可能通；false 表示这台设备要的东西我们没有 */
+      compatHint: boolean
+    }
   | { kind: 'other'; message: string }
 
 /**
@@ -28,13 +39,26 @@ export type ConnectFailure =
  */
 export function parseConnectError(e: unknown): ConnectFailure {
   if (typeof e === 'object' && e !== null) {
-    const p = e as { kind?: string; host?: string; detail?: string; message?: string }
+    const p = e as {
+      kind?: string
+      host?: string
+      detail?: string
+      message?: string
+      compatHint?: unknown
+    }
     if (p.kind === 'host_key_mismatch' && p.host && p.detail) {
       return {
         kind: 'host_key_mismatch',
         host: p.host,
         detail: p.detail,
         message: `主机 ${p.host} 的密钥与已记录的不符`,
+      }
+    }
+    if (p.kind === 'algorithms_unsupported' && typeof p.message === 'string') {
+      return {
+        kind: 'algorithms_unsupported',
+        message: p.message,
+        compatHint: p.compatHint === true,
       }
     }
     if (typeof p.message === 'string') return { kind: 'other', message: p.message }
@@ -127,6 +151,8 @@ export interface HostRecord {
   port: number
   username: string
   groupId: string | null
+  /** 兼容模式（老设备）。老库里没有这个字段，所以是可选的 */
+  compat?: boolean
   auth: AuthRecord
 }
 

@@ -5,7 +5,7 @@ import { TerminalView } from '@/features/terminal/TerminalView'
 import { CommandPalette } from '@/features/palette/CommandPalette'
 import { SftpPanel } from '@/features/sftp/SftpPanel'
 import { ConnectDialog } from '@/features/session/ConnectDialog'
-import { HostKeyDialog } from '@/features/session/HostKeyDialog'
+import { ConfirmDialog } from '@/features/session/ConfirmDialog'
 import { TunnelDialog } from '@/features/tunnel/TunnelDialog'
 import { SnippetsDialog } from '@/features/snippets/SnippetsDialog'
 import { EditorView } from '@/features/editor/EditorView'
@@ -163,7 +163,7 @@ export default function App() {
       <StatusBar />
       <CommandPalette />
       <ConnectDialog />
-      <HostKeyDialog />
+      <ConfirmDialog />
       <TunnelDialog />
       <SnippetsDialog />
 

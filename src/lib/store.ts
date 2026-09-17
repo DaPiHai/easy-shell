@@ -27,6 +27,13 @@ export type Theme = 'dark' | 'light'
 export type TabKind = 'terminal' | 'sftp' | 'local' | 'editor'
 
 /** loading=检查中 setup=首次设置主密码 locked=待解锁 ready=已解锁 */
+/**
+ * 需要用户拍板才能继续的连接失败。见 store 里 `confirmPrompt` 的说明。
+ */
+export type ConfirmPrompt =
+  | { kind: 'host_key_mismatch'; host: string; detail: string; retry: () => void }
+  | { kind: 'algo_compat'; message: string; retry: () => void }
+
 export type VaultPhase = 'loading' | 'setup' | 'locked' | 'ready'
 
 export interface Tab {
@@ -73,14 +80,16 @@ interface AppState {
   setTunnelOpen: (open: boolean) => void
 
   /**
-   * 主机密钥不匹配时的确认弹窗。
+   * 需要用户拍板才能继续的连接失败。
    *
-   * 为什么单开一个：服务器重装后密钥必然变，如果只甩一句红字，
-   * 这台机器就再也连不上了（除非手删 known_hosts）。retry 由调用方塞进来，
-   * 因为"重连后要开终端还是开 SFTP"只有调用方知道。
+   * 两种情况都是**不该由程序替用户决定**的安全事项，所以共用同一个确认弹窗：
+   * - 主机密钥变了：可能是中间人，也可能只是服务器重装了
+   * - 算法谈不拢：要连上就得放开已废弃的算法
+   *
+   * `retry` 由调用方塞进来，因为"重试后是开终端还是开 SFTP"只有调用方知道。
    */
-  hostKeyPrompt: { host: string; detail: string; retry: () => void } | null
-  setHostKeyPrompt: (prompt: { host: string; detail: string; retry: () => void } | null) => void
+  confirmPrompt: ConfirmPrompt | null
+  setConfirmPrompt: (prompt: ConfirmPrompt | null) => void
 
   snippetsOpen: boolean
   setSnippetsOpen: (open: boolean) => void
@@ -182,8 +191,8 @@ export const useApp = create<AppState>((set, get) => ({
   tunnelOpen: false,
   setTunnelOpen: (open) => set({ tunnelOpen: open }),
 
-  hostKeyPrompt: null,
-  setHostKeyPrompt: (prompt) => set({ hostKeyPrompt: prompt }),
+  confirmPrompt: null,
+  setConfirmPrompt: (prompt) => set({ confirmPrompt: prompt }),
 
   snippetsOpen: false,
   setSnippetsOpen: (open) => set({ snippetsOpen: open }),

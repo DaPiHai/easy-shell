@@ -310,6 +310,7 @@ async fn connect_sftp(port: u16) -> russh_sftp::client::SftpSession {
         password: Some(TEST_PASS.to_string()),
         private_key_path: None,
         passphrase: None,
+        compat: false,
     };
     let handle = connect_and_auth(&cfg).await.unwrap();
     let channel = handle.channel_open_session().await.unwrap();

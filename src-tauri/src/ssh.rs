@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
@@ -6,6 +7,7 @@ use std::time::Duration;
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine as _;
 use russh::client::{self, AuthResult, Config, Handle, Handler};
+use russh::{cipher, kex, AlgorithmKind, Preferred};
 use russh::ChannelMsg;
 
 use crate::batcher::FrameBatcher;
@@ -29,10 +31,113 @@ pub struct ConnectConfig {
     pub password: Option<String>,
     pub private_key_path: Option<String>,
     pub passphrase: Option<String>,
+    /// 兼容模式：额外接受一批已废弃但仍被老交换机/路由器依赖的算法
+    /// （dh-group1/14-sha1、aes*-cbc、3des-cbc）。
+    ///
+    /// 默认关 —— 这些算法有已知弱点，不该为了"能连"就把所有连接都降级。
+    /// 只有明确知道对面是老设备时才勾。
+    #[serde(default)]
+    pub compat: bool,
 }
 
 fn default_port() -> u16 {
     22
+}
+
+/**
+ * 构造算法优先表。
+ *
+ * 兼容模式追加的废弃算法一律放在**末尾**：SSH 协商挑的是客户端列表里第一个
+ * 双方都支持的，放末尾意味着现代设备照旧选 chacha20 / curve25519，
+ * 不会因为"要兼容老设备"就把日常连接一起拖回 3des-cbc。顺序是刻意的，别挪。
+ *
+ * 主机密钥算法不在追加范围内 —— russh 压根没实现 ssh-dss，加上也连不上。
+ * 这是能力边界，不是配置问题（见 `algo_failure` 里对 ssh-dss 的专门说明）。
+ */
+fn preferred(compat: bool) -> Preferred {
+    if !compat {
+        return Preferred::DEFAULT;
+    }
+
+    let mut kex = Preferred::DEFAULT.kex.to_vec();
+    // dh-group14/group1-sha1：老交换机和路由器的标配
+    kex.extend([kex::DH_G14_SHA1, kex::DH_G1_SHA1, kex::DH_GEX_SHA1]);
+
+    let mut cipher = Preferred::DEFAULT.cipher.to_vec();
+    // 只加 aes-cbc，不加 3des-cbc：后者被 russh 的 `des` feature 门控着，
+    // 而且 64 位块长的 3des 有 SWEET32 实锤攻击，为了连老设备引入一个已知破的
+    // 算法不划算。真撞上只支持 3des 的设备再单独权衡。
+    cipher.extend([cipher::AES_256_CBC, cipher::AES_192_CBC, cipher::AES_128_CBC]);
+
+    Preferred {
+        kex: Cow::Owned(kex),
+        cipher: Cow::Owned(cipher),
+        ..Preferred::DEFAULT
+    }
+}
+
+/**
+ * 把 russh 的 NoCommonAlgo 翻译成人话。
+ *
+ * 单独抽出来是为了能单测：起一个只支持废弃算法的服务端很麻烦，而真正要守住的是
+ * 这些分支判断，不是网络往返。
+ */
+fn algo_failure(kind: &AlgorithmKind, ours: &[String], theirs: &[String]) -> ConnectError {
+    let theirs_joined = theirs.join(", ");
+    let ours_joined = ours.join(", ");
+
+    // 主机密钥算法谈不拢时 compat 帮不上忙（它只动 kex 和 cipher），得另说
+    if matches!(kind, AlgorithmKind::Key) {
+        // 对面只肯用 ssh-dss 是死局：russh 没实现它，重试多少次都一样。
+        // 必须挑明，否则用户会以为是自己密码打错了。
+        if !theirs.is_empty() && theirs.iter().all(|a| a.contains("dss")) {
+            return ConnectError::AlgorithmsUnsupported {
+                compat_hint: false,
+                message: format!(
+                    "算法协商失败：这台设备只提供 ssh-dss 主机密钥。\n\
+                     ssh-dss 早已被废弃，本项目依赖的 russh 没有实现它，无法连接。\n\
+                     服务端支持：{theirs_joined}\n\
+                     建议：在设备上改用 rsa 或 ecdsa 主机密钥后再连。"
+                ),
+            };
+        }
+        return ConnectError::AlgorithmsUnsupported {
+            compat_hint: false,
+            message: format!(
+                "算法协商失败：双方没有共同的主机密钥算法。\n\
+                 服务端支持：{theirs_joined}\n\
+                 我们支持：{ours_joined}\n\
+                 兼容模式只放开密钥交换和加密算法，救不了主机密钥 —— 需要在设备上启用我们支持的密钥类型。"
+            ),
+        };
+    }
+
+    let what = match kind {
+        AlgorithmKind::Kex => "密钥交换算法",
+        AlgorithmKind::Cipher => "加密算法",
+        AlgorithmKind::Mac => "消息认证算法",
+        AlgorithmKind::Compression => "压缩算法",
+        AlgorithmKind::Key => unreachable!("上面已经处理"),
+    };
+
+    // 只有 kex / cipher 是 compat 能救的；mac 与压缩默认列表已经够宽
+    let compat_hint = matches!(kind, AlgorithmKind::Kex | AlgorithmKind::Cipher);
+
+    let tail = if compat_hint {
+        "这台设备可能比较老 —— 可以用兼容模式（放开 dh-group1/14-sha1 与 aes-cbc）再试一次。"
+    } else {
+        "兼容模式不放开这一类算法，重试没有意义。"
+    };
+
+    ConnectError::AlgorithmsUnsupported {
+        compat_hint,
+        message: format!(
+            "算法协商失败：双方没有共同的{what}。\n\
+             服务端支持：{theirs_joined}\n\
+             我们支持：{ours_joined}\n\
+             {tail}"
+        ),
+    }
 }
 
 /// 前端兜底用的标记。
@@ -51,6 +156,18 @@ pub const MISMATCH_MARK: &str = "__HOST_KEY_MISMATCH__";
 pub enum ConnectError {
     /// 主机密钥变了：可能是中间人，也可能是服务器重装了
     HostKeyMismatch { host: String, detail: String },
+    /**
+     * 算法协商谈不拢。老设备的典型症状。
+     *
+     * `compat_hint` 为 true 表示"换兼容模式再试一次"有可能通；
+     * false 表示这台设备要的东西我们根本没有（比如 ssh-dss），重试无意义。
+     * 前端据此决定要不要给"用兼容算法重试"这个按钮 —— 给了却救不活更糟。
+     */
+    AlgorithmsUnsupported {
+        message: String,
+        #[serde(rename = "compatHint")]
+        compat_hint: bool,
+    },
     /// 其余情况，前端把 message 显示出来就行
     Other { message: String },
 }
@@ -69,6 +186,7 @@ impl std::fmt::Display for ConnectError {
             ConnectError::HostKeyMismatch { host, detail } => {
                 write!(f, "{MISMATCH_MARK} {host}\n{detail}")
             }
+            ConnectError::AlgorithmsUnsupported { message, .. } => f.write_str(message),
             ConnectError::Other { message } => f.write_str(message),
         }
     }
@@ -166,7 +284,10 @@ pub async fn connect_and_auth(config: &ConnectConfig) -> Result<Handle<ClientHan
     // 一个空闲几分钟的终端会被判 KeepaliveTimeout 直接掐断 —— 正在跑的东西就没了。
     // 误杀的代价远大于"探出半开连接"的收益，所以默认关。
     // TODO: 真要做半开检测，应该做成连接级可配项，并且只在用户显式开启时才发。
-    let cfg = Arc::new(Config::default());
+    let cfg = Arc::new(Config {
+        preferred: preferred(config.compat),
+        ..Config::default()
+    });
 
     let addr = (config.host.as_str(), config.port);
 
@@ -177,6 +298,11 @@ pub async fn connect_and_auth(config: &ConnectConfig) -> Result<Handle<ClientHan
     let handle = match client::connect(cfg, addr, handler).await {
         Ok(h) => h,
         Err(e) => {
+            // 算法谈不拢要第一个认出来：这句话决定用户下一步做什么。
+            // 甩一句通用的"连接失败"会让人去查密码和网络，方向全错。
+            if let russh::Error::NoCommonAlgo { kind, ours, theirs } = &e {
+                return Err(algo_failure(kind, ours, theirs));
+            }
             return Err(match take_mismatch() {
                 Some(detail) => ConnectError::HostKeyMismatch {
                     host: format!("{}:{}", config.host, config.port),
@@ -475,6 +601,159 @@ pub async fn ssh_close_channel(state: State<'_, SshState>, channel_id: u32) -> R
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /**
+     * 兼容模式追加的废弃算法必须排在末尾。
+     *
+     * SSH 挑的是客户端列表里第一个双方都支持的，所以顺序决定了现代设备会不会被
+     * 无故降级。这是这套改动里最容易写错、也最不容易被发现的地方 ——
+     * 写错了功能照常工作，只是所有连接都悄悄退到 CBC 上。
+     */
+    #[test]
+    fn 兼容算法追加在末尾不挤掉现代算法() {
+        let kex_names = |p: &Preferred| {
+            p.kex
+                .iter()
+                .map(|n| n.as_ref())
+                .collect::<Vec<_>>()
+                .join(",")
+        };
+        let cipher_names = |p: &Preferred| {
+            p.cipher
+                .iter()
+                .map(|n| n.as_ref())
+                .collect::<Vec<_>>()
+                .join(",")
+        };
+
+        let normal = preferred(false);
+        assert!(!kex_names(&normal).contains("diffie-hellman-group1-sha1"));
+        assert!(!cipher_names(&normal).contains("aes128-cbc"));
+
+        let compat = preferred(true);
+        let kex = kex_names(&compat);
+        let cipher = cipher_names(&compat);
+
+        // 现代算法必须还在，且仍在废弃算法之前
+        assert!(kex.contains("curve25519-sha256"), "现代 kex 被挤掉了: {kex}");
+        assert!(
+            kex.find("curve25519-sha256").unwrap() < kex.find("diffie-hellman-group1-sha1").unwrap(),
+            "废弃 kex 排到了现代算法前面: {kex}"
+        );
+        assert!(
+            cipher.find("chacha20-poly1305").unwrap() < cipher.find("aes128-cbc").unwrap(),
+            "废弃 cipher 排到了现代算法前面: {cipher}"
+        );
+    }
+
+    #[test]
+    fn 兼容模式确实放开老设备要的算法() {
+        let p = preferred(true);
+        let kex: Vec<&str> = p.kex.iter().map(|n| n.as_ref()).collect();
+        let cipher: Vec<&str> = p.cipher.iter().map(|n| n.as_ref()).collect();
+
+        assert!(kex.contains(&"diffie-hellman-group1-sha1"));
+        assert!(kex.contains(&"diffie-hellman-group14-sha1"));
+        assert!(cipher.contains(&"aes128-cbc"));
+        assert!(cipher.contains(&"aes256-cbc"));
+    }
+
+    /// 只支持 ssh-dss 的设备是死局，必须说清楚并且**不能**建议兼容模式 ——
+    /// 给了"重试"按钮却永远救不活，比直接说"连不上"更让人抓狂
+    #[test]
+    fn ssh_dss_时说明无解() {
+        let e = algo_failure(
+            &AlgorithmKind::Key,
+            &["ssh-ed25519".to_string()],
+            &["ssh-dss".to_string()],
+        );
+        let text = e.to_string();
+        assert!(text.contains("ssh-dss"), "没点名 ssh-dss: {text}");
+
+        match e {
+            ConnectError::AlgorithmsUnsupported { compat_hint, .. } => {
+                assert!(!compat_hint, "ssh-dss 无解却还建议了兼容模式")
+            }
+            other => panic!("错误类型不对: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ssh_dss_时给出可操作建议() {
+        let e = algo_failure(
+            &AlgorithmKind::Key,
+            &["ssh-ed25519".to_string()],
+            &["ssh-dss".to_string()],
+        );
+        assert!(e.to_string().contains("rsa"), "没告诉用户该怎么办");
+    }
+
+    /// 老设备最典型的症状：只肯用 CBC
+    #[test]
+    fn cipher_谈不拢时建议兼容模式() {
+        let e = algo_failure(
+            &AlgorithmKind::Cipher,
+            &["chacha20-poly1305@openssh.com".to_string()],
+            &["aes128-cbc".to_string(), "3des-cbc".to_string()],
+        );
+        let text = e.to_string();
+        assert!(text.contains("加密算法"), "没说清是哪一类: {text}");
+        assert!(
+            text.contains("aes128-cbc"),
+            "没把服务端算法列出来让人判断: {text}"
+        );
+
+        match e {
+            ConnectError::AlgorithmsUnsupported { compat_hint, .. } => {
+                assert!(compat_hint, "CBC 是 compat 能救的，却没给提示")
+            }
+            other => panic!("错误类型不对: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn kex_谈不拢时建议兼容模式() {
+        let e = algo_failure(
+            &AlgorithmKind::Kex,
+            &["curve25519-sha256".to_string()],
+            &["diffie-hellman-group1-sha1".to_string()],
+        );
+        assert!(e.to_string().contains("密钥交换算法"));
+        match e {
+            ConnectError::AlgorithmsUnsupported { compat_hint, .. } => assert!(compat_hint),
+            other => panic!("错误类型不对: {other:?}"),
+        }
+    }
+
+    /// mac / 压缩不在 compat 的放开范围内，给了提示也是白试
+    #[test]
+    fn mac_谈不拢时不谎称兼容模式有用() {
+        let e = algo_failure(
+            &AlgorithmKind::Mac,
+            &["hmac-sha2-256".to_string()],
+            &["hmac-md5".to_string()],
+        );
+        match e {
+            ConnectError::AlgorithmsUnsupported { compat_hint, .. } => {
+                assert!(!compat_hint, "compat 改不了 mac，不该给提示")
+            }
+            other => panic!("错误类型不对: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn 算法错误序列化成前端认得的形状() {
+        let e = algo_failure(
+            &AlgorithmKind::Cipher,
+            &["chacha20-poly1305@openssh.com".to_string()],
+            &["aes128-cbc".to_string()],
+        );
+        let v = serde_json::to_value(&e).expect("序列化失败");
+        assert_eq!(v["kind"], "algorithms_unsupported");
+        // 前端读的是 camelCase
+        assert_eq!(v["compatHint"], true);
+        assert!(v["message"].as_str().unwrap().contains("aes128-cbc"));
+    }
 
     /// 前端的 parseConnectError 靠这个前缀兜底（万一 Tauri 把 Err 压成字符串），
     /// 格式不能随便改

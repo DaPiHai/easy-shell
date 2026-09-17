@@ -32,7 +32,7 @@ export function SessionTree() {
     addTab,
     setError,
     removeHost,
-    setHostKeyPrompt,
+    setConfirmPrompt,
   } = useApp()
 
   /** retried：已经"忘掉旧密钥"重试过一次就别再弹窗了，否则会死循环 */
@@ -52,7 +52,8 @@ export function SessionTree() {
     } catch (e) {
       const failure = parseConnectError(e)
       if (failure.kind === 'host_key_mismatch' && !retried) {
-        setHostKeyPrompt({
+        setConfirmPrompt({
+          kind: 'host_key_mismatch',
           host: failure.host,
           detail: failure.detail,
           retry: () => void connect(host, kind, true),

@@ -35,6 +35,9 @@ pub struct HostRecord {
     pub port: u16,
     pub username: String,
     pub group_id: Option<String>,
+    /// 兼容模式（连老设备用的废弃算法）。后加的字段，老库里没有，所以要给默认值
+    #[serde(default)]
+    pub compat: bool,
     pub auth: AuthRecord,
 }
 
@@ -111,7 +114,35 @@ fn init_schema(conn: &Connection) -> Result<(), String> {
             created_at INTEGER NOT NULL
         );",
     )
-    .map_err(|e| format!("初始化数据库失败: {e}"))
+    .map_err(|e| format!("初始化数据库失败: {e}"))?;
+
+    // compat 是后加的列：老库建表时没有，而 CREATE TABLE IF NOT EXISTS 对已存在的表
+    // 什么都不做，所以只能单独 ALTER 补上。也不能无脑 ALTER —— 列已存在会报错。
+    if !column_exists(conn, "hosts", "compat")? {
+        conn.execute(
+            "ALTER TABLE hosts ADD COLUMN compat INTEGER NOT NULL DEFAULT 0",
+            [],
+        )
+        .map_err(|e| format!("升级 hosts 表失败: {e}"))?;
+    }
+
+    Ok(())
+}
+
+/** 表里有没有这一列。用来给老库补字段，避免 ALTER 到一个已存在的列上报错 */
+fn column_exists(conn: &Connection, table: &str, column: &str) -> Result<bool, String> {
+    let mut stmt = conn
+        .prepare(&format!("PRAGMA table_info({table})"))
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(|e| e.to_string())?;
+    for name in rows {
+        if name.map_err(|e| e.to_string())? == column {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn meta_get(conn: &Connection, key: &str) -> Result<Option<String>, String> {
@@ -254,7 +285,7 @@ pub fn hosts_list(state: State<'_, Vault>) -> Result<Vec<HostRecord>, String> {
     let db = state.db.lock().map_err(|_| "数据库锁异常".to_string())?;
 
     let mut stmt = db
-        .prepare("SELECT id, name, address, port, username, group_id, secret FROM hosts")
+        .prepare("SELECT id, name, address, port, username, group_id, secret, compat FROM hosts")
         .map_err(|e| e.to_string())?;
     let rows = stmt
         .query_map([], |row| {
@@ -266,13 +297,14 @@ pub fn hosts_list(state: State<'_, Vault>) -> Result<Vec<HostRecord>, String> {
                 row.get::<_, String>(4)?,
                 row.get::<_, Option<String>>(5)?,
                 row.get::<_, Vec<u8>>(6)?,
+                row.get::<_, bool>(7)?,
             ))
         })
         .map_err(|e| e.to_string())?;
 
     let mut hosts = Vec::new();
     for row in rows {
-        let (id, name, address, port, username, group_id, secret) =
+        let (id, name, address, port, username, group_id, secret, compat) =
             row.map_err(|e| e.to_string())?;
         let plaintext = decrypt_secret(&key, &secret)?;
         let auth: AuthRecord =
@@ -284,6 +316,7 @@ pub fn hosts_list(state: State<'_, Vault>) -> Result<Vec<HostRecord>, String> {
             port,
             username,
             group_id,
+            compat,
             auth,
         });
     }
@@ -300,15 +333,16 @@ pub fn hosts_save(state: State<'_, Vault>, host: HostRecord) -> Result<(), Strin
     let secret = encrypt_secret(&key, &plaintext)?;
 
     db.execute(
-        "INSERT INTO hosts (id, name, address, port, username, group_id, secret)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+        "INSERT INTO hosts (id, name, address, port, username, group_id, secret, compat)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
          ON CONFLICT(id) DO UPDATE SET
             name = excluded.name,
             address = excluded.address,
             port = excluded.port,
             username = excluded.username,
             group_id = excluded.group_id,
-            secret = excluded.secret",
+            secret = excluded.secret,
+            compat = excluded.compat",
         params![
             host.id,
             host.name,
@@ -317,6 +351,7 @@ pub fn hosts_save(state: State<'_, Vault>, host: HostRecord) -> Result<(), Strin
             host.username,
             host.group_id,
             secret,
+            host.compat,
         ],
     )
     .map_err(|e| format!("保存主机失败: {e}"))?;

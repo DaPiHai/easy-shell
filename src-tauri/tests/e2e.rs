@@ -160,6 +160,7 @@ fn config_for(port: u16) -> ConnectConfig {
         password: Some(TEST_PASS.to_string()),
         private_key_path: None,
         passphrase: None,
+        compat: false,
     }
 }
 
@@ -200,6 +201,7 @@ async fn rsa_私钥能认证() {
         password: None,
         private_key_path: Some(path.to_string_lossy().to_string()),
         passphrase: None,
+        compat: false,
     };
 
     let result = connect_and_auth(&cfg).await;
