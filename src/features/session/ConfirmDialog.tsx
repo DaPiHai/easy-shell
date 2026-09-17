@@ -86,7 +86,7 @@ export function ConfirmDialog() {
                   setConfirmPrompt(null)
                   retry()
                 }}
-                className="h-8 rounded-md bg-accent px-3 text-[13px] font-medium text-on-accent transition-colors hover:bg-accent-hover"
+                className="h-8 rounded-md bg-accent px-3 text-[13px] font-medium text-on-accent transition-colors hover:bg-accent-hover active:bg-accent-focus"
               >
                 用兼容算法重试
               </button>

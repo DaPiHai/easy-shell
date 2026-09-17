@@ -100,7 +100,7 @@ export function UnlockScreen() {
         <button
           onClick={() => void submit()}
           disabled={busy}
-          className="h-9 w-full rounded-md bg-accent text-[13px] font-medium text-on-accent transition-colors hover:bg-accent-hover disabled:opacity-50"
+          className="h-9 w-full rounded-md bg-accent text-[13px] font-medium text-on-accent transition-colors hover:bg-accent-hover active:bg-accent-focus disabled:opacity-50"
         >
           {busy ? '处理中…' : isSetup ? '创建并解锁' : '解锁'}
         </button>

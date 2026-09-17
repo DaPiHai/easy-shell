@@ -126,7 +126,7 @@ export function TunnelDialog() {
             <button
               onClick={() => void start()}
               disabled={busy}
-              className="h-8 shrink-0 rounded-md bg-accent px-3 text-[13px] font-medium text-on-accent transition-colors hover:bg-accent-hover disabled:opacity-50"
+              className="h-8 shrink-0 rounded-md bg-accent px-3 text-[13px] font-medium text-on-accent transition-colors hover:bg-accent-hover active:bg-accent-focus disabled:opacity-50"
             >
               <Plus size={13} className="inline" /> 添加
             </button>

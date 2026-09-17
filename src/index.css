@@ -19,6 +19,7 @@
 
   --color-accent: var(--accent);
   --color-accent-hover: var(--accent-hover);
+  --color-accent-focus: var(--accent-focus);
   --color-on-accent: var(--on-accent);
 
   --color-success: var(--success);
@@ -27,6 +28,24 @@
 
   --font-sans: var(--font-ui);
   --font-mono: var(--font-mono);
+
+  /**
+   * 圆角比例尺必须声明在这里，不能只写在 tokens.css。
+   *
+   * 工具类是 Tailwind 按 @theme 里的键生成的：只有 `:root` 变量时，`rounded-pill`
+   * 这种没有 Tailwind 默认值的类**根本不会生成**（进度条就吃了这个亏 —— 类名写着
+   * 却没有一条 CSS 匹配它）。而 tokens.css 里的 --radius-sm/md/lg/xl 之所以像是生效了，
+   * 只是因为它们和 Tailwind 内置的变量同名、靠层叠顺序盖住了内置值，属于巧合而非约定。
+   *
+   * 值本身直接写在这里（不写 `var(--radius-*)`）是刻意的：那是自我引用，
+   * CSS 会判定成循环，整个变量连带 index.css 里几处 var() 用法一起失效。
+   */
+  --radius-xs: 4px;
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --radius-xl: 16px;
+  --radius-pill: 9999px;
 }
 
 @layer base {

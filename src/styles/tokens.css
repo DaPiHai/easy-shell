@@ -30,12 +30,9 @@
   --font-mono: 'JetBrains Mono', 'Cascadia Code', 'Cascadia Mono', Consolas,
     'Microsoft YaHei Mono', monospace;
 
-  --radius-xs: 4px;
-  --radius-sm: 6px;
-  --radius-md: 8px;
-  --radius-lg: 12px;
-  --radius-xl: 16px;
-  --radius-pill: 9999px;
+  /* 圆角比例尺不在这里 —— 它必须写在 index.css 的 @theme 里才会生成
+     rounded-sm/md/lg/xl/pill 这些工具类（写在这儿只有 :root 变量，没有类）。
+     见 `src/index.css` 的 @theme 块，值仍在 DESIGN.md 的「圆角」表里对账。 */
 
   /* terminal ansi 16 */
   --term-bg: #010102;
