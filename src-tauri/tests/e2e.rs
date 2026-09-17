@@ -5,15 +5,16 @@
 //! 为什么需要这个：SFTP 的目录递归、ConPTY、转发这些逻辑靠读代码推演不可靠，
 //! 而每次都找真服务器手动点太慢，所以把服务端搬进测试里常驻回归。
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use easy_shell_lib::ssh::{connect_and_auth, ConnectConfig};
+use easy_shell_lib::ssh::{connect_and_auth, ConnectConfig, ConnectError};
 use russh::keys::{Algorithm, HashAlg, PrivateKey};
 use russh::server::{self, Auth, Msg, Server as _, Session};
-use russh::{Channel, ChannelId, ChannelMsg};
+use russh::{cipher, kex, Channel, ChannelId, ChannelMsg, Preferred};
 use tokio::net::TcpListener;
 use tokio::sync::Mutex;
 
@@ -118,6 +119,11 @@ impl server::Handler for TestServer {
 
 /// 起一个监听 127.0.0.1 随机端口的服务端，返回端口号
 async fn spawn_server() -> u16 {
+    spawn_server_with(Preferred::DEFAULT).await
+}
+
+/// 起一个算法表被限定的服务端 —— 用来假装只认已废弃算法的老设备
+async fn spawn_server_with(preferred: Preferred) -> u16 {
     // 先占一个端口拿到号，再交给 run_on_address（它内部自己 bind，不借用外部 socket）
     let probe = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
     let port = probe.local_addr().unwrap().port();
@@ -126,6 +132,7 @@ async fn spawn_server() -> u16 {
     let key = PrivateKey::random(&mut rand10::rng(), Algorithm::Ed25519).unwrap();
     let config = Arc::new(russh::server::Config {
         keys: vec![key],
+        preferred,
         auth_rejection_time: Duration::from_secs(1),
         ..Default::default()
     });
@@ -178,6 +185,45 @@ async fn 错误密码被拒绝() {
     cfg.password = Some("wrong".to_string());
     let result = connect_and_auth(&cfg).await;
     assert!(result.is_err(), "错误密码竟然通过了");
+}
+
+/**
+ * 老设备：服务端只提供 dh-group1-sha1 + aes128-cbc，别的都不谈。
+ *
+ * 单测只能验证「算法表里有没有这些名字」，协商到底成不成得靠真握手 ——
+ * 这条用例同时守住两头：不带兼容模式要失败**且明确说值得重试**（前端靠
+ * compat_hint 决定要不要给「用兼容算法重试」那个按钮），带了就要真能连上。
+ */
+#[tokio::test]
+async fn 老设备只认废弃算法时兼容模式能连上() {
+    let port = spawn_server_with(Preferred {
+        kex: Cow::Owned(vec![kex::DH_G1_SHA1]),
+        cipher: Cow::Owned(vec![cipher::AES_128_CBC]),
+        ..Preferred::DEFAULT
+    })
+    .await;
+
+    let strict = connect_and_auth(&config_for(port)).await;
+    match strict {
+        Err(ConnectError::AlgorithmsUnsupported {
+            compat_hint,
+            message,
+        }) => {
+            assert!(compat_hint, "kex 谈不拢却没告诉前端可以试兼容模式: {message}");
+        }
+        Err(other) => panic!("期望算法不兼容错误，实际拿到: {other:?}"),
+        // Handle 没有实现 Debug，所以这条分支不能塞进上面那句里
+        Ok(_) => panic!("默认算法竟然连上了 —— 测试服务端的算法限制没生效"),
+    }
+
+    let mut cfg = config_for(port);
+    cfg.compat = true;
+    let handle = connect_and_auth(&cfg).await;
+    assert!(
+        handle.is_ok(),
+        "开了兼容模式仍然连不上，这条路就是死的: {:?}",
+        handle.err()
+    );
 }
 
 #[tokio::test]

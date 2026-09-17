@@ -90,6 +90,8 @@ export function ConnectDialog() {
             authMode === 'key'
               ? { type: 'key', privateKeyPath, passphrase: passphrase || null }
               : { type: 'password', password },
+          // 存进去才能让会话树「点一下就带上兼容模式」——否则老设备每次都得手勾
+          compat: useCompat,
         })
       }
       close()
@@ -101,6 +103,20 @@ export function ConnectDialog() {
           host: failure.host,
           detail: failure.detail,
           retry: () => void submit(true),
+        })
+        return
+      }
+      /**
+       * 算法谈不拢时给一条出路，而不是只甩一段红字。
+       *
+       * compatHint 为 false 说明重试也是白试（对面只要 ssh-dss 主机密钥，
+       * 或者卡在 mac / 压缩上 —— 兼容模式不放开这两类），那就别浪费用户一次点击。
+       */
+      if (failure.kind === 'algorithms_unsupported' && failure.compatHint && !retried) {
+        setConfirmPrompt({
+          kind: 'algo_compat',
+          message: failure.message,
+          retry: () => void submit(true, true),
         })
         return
       }
@@ -223,6 +239,20 @@ export function ConnectDialog() {
             </>
           )}
 
+          <label className="flex cursor-pointer items-center gap-2 text-[12px] text-ink-subtle">
+            <input
+              type="checkbox"
+              checked={compat}
+              onChange={(e) => setCompat(e.target.checked)}
+              className="h-3.5 w-3.5 accent-accent"
+            />
+            兼容模式（老设备）
+          </label>
+          <p className="mb-3 mt-1 text-[11px] leading-relaxed text-ink-tertiary">
+            额外接受 dh-group1/14-sha1、aes-cbc 这类已废弃算法。这是安全降级，
+            只在确认对面是老交换机、路由器时才勾。
+          </p>
+
           <label className="mb-4 flex cursor-pointer items-center gap-2 text-[12px] text-ink-subtle">
             <input
               type="checkbox"
@@ -249,7 +279,7 @@ export function ConnectDialog() {
             <button
               onClick={() => void submit()}
               disabled={busy}
-              className="h-8 rounded-md bg-accent px-3 text-[13px] font-medium text-on-accent transition-colors hover:bg-accent-hover disabled:opacity-50"
+              className="h-8 rounded-md bg-accent px-3 text-[13px] font-medium text-on-accent transition-colors hover:bg-accent-hover active:bg-accent-focus disabled:opacity-50"
             >
               {busy ? '连接中…' : '连接'}
             </button>

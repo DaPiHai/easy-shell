@@ -11,7 +11,11 @@ import {
 import { useApp } from '@/lib/store'
 import { parseConnectError, sshConnect, type HostRecord } from '@/lib/api'
 
-function hostToConfig(host: HostRecord) {
+/**
+ * `compatOverride` 供确认框里的「用兼容算法重试」把兼容模式强开一次；
+ * 平时走 host.compat —— 那是保存时勾了兼容模式的主机，不带上等于白存。
+ */
+function hostToConfig(host: HostRecord, compatOverride?: boolean) {
   return {
     host: host.address,
     port: host.port,
@@ -19,6 +23,7 @@ function hostToConfig(host: HostRecord) {
     password: host.auth.type === 'password' ? host.auth.password : undefined,
     privateKeyPath: host.auth.type === 'key' ? host.auth.privateKeyPath : undefined,
     passphrase: host.auth.type === 'key' ? (host.auth.passphrase ?? undefined) : undefined,
+    compat: compatOverride ?? host.compat ?? false,
   }
 }
 
@@ -40,9 +45,10 @@ export function SessionTree() {
     host: HostRecord,
     kind: 'terminal' | 'sftp' = 'terminal',
     retried = false,
+    forceCompat = false,
   ) => {
     try {
-      const sessionId = await sshConnect(hostToConfig(host))
+      const sessionId = await sshConnect(hostToConfig(host, forceCompat))
       addTab({
         title: kind === 'sftp' ? `${host.name} · 文件` : `${host.username}@${host.address}`,
         kind,
@@ -57,6 +63,16 @@ export function SessionTree() {
           host: failure.host,
           detail: failure.detail,
           retry: () => void connect(host, kind, true),
+        })
+        return
+      }
+      // 老设备在这里第一次露馅：给「用兼容算法重试」这条路，
+      // 而不是让用户自己去翻对话框重新填一遍。compatHint 为 false 时不给，理由同 ConnectDialog
+      if (failure.kind === 'algorithms_unsupported' && failure.compatHint && !retried) {
+        setConfirmPrompt({
+          kind: 'algo_compat',
+          message: failure.message,
+          retry: () => void connect(host, kind, true, true),
         })
         return
       }
