@@ -80,7 +80,7 @@ export function TabBar() {
                   className={`transition-colors ${
                     tab.split
                       ? 'text-accent'
-                      : 'text-ink-tertiary opacity-0 hover:text-ink group-hover:opacity-100'
+                      : 'text-ink-tertiary opacity-70 hover:text-ink hover:opacity-100'
                   }`}
                   onClick={(e) => {
                     e.stopPropagation()
@@ -91,7 +91,8 @@ export function TabBar() {
             )}
             <X
               size={12}
-              className="shrink-0 text-ink-tertiary opacity-0 transition-opacity hover:text-ink group-hover:opacity-100"
+              // 常驻但压暗：完全藏起来等于没有入口，全亮又太容易误点关掉
+              className="shrink-0 text-ink-tertiary opacity-60 transition-opacity hover:text-ink hover:opacity-100"
               onClick={(e) => {
                 e.stopPropagation()
                 // 只关标签：通道由 TerminalView 卸载时自己关。

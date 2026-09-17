@@ -4,16 +4,18 @@ import {
   Columns,
   FileCode2,
   FolderOpen,
+  FolderPlus,
   Lock,
   Plus,
+  RotateCcw,
   ScrollText,
   SunMoon,
   TerminalSquare,
+  X,
   ZoomIn,
   ZoomOut,
 } from 'lucide-react'
 import { useApp } from '@/lib/store'
-import { isDesktop, pickFile } from '@/lib/api'
 
 export function CommandPalette() {
   const {
@@ -64,6 +66,27 @@ export function CommandPalette() {
                 <TerminalSquare size={14} />
                 新建本地 Shell
               </Command.Item>
+              <Command.Item
+                onSelect={() => {
+                  // 分组取名走自绘输入弹窗，逻辑在 store 里
+                  useApp.getState().promptNewGroup()
+                  close()
+                }}
+              >
+                <FolderPlus size={14} />
+                新建分组
+              </Command.Item>
+              <Command.Item
+                onSelect={() => {
+                  const { activeTabId, requestCloseTab } = useApp.getState()
+                  close()
+                  if (activeTabId) requestCloseTab(activeTabId)
+                }}
+              >
+                <X size={14} />
+                关闭当前标签
+                <span className="ml-auto text-[11px] text-ink-tertiary">Ctrl W</span>
+              </Command.Item>
             </Command.Group>
 
             <Command.Group heading="视图">
@@ -88,21 +111,20 @@ export function CommandPalette() {
                 <span className="ml-auto text-[11px] text-ink-tertiary">Ctrl -</span>
               </Command.Item>
               <Command.Item
-                onSelect={async () => {
+                onSelect={() => {
+                  useApp.getState().setTermFontSize(13)
                   close()
-                  // 内置编辑器不一定非要从 SFTP 进，本机文件也能直接开
-                  if (!isDesktop()) {
-                    useApp.getState().setError('文件选择只在桌面版可用')
-                    return
-                  }
-                  const path = await pickFile('打开文件')
-                  if (!path) return
-                  const name = path.split(/[\\/]/).filter(Boolean).pop() ?? path
-                  useApp.getState().addTab({
-                    title: name,
-                    kind: 'editor',
-                    editorTarget: { side: 'local', path, sftpId: null },
-                  })
+                }}
+              >
+                <RotateCcw size={14} />
+                复位终端字号
+                <span className="ml-auto text-[11px] text-ink-tertiary">Ctrl 0</span>
+              </Command.Item>
+              <Command.Item
+                onSelect={() => {
+                  close()
+                  // 逻辑在 store 里：侧栏工具区和空状态也要用同一套
+                  void useApp.getState().openLocalFileDialog()
                 }}
               >
                 <FileCode2 size={14} />

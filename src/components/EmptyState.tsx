@@ -1,11 +1,16 @@
-import { Lock, Terminal } from 'lucide-react'
-import { useApp } from '@/lib/store'
+import { FileCode2, Lock, SquareTerminal, Terminal } from 'lucide-react'
+import { MAX_FONT_SIZE, MIN_FONT_SIZE, useApp } from '@/lib/store'
 
 const isMac = navigator.platform.toLowerCase().includes('mac')
 const modKey = isMac ? '⌘' : 'Ctrl'
 
 export function EmptyState() {
-  const { setPaletteOpen } = useApp()
+  const { setPaletteOpen, setConnectOpen, openLocalFileDialog, addTab } = useApp()
+
+  const rowClass =
+    'flex items-center gap-2 rounded px-2 py-1 transition-colors hover:bg-surface-1 hover:text-ink-muted'
+  const kbdClass =
+    'rounded border border-hairline bg-surface-2 px-1.5 py-0.5 font-mono text-[11px]'
 
   return (
     <div className="grid h-full place-items-center">
@@ -19,23 +24,25 @@ export function EmptyState() {
         </p>
 
         <div className="mx-auto mt-6 flex w-fit flex-col gap-2 text-[12px] text-ink-tertiary">
-          <button
-            onClick={() => setPaletteOpen(true)}
-            className="flex items-center gap-2 rounded px-2 py-1 transition-colors hover:bg-surface-1 hover:text-ink-muted"
-          >
-            <kbd className="rounded border border-hairline bg-surface-2 px-1.5 py-0.5 font-mono text-[11px]">
-              {modKey} K
-            </kbd>
+          <button onClick={() => setPaletteOpen(true)} className={rowClass}>
+            <kbd className={kbdClass}>{modKey} K</kbd>
             <span>命令面板</span>
           </button>
-          <button
-            onClick={() => setPaletteOpen(true)}
-            className="flex items-center gap-2 rounded px-2 py-1 transition-colors hover:bg-surface-1 hover:text-ink-muted"
-          >
-            <kbd className="rounded border border-hairline bg-surface-2 px-1.5 py-0.5 font-mono text-[11px]">
-              {modKey} N
-            </kbd>
+          {/* 这三条以前只有前两条，而且「新建会话」实际打开的是命令面板 */}
+          <button onClick={() => setConnectOpen(true)} className={rowClass}>
+            <kbd className={kbdClass}>{modKey} N</kbd>
             <span>新建会话</span>
+          </button>
+          <button
+            onClick={() => addTab({ title: '本地 Shell', kind: 'local' })}
+            className={rowClass}
+          >
+            <SquareTerminal size={13} className="shrink-0" />
+            <span>本地 Shell</span>
+          </button>
+          <button onClick={() => void openLocalFileDialog()} className={rowClass}>
+            <FileCode2 size={13} className="shrink-0" />
+            <span>打开本地文件…</span>
           </button>
         </div>
       </div>
@@ -44,7 +51,8 @@ export function EmptyState() {
 }
 
 export function StatusBar() {
-  const { theme, toggleTheme, tabs, activeTabId, lockVault } = useApp()
+  const { theme, toggleTheme, tabs, activeTabId, lockVault, termFontSize, bumpTermFontSize } =
+    useApp()
   // 写死"未连接"是纯假信息 —— 至少把当前这个标签是什么说清楚
   const active = tabs.find((t) => t.id === activeTabId)
   const kindLabel = !active
@@ -68,6 +76,26 @@ export function StatusBar() {
         </span>
       </div>
       <div className="flex items-center gap-3">
+        {/* 字号以前只有 Ctrl+= / Ctrl+- / Ctrl+0 三个快捷键，界面上没有任何入口 */}
+        <div className="flex items-center gap-1" title={`终端字号 ${termFontSize}px`}>
+          <button
+            onClick={() => bumpTermFontSize(-1)}
+            disabled={termFontSize <= MIN_FONT_SIZE}
+            className="px-0.5 transition-colors hover:text-ink disabled:opacity-40 disabled:hover:text-ink-subtle"
+            title="缩小终端字号（Ctrl -）"
+          >
+            A-
+          </button>
+          <span className="w-8 text-center text-ink-tertiary">{termFontSize}px</span>
+          <button
+            onClick={() => bumpTermFontSize(1)}
+            disabled={termFontSize >= MAX_FONT_SIZE}
+            className="px-0.5 transition-colors hover:text-ink disabled:opacity-40 disabled:hover:text-ink-subtle"
+            title="放大终端字号（Ctrl +）"
+          >
+            A+
+          </button>
+        </div>
         <button
           onClick={() => void lockVault()}
           className="flex items-center gap-1 transition-colors hover:text-ink"

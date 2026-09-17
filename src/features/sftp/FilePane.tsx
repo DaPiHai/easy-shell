@@ -1,6 +1,7 @@
 import { type MouseEvent as ReactMouseEvent, type ReactNode } from 'react'
 import {
   ArrowUp,
+  Download,
   File as FileIcon,
   FileCode2,
   Folder,
@@ -9,6 +10,7 @@ import {
   PencilLine,
   RefreshCw,
   Trash2,
+  Upload,
 } from 'lucide-react'
 import type { FileEntry } from '@/lib/api'
 
@@ -68,6 +70,11 @@ interface FilePaneProps {
   onDelete: () => void
   onRename: () => void
   onEdit: () => void
+  /**
+   * 把选中的东西传到对侧。本地栏是"上传"、远程栏是"下载" ——
+   * 以前只能双击行或拖过去，工具栏上看不到任何传文件的入口。
+   */
+  onTransfer: () => void
   /**
    * 按下某一行的瞬间，交给上层去准备拖拽。
    *
@@ -140,6 +147,7 @@ export function FilePane({
   onDelete,
   onRename,
   onEdit,
+  onTransfer,
   onRowMouseDown,
   sort,
   onSort,
@@ -176,6 +184,18 @@ export function FilePane({
         </div>
         <div className="flex shrink-0 items-center gap-0.5">
           {toolbar}
+          <button
+            onClick={onTransfer}
+            disabled={selected.length === 0}
+            title={
+              side === 'local'
+                ? '把选中的项目上传到远程当前目录'
+                : '把选中的项目下载到本地当前目录'
+            }
+            className="grid h-6 w-6 place-items-center rounded text-ink-subtle transition-colors hover:bg-surface-2 hover:text-accent disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:text-ink-subtle"
+          >
+            {side === 'local' ? <Upload size={13} /> : <Download size={13} />}
+          </button>
           <button
             onClick={onMkdir}
             title="新建目录"

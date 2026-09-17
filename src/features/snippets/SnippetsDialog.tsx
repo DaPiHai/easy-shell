@@ -134,7 +134,7 @@ export function SnippetsDialog() {
                   </button>
                   <button
                     onClick={() => void remove(s.id)}
-                    className="shrink-0 rounded p-1 text-ink-tertiary opacity-0 transition-opacity hover:bg-surface-3 hover:text-danger group-hover:opacity-100"
+                    className="shrink-0 rounded p-1 text-ink-tertiary transition-colors hover:bg-surface-3 hover:text-danger"
                     title="删除"
                   >
                     <Trash2 size={13} />

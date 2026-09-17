@@ -1,10 +1,13 @@
 import {
+  ArrowRightLeft,
   ChevronDown,
   ChevronRight,
+  FileCode2,
   FolderOpen,
   FolderPlus,
   Pencil,
   Plus,
+  ScrollText,
   SquareTerminal,
   Trash2,
 } from 'lucide-react'
@@ -34,6 +37,9 @@ export function SessionTree() {
     collapsed,
     toggleGroup,
     setConnectOpen,
+    setSnippetsOpen,
+    setTunnelOpen,
+    openLocalFileDialog,
     addTab,
     setError,
     removeHost,
@@ -282,8 +288,11 @@ export function SessionTree() {
         )}
       </div>
 
-      {/* 本地 Shell 是常用入口，放常驻区而不是只藏在命令面板里 */}
-      <div className="shrink-0 border-t border-hairline p-2">
+      {/*
+        常驻工具区。这几件事以前只能从命令面板或快捷键调出来 ——
+        界面上没有任何按钮，等于只有知道的人才会用。
+      */}
+      <div className="shrink-0 space-y-0.5 border-t border-hairline p-2">
         <button
           onClick={() => addTab({ title: '本地 Shell', kind: 'local' })}
           className="flex h-7 w-full items-center gap-2 rounded px-2 text-[12px] text-ink-subtle transition-colors hover:bg-surface-2 hover:text-ink"
@@ -291,6 +300,30 @@ export function SessionTree() {
         >
           <SquareTerminal size={13} className="shrink-0" />
           本地 Shell
+        </button>
+        <button
+          onClick={() => setSnippetsOpen(true)}
+          className="flex h-7 w-full items-center gap-2 rounded px-2 text-[12px] text-ink-subtle transition-colors hover:bg-surface-2 hover:text-ink"
+          title="把存好的命令发到当前终端"
+        >
+          <ScrollText size={13} className="shrink-0" />
+          命令片段
+        </button>
+        <button
+          onClick={() => setTunnelOpen(true)}
+          className="flex h-7 w-full items-center gap-2 rounded px-2 text-[12px] text-ink-subtle transition-colors hover:bg-surface-2 hover:text-ink"
+          title="本地端口转发（-L）：需要先连上一台主机"
+        >
+          <ArrowRightLeft size={13} className="shrink-0" />
+          端口转发
+        </button>
+        <button
+          onClick={() => void openLocalFileDialog()}
+          className="flex h-7 w-full items-center gap-2 rounded px-2 text-[12px] text-ink-subtle transition-colors hover:bg-surface-2 hover:text-ink"
+          title="用内置编辑器打开本机的一个文件"
+        >
+          <FileCode2 size={13} className="shrink-0" />
+          打开本地文件…
         </button>
       </div>
     </aside>

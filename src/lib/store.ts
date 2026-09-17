@@ -11,6 +11,8 @@ import {
   hostsDelete,
   hostsList,
   hostsSave,
+  isDesktop,
+  pickFile,
   sshClose,
   vaultLock,
   vaultReset,
@@ -176,6 +178,12 @@ interface AppState {
   /** 让用户填分组名再创建。会话树与命令面板共用这一条 */
   promptNewGroup: () => void
   promptRenameGroup: (id: string, oldName: string) => void
+
+  /**
+   * 挑一个本地文件用内置编辑器打开。
+   * 命令面板、侧栏工具区、空状态三个入口共用 —— 逻辑放这里就不用抄三遍。
+   */
+  openLocalFileDialog: () => Promise<void>
 
   collapsed: Record<string, boolean>
   toggleGroup: (id: string) => void
@@ -507,6 +515,22 @@ export const useApp = create<AppState>((set, get) => ({
         },
       },
     }),
+
+  openLocalFileDialog: async () => {
+    if (!isDesktop()) {
+      // 浏览器预览里没有原生文件选择框。明说一句，别让点了没反应
+      set({ error: '文件选择只在桌面版可用' })
+      return
+    }
+    const path = await pickFile('打开文件')
+    if (!path) return
+    const name = path.split(/[\\/]/).filter(Boolean).pop() ?? path
+    get().addTab({
+      title: name,
+      kind: 'editor',
+      editorTarget: { side: 'local', path, sftpId: null },
+    })
+  },
 
   // 从 localStorage 读上次拖出来的位置，找不到或者解析失败就 0.5
   splitRatio: (() => {

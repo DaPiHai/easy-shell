@@ -502,6 +502,7 @@ export function SftpPanel({ sessionId }: Props) {
           onDelete={() => remove('local')}
           onRename={() => rename('local')}
           onEdit={() => openEditor('local')}
+          onTransfer={() => void uploadPaths(selected.local)}
           onRowMouseDown={beginDrag('local')}
           dropActive={dropSide === 'local'}
           paneRef={(el) => {
@@ -528,6 +529,9 @@ export function SftpPanel({ sessionId }: Props) {
           onDelete={() => remove('remote')}
           onRename={() => rename('remote')}
           onEdit={() => openEditor('remote')}
+          onTransfer={() =>
+            void download(remoteEntries.filter((e) => selected.remote.includes(e.path)))
+          }
           onRowMouseDown={beginDrag('remote')}
           dropActive={dropSide === 'remote'}
           paneRef={(el) => {
