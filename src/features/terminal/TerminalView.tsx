@@ -454,5 +454,16 @@ export function TerminalView({
     }
   }, [tabId, snippets])
 
-  return <div ref={hostRef} className="h-full w-full bg-canvas px-2 py-2" />
+  /**
+   * padding 留在外层，xterm 挂到不带 padding 的内层。
+   *
+   * FitAddon 按父元素的**盒高**算行列，而 terminal 元素是从 padding 之后的 content box
+   * 开始排的 —— 上下各 8px 就凭空多出一行，终端底部会溢出容器（盖住状态栏再往下露一截）。
+   * 远程终端有 SplitPane 的 overflow-hidden 兜着看不出来，本地 Shell 没有，肉眼可见。
+   */
+  return (
+    <div className="h-full w-full overflow-hidden bg-canvas p-2">
+      <div ref={hostRef} className="h-full w-full" />
+    </div>
+  )
 }
