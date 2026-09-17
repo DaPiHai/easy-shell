@@ -43,6 +43,8 @@ pub fn run() {
             store::vault_setup,
             store::vault_unlock,
             store::vault_lock,
+            // 清空密钥库（忘记主密码时的唯一出路），不可撤销
+            store::vault_reset,
             store::hosts_list,
             store::hosts_save,
             store::hosts_delete,

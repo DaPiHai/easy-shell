@@ -188,6 +188,16 @@ export function vaultLock(): Promise<void> {
   return invoke<void>('vault_lock')
 }
 
+/**
+ * 清空密钥库，回到「首次使用」。**不可撤销**。
+ *
+ * 忘记主密码时唯一的出路：数据都是用那把密码派生的密钥加密的，
+ * 没有它就解不开。调用前必须让用户明确确认过。
+ */
+export function vaultReset(): Promise<void> {
+  return invoke<void>('vault_reset')
+}
+
 export function hostsList(): Promise<HostRecord[]> {
   return invoke<HostRecord[]>('hosts_list')
 }

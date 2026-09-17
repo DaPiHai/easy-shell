@@ -111,6 +111,17 @@ const EDIT_CONTENT = `# 部署笔记
 | 内网 | 10.255.0.9 | 2222 |
 `
 
+/**
+ * 预览里要不要当成「已初始化」。
+ *
+ * 存在 localStorage 里而不是模块变量：真后端重置是把行删掉、刷新后依然是
+ * 「未初始化」，用模块变量的话一刷新 mock 又说库是好的，重置这条链路在预览里
+ * 就成了假象（第一次写就踩了这个坑）。
+ */
+const INIT_KEY = 'mockVaultInitialized'
+const readInitialized = () => localStorage.getItem(INIT_KEY) !== 'false'
+const setInitialized = (v: boolean) => localStorage.setItem(INIT_KEY, String(v))
+
 /** 塞给 xterm 的假输出：带颜色、中文、emoji，顺便测宽字符对齐 */
 const BANNER = [
   '\x1b[1;38;2;94;106;210m  easy-shell\x1b[0m \x1b[90m· mock 会话（浏览器预览）\x1b[0m\r\n',
@@ -164,9 +175,16 @@ function later<T>(value: T, ms = DELAY): Promise<T> {
 
 export async function invoke<T>(cmd: string, args: Record<string, unknown> = {}): Promise<T> {
   switch (cmd) {
-    case 'vault_status':
-      return later({ initialized: true, unlocked: true } as T)
+    case 'vault_status': {
+      const initialized = readInitialized()
+      return later({ initialized, unlocked: initialized } as T)
+    }
     case 'vault_setup':
+      setInitialized(true)
+      return later(undefined as T)
+    case 'vault_reset':
+      setInitialized(false)
+      return later(undefined as T)
     case 'vault_unlock':
     case 'vault_lock':
       return later(undefined as T)

@@ -236,10 +236,11 @@ export function TerminalView({
             if (text && !disposed) term.paste(text)
           })
           .catch(() => {
-            // 读不到剪贴板（webview 常见限制），明确告诉用户还有 Ctrl+V 这条路
+            // 读不到剪贴板（webview 常见限制），明确告诉用户还有 Ctrl+V 这条路 ——
+            // 别提右键：右键菜单还没做，那是 P2-2
             useApp
               .getState()
-              .setError('读不到剪贴板内容，试试 Ctrl+V（或右键粘贴）')
+              .setError('读不到剪贴板内容，试试 Ctrl+V')
           })
         return false
       }

@@ -13,6 +13,7 @@ import {
   hostsSave,
   sshClose,
   vaultLock,
+  vaultReset,
   vaultSetup,
   vaultStatus,
   vaultUnlock,
@@ -106,6 +107,8 @@ interface AppState {
   setupVault: (password: string) => Promise<void>
   unlockVault: (password: string) => Promise<void>
   lockVault: () => Promise<void>
+  /** 清空密钥库回到「首次使用」。**不可撤销**，调用前必须让用户明确确认 */
+  resetVault: () => Promise<void>
 
   hosts: HostRecord[]
   groups: GroupRecord[]
@@ -276,6 +279,24 @@ export const useApp = create<AppState>((set, get) => ({
     await vaultLock()
     set({ phase: 'locked', hosts: [], groups: [], tabs: [], activeTabId: null })
     for (const id of sessionIds) void sshClose(id)
+  },
+
+  /**
+   * 清空密钥库，回到「设置主密码」。
+   *
+   * 不需要像 lockVault 那样收连接：这个入口只在解锁页上，能走到那里
+   * 说明标签早被锁定时清干净了。hosts 也一并清掉，免得重置后界面上还留着旧主机。
+   */
+  resetVault: async () => {
+    await vaultReset()
+    set({
+      phase: 'setup',
+      vaultError: null,
+      hosts: [],
+      groups: [],
+      tabs: [],
+      activeTabId: null,
+    })
   },
 
   hosts: [],

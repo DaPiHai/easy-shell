@@ -1,5 +1,5 @@
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex as StdMutex;
 
 use aes_gcm::aead::{Aead, KeyInit};
@@ -67,7 +67,13 @@ impl Vault {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).map_err(|e| format!("创建数据目录失败: {e}"))?;
         }
-        let conn = Connection::open(&path).map_err(|e| format!("打开数据库失败: {e}"))?;
+        Self::open(&path)
+    }
+
+    /// 从指定文件开库。只有 `new()` 和测试用得到 —— 测试必须能往临时目录开，
+    /// 否则重置的单元测试会把真实密钥库清掉
+    fn open(path: &Path) -> Result<Self, String> {
+        let conn = Connection::open(path).map_err(|e| format!("打开数据库失败: {e}"))?;
         init_schema(&conn)?;
         Ok(Self {
             db: StdMutex::new(conn),
@@ -80,6 +86,32 @@ impl Vault {
             .lock()
             .map_err(|_| "密钥库状态异常".to_string())?
             .ok_or_else(|| "密钥库已锁定".to_string())
+    }
+
+    /**
+     * 清空密钥库，回到「首次使用」。
+     *
+     * 忘记主密码时唯一的出路：所有凭据都是用那把密码派生的密钥加密的，
+     * 密码没了谁也解不开 —— 与其留一个打不开的库，不如让用户从界面里清掉重来，
+     * 而不是去文件系统里找 vault.db 手删。
+     *
+     * 只动自己这几张表，**不碰 known_hosts**：那是主机指纹不是凭据，
+     * 留着才能在重置之后继续挡住中间人。
+     */
+    fn reset(&self) -> Result<(), String> {
+        {
+            // 先释放数据库锁再去动主密钥：顺序和别处保持一致，免得将来加锁交叉
+            let db = self.db.lock().map_err(|_| "数据库锁异常".to_string())?;
+            db.execute_batch(
+                "DELETE FROM meta;
+                 DELETE FROM hosts;
+                 DELETE FROM groups;
+                 DELETE FROM snippets;",
+            )
+            .map_err(|e| format!("清空密钥库失败: {e}"))?;
+        }
+        *self.key.lock().map_err(|_| "密钥库状态异常".to_string())? = None;
+        Ok(())
     }
 }
 
@@ -279,6 +311,16 @@ pub fn vault_lock(state: State<'_, Vault>) -> Result<(), String> {
     Ok(())
 }
 
+/**
+ * 清空密钥库，回到「首次使用」。**不可撤销**，前端必须让用户明确确认过再调。
+ *
+ * 这是忘记主密码时唯一的出路，没有它用户只能自己去删 vault.db。
+ */
+#[tauri::command]
+pub fn vault_reset(state: State<'_, Vault>) -> Result<(), String> {
+    state.reset()
+}
+
 #[tauri::command]
 pub fn hosts_list(state: State<'_, Vault>) -> Result<Vec<HostRecord>, String> {
     let key = state.key_or_err()?;
@@ -470,4 +512,69 @@ pub fn snippets_delete(state: State<'_, Vault>, id: String) -> Result<(), String
     db.execute("DELETE FROM snippets WHERE id = ?1", params![id])
         .map_err(|e| format!("删除片段失败: {e}"))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 开一个临时库。**绝不走 `db_path()`** —— 那会动到用户真实的密钥库
+    fn temp_vault() -> (Vault, PathBuf) {
+        let path = std::env::temp_dir().join(format!(
+            "easy-shell-vault-test-{}.db",
+            uuid::Uuid::new_v4()
+        ));
+        (Vault::open(&path).expect("开临时库失败"), path)
+    }
+
+    fn count(conn: &Connection, table: &str) -> i64 {
+        conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))
+            .unwrap_or(-1)
+    }
+
+    /**
+     * 重置必须把四张表清空、并且丢掉内存里的主密钥。
+     *
+     * 「忘记主密码」时这是唯一的出路，删漏一张表就等于留了个打不开又删不掉的尾巴；
+     * 主密钥不丢则更糟 —— 界面回到了「首次使用」，密钥却还在内存里。
+     */
+    #[test]
+    fn 重置会清空所有数据并丢掉内存里的主密钥() {
+        let (vault, path) = temp_vault();
+        {
+            let db = vault.db.lock().unwrap();
+            db.execute_batch(
+                "INSERT INTO meta (key, value) VALUES ('verifier', 'x'), ('salt', 'y');
+                 INSERT INTO groups (id, name) VALUES ('g1', '生产环境');
+                 INSERT INTO hosts (id, name, address, port, username, group_id, secret, compat)
+                     VALUES ('h1', 'web-01', '10.0.1.11', 22, 'deploy', NULL, X'00', 0);
+                 INSERT INTO snippets (id, name, command, created_at)
+                     VALUES ('s1', '看磁盘', 'df -h', 0);",
+            )
+            .unwrap();
+        }
+        *vault.key.lock().unwrap() = Some([7u8; 32]);
+
+        vault.reset().unwrap();
+
+        let db = vault.db.lock().unwrap();
+        assert_eq!(
+            meta_get(&db, "verifier").unwrap(),
+            None,
+            "重置后还留着主密码校验串 —— 界面会以为库仍然是已初始化的"
+        );
+        assert_eq!(count(&db, "meta"), 0, "meta 没清干净");
+        assert_eq!(count(&db, "hosts"), 0, "hosts 没清干净");
+        assert_eq!(count(&db, "groups"), 0, "groups 没清干净");
+        assert_eq!(count(&db, "snippets"), 0, "snippets 没清干净");
+        drop(db);
+
+        assert!(
+            vault.key.lock().unwrap().is_none(),
+            "重置后主密钥仍留在内存里"
+        );
+
+        drop(vault);
+        let _ = fs::remove_file(&path);
+    }
 }

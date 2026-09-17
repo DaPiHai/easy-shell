@@ -6,13 +6,34 @@ const inputClass =
   'h-9 w-full rounded-md border border-hairline bg-surface-3 px-3 text-[13px] text-ink outline-none placeholder:text-ink-tertiary focus:border-accent'
 
 export function UnlockScreen() {
-  const { phase, vaultError, setupVault, unlockVault } = useApp()
+  const { phase, vaultError, setupVault, unlockVault, resetVault } = useApp()
   const isSetup = phase === 'setup'
 
   const [password, setPassword] = useState('')
   const [confirm, setConfirm] = useState('')
   const [busy, setBusy] = useState(false)
   const [localError, setLocalError] = useState<string | null>(null)
+  /**
+   * 「忘记主密码」的两步确认。
+   *
+   * 没做成 ConfirmDialog 的第三种 kind：那个组件挂在 App 的 ready 分支里，
+   * 解锁页根本渲染不到它。两步内联反而更稳 —— 第二次点的是同一位置上的另一个
+   * 按钮，不看清就不会误触。
+   */
+  const [resetArmed, setResetArmed] = useState(false)
+
+  const doReset = async () => {
+    setBusy(true)
+    setLocalError(null)
+    try {
+      await resetVault()
+    } catch (e) {
+      setLocalError(String(e))
+      setResetArmed(false)
+    } finally {
+      setBusy(false)
+    }
+  }
 
   const submit = async () => {
     if (!password) {
@@ -57,7 +78,7 @@ export function UnlockScreen() {
           </h1>
           <p className="mt-1 text-[12px] leading-relaxed text-ink-subtle">
             {isSetup
-              ? '主密码用于加密保存的密码和私钥，不会被存储。忘记只能重置数据。'
+              ? '主密码用于加密保存的密码和私钥，不会被存储。忘了它就只能清空这些数据重来。'
               : '输入主密码以读取已保存的会话凭据。'}
           </p>
         </div>
@@ -104,6 +125,43 @@ export function UnlockScreen() {
         >
           {busy ? '处理中…' : isSetup ? '创建并解锁' : '解锁'}
         </button>
+
+        {/* 新建密钥库时没什么可重置的，所以只在解锁这一侧给入口 */}
+        {!isSetup && (
+          <div className="mt-4 border-t border-hairline pt-3">
+            {resetArmed ? (
+              <div className="text-[12px] leading-relaxed">
+                <p className="text-danger">
+                  确认清空？已保存的主机、分组、命令片段都会删掉，主密码要重新设置。
+                  这一步无法撤销。
+                </p>
+                <div className="mt-2 flex justify-end gap-2">
+                  <button
+                    onClick={() => setResetArmed(false)}
+                    disabled={busy}
+                    className="h-7 rounded-md border border-hairline bg-surface-2 px-2.5 text-[12px] text-ink-muted transition-colors hover:bg-surface-3 hover:text-ink"
+                  >
+                    取消
+                  </button>
+                  <button
+                    onClick={() => void doReset()}
+                    disabled={busy}
+                    className="h-7 rounded-md border border-danger/40 bg-danger/10 px-2.5 text-[12px] font-medium text-danger transition-colors hover:bg-danger/20 disabled:opacity-50"
+                  >
+                    {busy ? '清空中…' : '清空并重新设置'}
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <button
+                onClick={() => setResetArmed(true)}
+                className="mx-auto block text-[12px] text-ink-tertiary transition-colors hover:text-ink-muted"
+              >
+                忘记主密码？
+              </button>
+            )}
+          </div>
+        )}
       </div>
     </div>
   )
