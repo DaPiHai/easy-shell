@@ -31,10 +31,7 @@
   `connect_stream`，能做。
 - **P1-6 ssh-agent** —— 每把密钥都必须是磁盘文件。russh 的 agent 模块是无条件编译的，Windows 的
   named pipe 与 Pageant 入口都在，纯属没做。
-- **P1-7 设置界面** —— 当前全部可配置项只有三个：主题（**且不持久化，重启回深色**）、终端字号
-  （localStorage）、分屏比例（localStorage）。scrollback（写死 5000）、字体族、行高、
-  光标样式、重连策略（写死 3 次 / 2 秒）全是常量。一个设置面板能把它们收拢，也顺带解决
-  主题不持久化。
+
 
 ## P2 体验补齐
 

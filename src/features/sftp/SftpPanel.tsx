@@ -47,8 +47,8 @@ export function SftpPanel({ sessionId }: Props) {
   const [localEntries, setLocalEntries] = useState<FileEntry[]>([])
   const [loading, setLoading] = useState<Side | null>(null)
   const [selected, setSelected] = useState<Record<Side, string[]>>({ local: [], remote: [] })
-  /** 断点续传开关。默认开：只从上次没传完的 .part 接着传，传过的不用重来 */
-  const [resume, setResume] = useState(true)
+  /** 断点续传开关。初值取设置里的默认值，面板上改了只影响这个面板 */
+  const [resume, setResume] = useState(() => useApp.getState().transferResumeDefault)
   /** 同名文件策略。默认覆盖，与改造前一致；做成面板级选项，批内不逐个问 */
   const [conflict, setConflict] = useState<ConflictPolicy>('overwrite')
   /**

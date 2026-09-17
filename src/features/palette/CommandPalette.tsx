@@ -9,6 +9,7 @@ import {
   Plus,
   RotateCcw,
   ScrollText,
+  Settings,
   SunMoon,
   TerminalSquare,
   X,
@@ -194,6 +195,15 @@ export function CommandPalette() {
               >
                 <SunMoon size={14} />
                 切换到{theme === 'dark' ? '浅色' : '深色'}主题
+              </Command.Item>
+              <Command.Item
+                onSelect={() => {
+                  useApp.getState().setSettingsOpen(true)
+                  close()
+                }}
+              >
+                <Settings size={14} />
+                设置
               </Command.Item>
             </Command.Group>
 

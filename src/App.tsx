@@ -6,6 +6,7 @@ import { CommandPalette } from '@/features/palette/CommandPalette'
 import { SftpPanel } from '@/features/sftp/SftpPanel'
 import { ConnectDialog } from '@/features/session/ConnectDialog'
 import { ConfirmDialog } from '@/features/session/ConfirmDialog'
+import { SettingsDialog } from '@/features/settings/SettingsDialog'
 import { TunnelDialog } from '@/features/tunnel/TunnelDialog'
 import { SnippetsDialog } from '@/features/snippets/SnippetsDialog'
 import { EditorView } from '@/features/editor/EditorView'
@@ -39,12 +40,21 @@ export default function App() {
       if (e.key === 'Escape') {
         // 所有自绘弹窗都要能被 Esc 关掉 —— 只关一部分的话，
         // 用户在端口转发/命令片段上按 Esc 会以为按键坏了
-        const { tunnelOpen, setTunnelOpen, snippetsOpen, setSnippetsOpen, confirmPrompt, setConfirmPrompt } =
-          useApp.getState()
+        const {
+          tunnelOpen,
+          setTunnelOpen,
+          snippetsOpen,
+          setSnippetsOpen,
+          settingsOpen,
+          setSettingsOpen,
+          confirmPrompt,
+          setConfirmPrompt,
+        } = useApp.getState()
         if (paletteOpen) setPaletteOpen(false)
         if (connectOpen) setConnectOpen(false)
         if (tunnelOpen) setTunnelOpen(false)
         if (snippetsOpen) setSnippetsOpen(false)
+        if (settingsOpen) setSettingsOpen(false)
         // 安全确认框同理：Esc = 取消（确认框自己没处理，不在这里关就成了关不掉的框）
         if (confirmPrompt) setConfirmPrompt(null)
       }
@@ -173,6 +183,7 @@ export default function App() {
       <CommandPalette />
       <ConnectDialog />
       <ConfirmDialog />
+      <SettingsDialog />
       <TunnelDialog />
       <SnippetsDialog />
 

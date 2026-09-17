@@ -27,6 +27,43 @@ import {
 export const MIN_FONT_SIZE = 9
 export const MAX_FONT_SIZE = 28
 
+/** 终端默认字体栈。用户在设置里填了自定义字体就用他填的 */
+export const DEFAULT_TERM_FONT =
+  '"JetBrains Mono", "Cascadia Code", "Cascadia Mono", Consolas, monospace'
+export const MIN_LINE_HEIGHT = 1
+export const MAX_LINE_HEIGHT = 2
+export const MIN_SCROLLBACK = 500
+export const MAX_SCROLLBACK = 100000
+export const MIN_RETRY_ATTEMPTS = 0
+export const MAX_RETRY_ATTEMPTS = 10
+export const MIN_RETRY_DELAY = 1
+export const MAX_RETRY_DELAY = 60
+
+export type CursorStyle = 'bar' | 'block' | 'underline'
+
+/** 从一个可能写坏的 localStorage 值里读数字，夹到范围内，读不到就给默认 */
+function readNumber(key: string, fallback: number, min: number, max: number): number {
+  try {
+    const raw = localStorage.getItem(key)
+    // 必须判 null：Number(null) 是 0，而 0 落在合法区间里（重连次数下限就是 0），
+    // 不判的话"没存过"会被当成"用户设成 0"
+    if (raw === null) return fallback
+    const n = Number(raw)
+    if (!Number.isFinite(n) || n < min || n > max) return fallback
+    return n
+  } catch {
+    return fallback
+  }
+}
+
+function writeLocal(key: string, value: string) {
+  try {
+    localStorage.setItem(key, value)
+  } catch {
+    /* 隐私模式可能写不动，忽略 */
+  }
+}
+
 export type Theme = 'dark' | 'light'
 export type TabKind = 'terminal' | 'sftp' | 'local' | 'editor'
 
@@ -124,6 +161,10 @@ export interface TransferItem {
 interface AppState {
   theme: Theme
   toggleTheme: () => void
+  setTheme: (theme: Theme) => void
+
+  settingsOpen: boolean
+  setSettingsOpen: (open: boolean) => void
 
   paletteOpen: boolean
   setPaletteOpen: (open: boolean) => void
@@ -221,6 +262,38 @@ interface AppState {
   /** 按步长增减，delta 传 +1 / -1 */
   bumpTermFontSize: (delta: number) => void
 
+  /** 终端字体族。空串表示用内置字体栈 */
+  termFontFamily: string
+  setTermFontFamily: (family: string) => void
+
+  /** 行高倍数。改它要重新 fit（字符高度变了），和字号是一类 */
+  termLineHeight: number
+  setTermLineHeight: (lineHeight: number) => void
+
+  termCursorStyle: CursorStyle
+  setTermCursorStyle: (style: CursorStyle) => void
+
+  /** 回滚缓冲行数。改它不用 refit */
+  termScrollback: number
+  setTermScrollback: (lines: number) => void
+
+  /**
+   * 断线自动重连策略。0 次 = 不自动重连，直接等人点 ↻。
+   * 这两种环境（跳板机抖动 / 一次性命令机器）想要的策略完全相反，
+   * 写死 3 次 / 2 秒总有一边别扭。
+   */
+  reconnectAttempts: number
+  setReconnectAttempts: (times: number) => void
+  reconnectDelaySec: number
+  setReconnectDelaySec: (seconds: number) => void
+
+  /** 传输默认是否续传。SFTP 面板上还能临时改，这里定的是新面板的初值 */
+  transferResumeDefault: boolean
+  setTransferResumeDefault: (on: boolean) => void
+
+  /** 把上面这些设置全部恢复默认 */
+  resetSettings: () => void
+
   /**
    * 每个终端标签注册一个"投喂函数"，命令片段面板靠它把命令送进对应终端。
    * 不放进 React state，避免每次注册都触发重渲染。
@@ -258,13 +331,31 @@ interface AppState {
 }
 
 export const useApp = create<AppState>((set, get) => ({
-  theme: 'dark',
+  // 主题以前不持久化：设成浅色、重启回来又变深色。存在 localStorage 里
+  theme: (() => {
+    try {
+      const v = localStorage.getItem('theme')
+      return v === 'light' || v === 'dark' ? (v as Theme) : 'dark'
+    } catch {
+      return 'dark' as Theme
+    }
+  })(),
   toggleTheme: () =>
     set((s) => {
       const next: Theme = s.theme === 'dark' ? 'light' : 'dark'
       document.documentElement.setAttribute('data-theme', next)
+      writeLocal('theme', next)
       return { theme: next }
     }),
+  setTheme: (theme) =>
+    set(() => {
+      document.documentElement.setAttribute('data-theme', theme)
+      writeLocal('theme', theme)
+      return { theme }
+    }),
+
+  settingsOpen: false,
+  setSettingsOpen: (open) => set({ settingsOpen: open }),
 
   paletteOpen: false,
   setPaletteOpen: (open) => set({ paletteOpen: open }),
@@ -563,14 +654,91 @@ export const useApp = create<AppState>((set, get) => ({
   })(),
   setTermFontSize: (size) => {
     const clamped = Math.min(MAX_FONT_SIZE, Math.max(MIN_FONT_SIZE, Math.round(size)))
-    try {
-      localStorage.setItem('termFontSize', String(clamped))
-    } catch {
-      /* 隐私模式可能写不动，忽略 */
-    }
+    writeLocal('termFontSize', String(clamped))
     set({ termFontSize: clamped })
   },
   bumpTermFontSize: (delta) => get().setTermFontSize(get().termFontSize + delta),
+
+  termFontFamily: (() => {
+    try {
+      return localStorage.getItem('termFontFamily') ?? ''
+    } catch {
+      return ''
+    }
+  })(),
+  setTermFontFamily: (family) => {
+    writeLocal('termFontFamily', family)
+    set({ termFontFamily: family })
+  },
+
+  termLineHeight: readNumber('termLineHeight', 1.5, MIN_LINE_HEIGHT, MAX_LINE_HEIGHT),
+  setTermLineHeight: (lineHeight) => {
+    const clamped = Math.min(MAX_LINE_HEIGHT, Math.max(MIN_LINE_HEIGHT, lineHeight))
+    writeLocal('termLineHeight', String(clamped))
+    set({ termLineHeight: clamped })
+  },
+
+  termCursorStyle: (() => {
+    try {
+      const v = localStorage.getItem('termCursorStyle')
+      return v === 'block' || v === 'underline' || v === 'bar' ? (v as CursorStyle) : 'bar'
+    } catch {
+      return 'bar' as CursorStyle
+    }
+  })(),
+  setTermCursorStyle: (style) => {
+    writeLocal('termCursorStyle', style)
+    set({ termCursorStyle: style })
+  },
+
+  termScrollback: readNumber('termScrollback', 5000, MIN_SCROLLBACK, MAX_SCROLLBACK),
+  setTermScrollback: (lines) => {
+    const clamped = Math.min(MAX_SCROLLBACK, Math.max(MIN_SCROLLBACK, Math.round(lines)))
+    writeLocal('termScrollback', String(clamped))
+    set({ termScrollback: clamped })
+  },
+
+  reconnectAttempts: readNumber(
+    'reconnectAttempts',
+    3,
+    MIN_RETRY_ATTEMPTS,
+    MAX_RETRY_ATTEMPTS,
+  ),
+  setReconnectAttempts: (times) => {
+    const clamped = Math.min(MAX_RETRY_ATTEMPTS, Math.max(MIN_RETRY_ATTEMPTS, Math.round(times)))
+    writeLocal('reconnectAttempts', String(clamped))
+    set({ reconnectAttempts: clamped })
+  },
+  reconnectDelaySec: readNumber('reconnectDelaySec', 2, MIN_RETRY_DELAY, MAX_RETRY_DELAY),
+  setReconnectDelaySec: (seconds) => {
+    const clamped = Math.min(MAX_RETRY_DELAY, Math.max(MIN_RETRY_DELAY, seconds))
+    writeLocal('reconnectDelaySec', String(clamped))
+    set({ reconnectDelaySec: clamped })
+  },
+
+  transferResumeDefault: (() => {
+    try {
+      return localStorage.getItem('transferResumeDefault') !== '0'
+    } catch {
+      return true
+    }
+  })(),
+  setTransferResumeDefault: (on) => {
+    writeLocal('transferResumeDefault', on ? '1' : '0')
+    set({ transferResumeDefault: on })
+  },
+
+  resetSettings: () => {
+    get().setTheme('dark')
+    get().setTermFontSize(13)
+    get().setTermFontFamily('')
+    get().setTermLineHeight(1.5)
+    get().setTermCursorStyle('bar')
+    get().setTermScrollback(5000)
+    get().setReconnectAttempts(3)
+    get().setReconnectDelaySec(2)
+    get().setTransferResumeDefault(true)
+  },
 
   terminalSinks: {},
   registerTerminalSink: (tabId, sink) =>
@@ -667,3 +835,7 @@ export const useApp = create<AppState>((set, get) => ({
   clearFinished: () =>
     set((s) => ({ transfers: s.transfers.filter((t) => t.status === 'active') })),
 }))
+
+// 持久化的主题要在首帧之前落到 documentElement 上：
+// 放在组件 effect 里的话，浅色用户每次启动都会先闪一下深色
+document.documentElement.setAttribute('data-theme', useApp.getState().theme)

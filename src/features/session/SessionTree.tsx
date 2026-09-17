@@ -8,6 +8,7 @@ import {
   Pencil,
   Plus,
   ScrollText,
+  Settings,
   SquareTerminal,
   Trash2,
 } from 'lucide-react'
@@ -39,6 +40,7 @@ export function SessionTree() {
     setConnectOpen,
     setSnippetsOpen,
     setTunnelOpen,
+    setSettingsOpen,
     openLocalFileDialog,
     addTab,
     setError,
@@ -324,6 +326,14 @@ export function SessionTree() {
         >
           <FileCode2 size={13} className="shrink-0" />
           打开本地文件…
+        </button>
+        <button
+          onClick={() => setSettingsOpen(true)}
+          className="flex h-7 w-full items-center gap-2 rounded px-2 text-[12px] text-ink-subtle transition-colors hover:bg-surface-2 hover:text-ink"
+          title="主题、终端外观、重连策略、传输默认值"
+        >
+          <Settings size={13} className="shrink-0" />
+          设置
         </button>
       </div>
     </aside>

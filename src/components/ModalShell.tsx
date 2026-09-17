@@ -27,11 +27,15 @@ export function ModalShell({
   return (
     <div className="fixed inset-0 z-50">
       <div className="absolute inset-0 bg-black/60" onClick={onClose} />
+      {/*
+        面板限高 + 内容区自己滚：设置面板比别的弹窗长得多，
+        窗口最小高度是 560，不限高的话底部的按钮会顶出屏幕、够不着。
+      */}
       <div
-        className="absolute left-1/2 top-[16%] -translate-x-1/2 rounded-xl border border-hairline-tertiary bg-surface-1"
+        className="absolute left-1/2 top-[16%] flex max-h-[76vh] -translate-x-1/2 flex-col rounded-xl border border-hairline-tertiary bg-surface-1"
         style={{ width }}
       >
-        <div className="flex items-start gap-2.5 border-b border-hairline px-4 py-3">
+        <div className="flex shrink-0 items-start gap-2.5 border-b border-hairline px-4 py-3">
           {icon}
           <div className="min-w-0 flex-1">
             <div className="text-[13px] font-medium text-ink">{title}</div>
@@ -47,7 +51,7 @@ export function ModalShell({
             <X size={14} />
           </button>
         </div>
-        <div className="p-4">{children}</div>
+        <div className="min-h-0 flex-1 overflow-y-auto p-4">{children}</div>
       </div>
     </div>
   )

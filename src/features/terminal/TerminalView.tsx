@@ -19,11 +19,9 @@ import {
   sshResize,
   type ShellEvent,
 } from '@/lib/api'
-import { useApp } from '@/lib/store'
+import { useApp, DEFAULT_TERM_FONT } from '@/lib/store'
 import '@xterm/xterm/css/xterm.css'
 
-const MAX_RETRIES = 3
-const RETRY_DELAY_MS = 2000
 /** 多久没收到输出就提示一下，别让用户对着黑屏干等 */
 const NO_DATA_HINT_MS = 5000
 
@@ -132,14 +130,14 @@ export function TerminalView({
     if (!el) return
 
     const term = new Terminal({
-      fontFamily: '"JetBrains Mono", "Cascadia Code", "Cascadia Mono", Consolas, monospace',
+      fontFamily: useApp.getState().termFontFamily || DEFAULT_TERM_FONT,
       // 从 store 读而不是 useState：这值变化不该让 effect 重跑（那会重连终端）
       fontSize: useApp.getState().termFontSize,
-      lineHeight: 1.5,
+      lineHeight: useApp.getState().termLineHeight,
       cursorBlink: true,
-      cursorStyle: 'bar',
+      cursorStyle: useApp.getState().termCursorStyle,
       cursorWidth: 2,
-      scrollback: 5000,
+      scrollback: useApp.getState().termScrollback,
       theme: buildTheme(),
     })
 
@@ -269,7 +267,10 @@ export function TerminalView({
         onClosedRef.current?.()
         return
       }
-      if (!manual && retries >= MAX_RETRIES) {
+      // 重连策略是设置项：现场读，改了立刻对下一次断线生效（不用重建终端）
+      const maxRetries = useApp.getState().reconnectAttempts
+      const retryDelayMs = useApp.getState().reconnectDelaySec * 1000
+      if (!manual && retries >= maxRetries) {
         // 这里**不能**关标签：断线就自动把标签干掉的话，用户正在看的输出、
         // 报错信息全没了，等于毁掉现场。留着，让标签栏给个 ↻ 自己决定
         term.writeln('\r\n\x1b[90m连接已关闭。点标签栏的 ↻ 可以再试一次。\x1b[0m')
@@ -278,10 +279,13 @@ export function TerminalView({
       }
       if (manual) retries = 0
       retries += 1
+      // 关掉自动重连（0 次）时是用户自己点的 ↻，别写成「1/0」那种别扭的计数
       term.writeln(
-        `\r\n\x1b[33m⟳ 连接断开，${RETRY_DELAY_MS / 1000} 秒后重连（${retries}/${MAX_RETRIES}）…\x1b[0m`,
+        maxRetries > 0
+          ? `\r\n\x1b[33m⟳ 连接断开，${retryDelayMs / 1000} 秒后重连（${retries}/${maxRetries}）…\x1b[0m`
+          : `\r\n\x1b[33m⟳ 正在重连…\x1b[0m`,
       )
-      await new Promise((resolve) => setTimeout(resolve, RETRY_DELAY_MS))
+      await new Promise((resolve) => setTimeout(resolve, retryDelayMs))
       if (disposed) return
       try {
         if (!sessionId) throw new Error('缺少 SSH 会话 id')
@@ -422,16 +426,30 @@ export function TerminalView({
     }
   }, [sessionId, kind])
 
-  // 字号变了要应用到已经开着的终端
+  // 字号 / 字体 / 行高变了要应用到已经开着的终端，并重算行列
   const fontSize = useApp((s) => s.termFontSize)
+  const fontFamily = useApp((s) => s.termFontFamily)
+  const lineHeight = useApp((s) => s.termLineHeight)
   useEffect(() => {
     const term = termRef.current
     if (!term) return
     term.options.fontSize = fontSize
-    // 字符尺寸跟着字号变，必须重算行列 —— 不然终端画的行列数和远端认为的不一致，
+    term.options.fontFamily = fontFamily || DEFAULT_TERM_FONT
+    term.options.lineHeight = lineHeight
+    // 字符尺寸跟着这几个变，必须重算行列 —— 不然终端画的行列数和远端认为的不一致，
     // 排版立刻就乱了（而且这个不一致还会通过 onResize 同步给远端）
     safeFitRef.current?.()
-  }, [fontSize])
+  }, [fontSize, fontFamily, lineHeight])
+
+  // 光标样式和回滚行数不影响字符尺寸，改完直接生效，不用 refit
+  const cursorStyle = useApp((s) => s.termCursorStyle)
+  const scrollback = useApp((s) => s.termScrollback)
+  useEffect(() => {
+    const term = termRef.current
+    if (!term) return
+    term.options.cursorStyle = cursorStyle
+    term.options.scrollback = scrollback
+  }, [cursorStyle, scrollback])
 
   // 注册成命令片段的投递目标，同时挂上手动重连
   useEffect(() => {
