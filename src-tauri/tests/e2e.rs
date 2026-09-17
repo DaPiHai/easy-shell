@@ -150,8 +150,11 @@ async fn spawn_server_with(preferred: Preferred) -> u16 {
     });
 
     // 等服务端真的在听
+    // 就绪判定要**真连一次**，不能用「bind 失败」当信号：bind 失败也可能是这个端口
+    // 被别的出站连接临时占了，那会被误判成「服务已就绪」，客户端于是连上别人的端口
+    // （表现为偶发的「连接被拒绝」，或者更糟 —— 写进了另一个测试的 fixture）。
     for _ in 0..50 {
-        if TcpListener::bind(("127.0.0.1", port)).await.is_err() {
+        if tokio::net::TcpStream::connect(("127.0.0.1", port)).await.is_ok() {
             return port
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
