@@ -14,6 +14,7 @@ import {
   isDesktop,
   pickFile,
   sshClose,
+  syncWindowTheme,
   vaultLock,
   vaultReset,
   vaultSetup,
@@ -66,6 +67,20 @@ function writeLocal(key: string, value: string) {
 
 export type Theme = 'dark' | 'light'
 export type TabKind = 'terminal' | 'sftp' | 'local' | 'editor'
+
+/**
+ * 切主题的三处落点必须一起改：`data-theme` 属性（驱动 CSS 变量）、localStorage（下次启动）、
+ * 原生窗口主题（标题栏）。
+ *
+ * 第三个最容易漏 —— 只改前两个的话，页面是浅色的、标题栏还是系统那条深色的。
+ * 所有入口都走这里（状态栏按钮、设置面板、命令面板、恢复默认、启动时那次应用），
+ * 以后加新入口也不会漏。
+ */
+function applyTheme(theme: Theme) {
+  document.documentElement.setAttribute('data-theme', theme)
+  writeLocal('theme', theme)
+  void syncWindowTheme(theme)
+}
 
 /** loading=检查中 setup=首次设置主密码 locked=待解锁 ready=已解锁 */
 /**
@@ -343,14 +358,12 @@ export const useApp = create<AppState>((set, get) => ({
   toggleTheme: () =>
     set((s) => {
       const next: Theme = s.theme === 'dark' ? 'light' : 'dark'
-      document.documentElement.setAttribute('data-theme', next)
-      writeLocal('theme', next)
+      applyTheme(next)
       return { theme: next }
     }),
   setTheme: (theme) =>
     set(() => {
-      document.documentElement.setAttribute('data-theme', theme)
-      writeLocal('theme', theme)
+      applyTheme(theme)
       return { theme }
     }),
 
@@ -837,5 +850,6 @@ export const useApp = create<AppState>((set, get) => ({
 }))
 
 // 持久化的主题要在首帧之前落到 documentElement 上：
-// 放在组件 effect 里的话，浅色用户每次启动都会先闪一下深色
-document.documentElement.setAttribute('data-theme', useApp.getState().theme)
+// 放在组件 effect 里的话，浅色用户每次启动都会先闪一下深色。
+// 窗口主题也一并定下来，否则会先看到系统主题的标题栏再跳成应用主题的
+applyTheme(useApp.getState().theme)

@@ -435,6 +435,28 @@ export async function pickFile(title: string, filters?: FileFilter[]): Promise<s
   }
 }
 
+/**
+ * 让原生窗口（标题栏、窗口边框）跟着应用主题走。
+ *
+ * 主题只换 `data-theme` + CSS 变量的话，原生窗口收不到任何通知，Windows 会按**系统**的
+ * 深浅设置画标题栏 —— 应用切浅色、系统还是深色时，顶上就压着一条深色标题栏。
+ * 窗口用的是系统原生装饰（`tauri.conf.json` 没设 `decorations`），只有这一条路能修。
+ *
+ * 动态 import 的理由同 `pickFile`：浏览器预览下没有 Tauri 运行时，静态 import 会让前端
+ * 在 `dev:web` 里直接崩。调不动也只是标题栏颜色不跟随，不影响主题本身，所以吞掉异常。
+ *
+ * 需要的权限是 `core:window:allow-set-theme`（见 `src-tauri/capabilities/default.json`）。
+ */
+export async function syncWindowTheme(theme: 'dark' | 'light'): Promise<void> {
+  if (!isDesktop()) return
+  try {
+    const { getCurrentWindow } = await import('@tauri-apps/api/window')
+    await getCurrentWindow().setTheme(theme)
+  } catch (e) {
+    console.warn('[easy-shell] 同步窗口主题失败:', e)
+  }
+}
+
 export function decodeBase64(b64: string): Uint8Array {
   const binary = atob(b64)
   const bytes = new Uint8Array(binary.length)
