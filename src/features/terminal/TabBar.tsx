@@ -2,7 +2,7 @@ import { Columns2, FileCode2, FolderOpen, FolderTree, RotateCw, Terminal, X } fr
 import { useApp } from '@/lib/store'
 
 export function TabBar() {
-  const { tabs, activeTabId, setActiveTab, closeTab, toggleSplit, deadTabs, reconnectSinks } =
+  const { tabs, activeTabId, setActiveTab, requestCloseTab, toggleSplit, deadTabs, reconnectSinks } =
     useApp()
 
   if (tabs.length === 0) return null
@@ -19,7 +19,8 @@ export function TabBar() {
             onAuxClick={(e) => {
               if (e.button === 1) {
                 e.preventDefault()
-                closeTab(tab.id)
+                // 中键也走守卫，否则它会变成绕过「未保存」提示的后门
+                requestCloseTab(tab.id)
               }
             }}
             className={`group relative flex h-9 cursor-pointer items-center gap-2 border-r border-hairline px-3 text-[13px] transition-colors ${
@@ -96,7 +97,7 @@ export function TabBar() {
                 // 只关标签：通道由 TerminalView 卸载时自己关。
                 // 在这里先关通道的话，后端会推 'closed' 事件，
                 // 终端还没卸载就会去走重连逻辑 —— 白折腾还可能出错
-                closeTab(tab.id)
+                requestCloseTab(tab.id)
               }}
             />
             {active && (

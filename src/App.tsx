@@ -61,10 +61,11 @@ export default function App() {
         if (el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable)) {
           return
         }
-        const { activeTabId, closeTab } = useApp.getState()
+        const { activeTabId, requestCloseTab } = useApp.getState()
         if (activeTabId) {
           e.preventDefault()
-          closeTab(activeTabId)
+          // 走 requestCloseTab：编辑器里有没保存的改动时会先问一句
+          requestCloseTab(activeTabId)
         }
         return
       }
@@ -138,7 +139,7 @@ export default function App() {
                 {/* 包一层：终端/SFTP/编辑器任一处炸了都别留黑框，把错误显示出来 */}
                 <ErrorBoundary label={`「${tab.title}」这个标签出错了`}>
                 {tab.kind === 'editor' && tab.editorTarget ? (
-                  <EditorView target={tab.editorTarget} />
+                  <EditorView target={tab.editorTarget} tabId={tab.id} />
                 ) : tab.kind === 'sftp' && tab.sessionId ? (
                   <SftpPanel sessionId={tab.sessionId} />
                 ) : tab.kind === 'local' ? (

@@ -44,7 +44,7 @@ function useLanguage(fileName: string) {
   return support
 }
 
-export function EditorView({ target }: { target: EditorTarget }) {
+export function EditorView({ target, tabId }: { target: EditorTarget; tabId?: string }) {
   const setError = useApp((s) => s.setError)
   const theme = useApp((s) => s.theme)
   const [content, setContent] = useState('')
@@ -60,6 +60,14 @@ export function EditorView({ target }: { target: EditorTarget }) {
   contentRef.current = content
   const targetRef = useRef(target)
   targetRef.current = target
+  /**
+   * 已保存内容的 ref 版本。
+   *
+   * 守卫的 isDirty 会被 store 在"关标签"那一刻同步调用，那时拿 state 可能还没重渲染；
+   * 存完之后也显式更新它，避免连点两下时读到旧值。
+   */
+  const originalRef = useRef('')
+  originalRef.current = original
 
   useEffect(() => {
     let alive = true
@@ -82,20 +90,46 @@ export function EditorView({ target }: { target: EditorTarget }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [target.path, target.side])
 
-  const save = useCallback(async () => {
+  /**
+   * 真正落盘的那一步。返回 null 表示成功，字符串是错误文案 ——
+   * 关标签的守卫要的是"成没成 + 为什么不成"，不能像按钮那样只 toast 一下就完事。
+   */
+  const saveOnce = useCallback(async (): Promise<string | null> => {
     setSaving(true)
     setSaved(false)
     try {
       await writeFile(targetRef.current, contentRef.current)
+      originalRef.current = contentRef.current
       setOriginal(contentRef.current)
       setSaved(true)
       setTimeout(() => setSaved(false), 2000)
+      return null
     } catch (e) {
-      setError(String(e))
+      return String(e)
     } finally {
       setSaving(false)
     }
-  }, [setError])
+  }, [])
+
+  const save = useCallback(async () => {
+    const failure = await saveOnce()
+    if (failure) setError(failure)
+  }, [saveOnce, setError])
+
+  /**
+   * 把"脏不脏 / 怎么存"交给 store，关标签时它要同步问。
+   * guard 对象只随 tabId 注册一次，内部一律读 ref —— 注册时若跟着内容变，
+   * 每敲一个字都会 set 一次 store，全应用跟着重渲染。
+   */
+  useEffect(() => {
+    if (!tabId) return
+    const guard = {
+      isDirty: () => contentRef.current !== originalRef.current,
+      save: saveOnce,
+    }
+    useApp.getState().registerEditorGuard(tabId, guard)
+    return () => useApp.getState().unregisterEditorGuard(tabId)
+  }, [tabId, saveOnce])
 
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {

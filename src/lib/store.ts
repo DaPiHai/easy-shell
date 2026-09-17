@@ -72,6 +72,14 @@ export type ConfirmPrompt =
 
 export type VaultPhase = 'loading' | 'setup' | 'locked' | 'ready'
 
+/** 编辑器标签交给 store 的"守卫"：关标签前问一句要不要保存 */
+export interface EditorGuard {
+  /** 有没保存的改动 */
+  isDirty: () => boolean
+  /** 存一次。返回 null 表示成功，字符串是给用户看的错误 */
+  save: () => Promise<string | null>
+}
+
 export interface Tab {
   id: string
   title: string
@@ -149,7 +157,12 @@ interface AppState {
   initVault: () => Promise<void>
   setupVault: (password: string) => Promise<void>
   unlockVault: (password: string) => Promise<void>
-  lockVault: () => Promise<void>
+  /**
+   * 锁定密钥库：收掉所有连接、清空标签。
+   * `force` 是"确认过了"的重入标志 —— 有没保存的编辑器时它会先弹一次确认，
+   * 用户点确认后再带着 force 调回来。
+   */
+  lockVault: (force?: boolean) => Promise<void>
   /** 清空密钥库回到「首次使用」。**不可撤销**，调用前必须让用户明确确认 */
   resetVault: () => Promise<void>
 
@@ -172,7 +185,20 @@ interface AppState {
   setActiveTab: (id: string) => void
   addTab: (tab: Omit<Tab, 'id'>) => string
   closeTab: (id: string) => void
+  /**
+   * 用户主动关标签都走这里：标签里有没保存的编辑器就先弹确认，
+   * 否则直接关。程序自动关（本地 shell 退出、锁库清标签）仍用 closeTab 绕开它。
+   */
+  requestCloseTab: (id: string) => void
   toggleSplit: (id: string) => void
+
+  /**
+   * 编辑器标签注册的守卫。关标签时要同步问"脏不脏"，
+   * 所以放 store 而不是 React state（和 terminalSinks 是同一个理由）。
+   */
+  editorGuards: Record<string, EditorGuard>
+  registerEditorGuard: (tabId: string, guard: EditorGuard) => void
+  unregisterEditorGuard: (tabId: string) => void
 
   /** 左右分屏的比例（左半 / 总宽），拖过分隔条就改这里，localStorage 持久化 */
   splitRatio: number
@@ -313,8 +339,26 @@ export const useApp = create<AppState>((set, get) => ({
    *
    * 顺序是刻意的：先清标签再收连接。反过来的话，终端还挂着时会收到 closed 事件
    * 去走重连流程，凭空制造一次竞态。
+   *
+   * 标签里的编辑器如果还有没保存的改动，锁库会把它一起收掉 —— 先让用户确认一次。
    */
-  lockVault: async () => {
+  lockVault: async (force = false) => {
+    if (!force) {
+      const dirty = Object.values(get().editorGuards).filter((g) => g.isDirty()).length
+      if (dirty > 0) {
+        set({
+          confirmPrompt: {
+            kind: 'confirm',
+            danger: true,
+            title: `还有 ${dirty} 个文件没保存`,
+            message: '锁定密钥库会关掉所有标签，这些未保存的改动会一起丢掉。',
+            confirmLabel: '仍然锁定',
+            onConfirm: () => void get().lockVault(true),
+          },
+        })
+        return
+      }
+    }
     const sessionIds = [
       ...new Set(
         get()
@@ -394,6 +438,36 @@ export const useApp = create<AppState>((set, get) => ({
       const nextActive =
         s.activeTabId === id ? (tabs[Math.min(index, tabs.length - 1)]?.id ?? null) : s.activeTabId
       return { tabs, activeTabId: nextActive }
+    }),
+
+  requestCloseTab: (id) => {
+    const s = get()
+    const guard = s.editorGuards[id]
+    // 只有编辑器标签会注册守卫；脏了就问一句，别让改动无声消失
+    if (guard?.isDirty()) {
+      const tab = s.tabs.find((t) => t.id === id)
+      set({
+        confirmPrompt: {
+          kind: 'unsaved',
+          name: tab?.title ?? '这个文件',
+          onSave: guard.save,
+          close: () => get().closeTab(id),
+        },
+      })
+      return
+    }
+    get().closeTab(id)
+  },
+
+  editorGuards: {},
+  registerEditorGuard: (tabId, guard) =>
+    set((s) => ({ editorGuards: { ...s.editorGuards, [tabId]: guard } })),
+  unregisterEditorGuard: (tabId) =>
+    set((s) => {
+      if (!s.editorGuards[tabId]) return {}
+      const next = { ...s.editorGuards }
+      delete next[tabId]
+      return { editorGuards: next }
     }),
 
   toggleSplit: (id) =>
