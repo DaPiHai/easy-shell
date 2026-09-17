@@ -35,6 +35,7 @@ const DRAG_THRESHOLD = 5
 
 export function SftpPanel({ sessionId }: Props) {
   const setError = useApp((s) => s.setError)
+  const setConfirmPrompt = useApp((s) => s.setConfirmPrompt)
   const runTransfer = useApp((s) => s.runTransfer)
   const addTab = useApp((s) => s.addTab)
 
@@ -374,36 +375,44 @@ export function SftpPanel({ sessionId }: Props) {
       dragRef.current = { from: side, entries, ox: e.clientX, oy: e.clientY, active: false }
     }
 
-  const mkdir = async (side: Side) => {
-    const name = window.prompt('新目录名称')
-    if (!name?.trim()) return
-    const name2 = name.trim()
-    if (side === 'local') {
-      const sep = localPath.includes('\\') ? '\\' : '/'
-      const target = `${localPath.replace(/[\\/]+$/, '')}${sep}${name2}`
-      try {
-        await localMkdir(target)
-        void refreshLocal(localPath)
-      } catch (e) {
-        setError(String(e))
-      }
-    } else {
-      if (sftpId == null) return
-      const target = `${remotePath.replace(/\/+$/, '')}/${name2}`
-      try {
-        await sftpMkdir(sftpId, target)
-        void refreshRemote(remotePath)
-      } catch (e) {
-        setError(String(e))
-      }
-    }
+  const mkdir = (side: Side) => {
+    setConfirmPrompt({
+      kind: 'input',
+      title: side === 'local' ? '新建本地目录' : '新建远程目录',
+      label: '目录名称',
+      confirmLabel: '创建',
+      onConfirm: async (value) => {
+        const name = value.trim()
+        if (!name) return
+        if (side === 'local') {
+          const sep = localPath.includes('\\') ? '\\' : '/'
+          const target = `${localPath.replace(/[\\/]+$/, '')}${sep}${name}`
+          await localMkdir(target)
+          void refreshLocal(localPath)
+        } else {
+          if (sftpId == null) return
+          const target = `${remotePath.replace(/\/+$/, '')}/${name}`
+          await sftpMkdir(sftpId, target)
+          void refreshRemote(remotePath)
+        }
+      },
+    })
   }
 
-  const remove = async (side: Side) => {
+  const remove = (side: Side) => {
     const paths = selected[side]
     if (paths.length === 0) return
-    if (!window.confirm(`删除选中的 ${paths.length} 项？目录会连同内容一起删掉，不可撤销。`)) return
+    setConfirmPrompt({
+      kind: 'confirm',
+      danger: true,
+      title: `删除选中的 ${paths.length} 项？`,
+      message: '目录会连同里面的内容一起删掉，这个操作不可撤销。',
+      confirmLabel: '删除',
+      onConfirm: () => void doRemove(side, paths),
+    })
+  }
 
+  const doRemove = async (side: Side, paths: string[]) => {
     if (side === 'local') {
       const entries = localEntries.filter((e) => paths.includes(e.path))
       for (const entry of entries) {
@@ -445,29 +454,32 @@ export function SftpPanel({ sessionId }: Props) {
   }
 
   /** 重命名：本地和远端都只改最后一段，同级内改名 */
-  const rename = async (side: Side) => {
+  const rename = (side: Side) => {
     const path = selected[side][0]
     if (!path) return
     const oldName = path.split(/[\\/]/).filter(Boolean).pop() ?? path
-    const name = window.prompt('新的名称', oldName)
-    if (!name?.trim() || name.trim() === oldName) return
-
-    const parent = path.slice(0, path.length - oldName.length)
-    const target = `${parent}${name.trim()}`
-
-    try {
-      if (side === 'local') {
-        await localRename(path, target)
-        await refreshLocal(localPath)
-      } else {
-        if (sftpId == null) return
-        await sftpRename(sftpId, path, target)
-        await refreshRemote(remotePath)
-      }
-      setSelected((s) => ({ ...s, [side]: [] }))
-    } catch (e) {
-      setError(String(e))
-    }
+    setConfirmPrompt({
+      kind: 'input',
+      title: '重命名',
+      label: '新的名称',
+      defaultValue: oldName,
+      confirmLabel: '重命名',
+      onConfirm: async (value) => {
+        const name = value.trim()
+        if (!name || name === oldName) return
+        const parent = path.slice(0, path.length - oldName.length)
+        const target = `${parent}${name}`
+        if (side === 'local') {
+          await localRename(path, target)
+          await refreshLocal(localPath)
+        } else {
+          if (sftpId == null) return
+          await sftpRename(sftpId, path, target)
+          await refreshRemote(remotePath)
+        }
+        setSelected((s) => ({ ...s, [side]: [] }))
+      },
+    })
   }
 
   return (
@@ -486,9 +498,9 @@ export function SftpPanel({ sessionId }: Props) {
           onActivate={(entry) => activate('local', entry)}
           onNavigate={(p) => navigate('local', p)}
           onRefresh={() => void refreshLocal(localPath)}
-          onMkdir={() => void mkdir('local')}
-          onDelete={() => void remove('local')}
-          onRename={() => void rename('local')}
+          onMkdir={() => mkdir('local')}
+          onDelete={() => remove('local')}
+          onRename={() => rename('local')}
           onEdit={() => openEditor('local')}
           onRowMouseDown={beginDrag('local')}
           dropActive={dropSide === 'local'}
@@ -512,9 +524,9 @@ export function SftpPanel({ sessionId }: Props) {
           onActivate={(entry) => activate('remote', entry)}
           onNavigate={(p) => navigate('remote', p)}
           onRefresh={() => void refreshRemote(remotePath)}
-          onMkdir={() => void mkdir('remote')}
-          onDelete={() => void remove('remote')}
-          onRename={() => void rename('remote')}
+          onMkdir={() => mkdir('remote')}
+          onDelete={() => remove('remote')}
+          onRename={() => rename('remote')}
           onEdit={() => openEditor('remote')}
           onRowMouseDown={beginDrag('remote')}
           dropActive={dropSide === 'remote'}

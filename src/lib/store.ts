@@ -30,11 +30,45 @@ export type TabKind = 'terminal' | 'sftp' | 'local' | 'editor'
 
 /** loading=检查中 setup=首次设置主密码 locked=待解锁 ready=已解锁 */
 /**
- * 需要用户拍板才能继续的连接失败。见 store 里 `confirmPrompt` 的说明。
+ * 需要用户拍板才能继续的操作。见 store 里 `confirmPrompt` 的说明。
+ *
+ * 前两个 arm 是安全事项（连不上/降级），后面三个是通用的：
+ * 危险操作确认、未保存改动确认、需要填一个值的输入框。
+ * 全走同一套自绘弹窗，不用 `window.confirm/prompt` ——
+ * WebView2 里 confirm 压根不渲染（直接当确认），prompt 弹的是原生框，跟整套视觉不搭。
  */
 export type ConfirmPrompt =
   | { kind: 'host_key_mismatch'; host: string; detail: string; retry: () => void }
   | { kind: 'algo_compat'; message: string; retry: () => void }
+  | {
+      kind: 'confirm'
+      title: string
+      message: string
+      /** 可选的等宽块，用来摊开路径、目标这类不该被文案淹没的信息 */
+      detail?: string
+      confirmLabel: string
+      /** 危险操作：盾牌图标 + 红色按钮。默认是主色按钮 */
+      danger?: boolean
+      onConfirm: () => void
+    }
+  | {
+      kind: 'unsaved'
+      /** 标签名，用在文案里 */
+      name: string
+      /** 返回 null 表示保存成功；返回字符串是给用户看的错误，弹窗留在原地 */
+      onSave: () => Promise<string | null>
+      /** 关掉这个标签。「不保存关闭」与「保存成功后」共用同一个收尾 */
+      close: () => void
+    }
+  | {
+      kind: 'input'
+      title: string
+      label: string
+      defaultValue?: string
+      placeholder?: string
+      confirmLabel: string
+      onConfirm: (value: string) => void | Promise<void>
+    }
 
 export type VaultPhase = 'loading' | 'setup' | 'locked' | 'ready'
 
@@ -91,13 +125,13 @@ interface AppState {
   setTunnelOpen: (open: boolean) => void
 
   /**
-   * 需要用户拍板才能继续的连接失败。
+   * 需要用户拍板才能继续的操作。
    *
-   * 两种情况都是**不该由程序替用户决定**的安全事项，所以共用同一个确认弹窗：
-   * - 主机密钥变了：可能是中间人，也可能只是服务器重装了
-   * - 算法谈不拢：要连上就得放开已废弃的算法
-   *
+   * 安全类（主机密钥变了 / 算法谈不拢）是**不该由程序替用户决定**的事，
    * `retry` 由调用方塞进来，因为"重试后是开终端还是开 SFTP"只有调用方知道。
+   *
+   * 通用类（confirm / unsaved / input）同样是"程序不该替用户拍板"：
+   * 删东西之前问一句、有没保存的改动先问一句、要个名字先问一句。
    */
   confirmPrompt: ConfirmPrompt | null
   setConfirmPrompt: (prompt: ConfirmPrompt | null) => void
@@ -126,6 +160,9 @@ interface AppState {
   removeHost: (id: string) => Promise<void>
   saveGroup: (group: GroupRecord) => Promise<void>
   removeGroup: (id: string) => Promise<void>
+  /** 让用户填分组名再创建。会话树与命令面板共用这一条 */
+  promptNewGroup: () => void
+  promptRenameGroup: (id: string, oldName: string) => void
 
   collapsed: Record<string, boolean>
   toggleGroup: (id: string) => void
@@ -363,6 +400,39 @@ export const useApp = create<AppState>((set, get) => ({
     set((s) => ({
       tabs: s.tabs.map((t) => (t.id === id ? { ...t, split: !t.split } : t)),
     })),
+
+  // 分组的取名/改名放 store 而不是组件里：会话树和命令面板都要用，
+  // 而且都得走自绘输入弹窗（window.prompt 在打包版里是原生框，观感对不上）
+  promptNewGroup: () =>
+    set({
+      confirmPrompt: {
+        kind: 'input',
+        title: '新建分组',
+        label: '分组名称',
+        confirmLabel: '创建',
+        onConfirm: (value) => {
+          const name = value.trim()
+          if (!name) return
+          void get().saveGroup({ id: crypto.randomUUID(), name })
+        },
+      },
+    }),
+
+  promptRenameGroup: (id, oldName) =>
+    set({
+      confirmPrompt: {
+        kind: 'input',
+        title: '重命名分组',
+        label: '分组名称',
+        defaultValue: oldName,
+        confirmLabel: '保存',
+        onConfirm: (value) => {
+          const name = value.trim()
+          if (!name || name === oldName) return
+          void get().saveGroup({ id, name })
+        },
+      },
+    }),
 
   // 从 localStorage 读上次拖出来的位置，找不到或者解析失败就 0.5
   splitRatio: (() => {

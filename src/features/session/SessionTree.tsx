@@ -38,6 +38,8 @@ export function SessionTree() {
     setError,
     removeHost,
     setConfirmPrompt,
+    promptNewGroup,
+    promptRenameGroup,
   } = useApp()
 
   /** retried：已经"忘掉旧密钥"重试过一次就别再弹窗了，否则会死循环 */
@@ -103,20 +105,34 @@ export function SessionTree() {
   }
 
   const createGroup = () => {
-    const name = window.prompt('新分组名称')
-    if (!name?.trim()) return
-    void useApp.getState().saveGroup({ id: crypto.randomUUID(), name: name.trim() })
+    promptNewGroup()
   }
 
   const renameGroup = (id: string, oldName: string) => {
-    const name = window.prompt('重命名分组', oldName)
-    if (!name?.trim() || name.trim() === oldName) return
-    void useApp.getState().saveGroup({ id, name: name.trim() })
+    promptRenameGroup(id, oldName)
   }
 
   const deleteGroup = (id: string, name: string) => {
-    if (!window.confirm(`删除分组「${name}」？组里的主机会被移到未分组，不会被删掉。`)) return
-    void useApp.getState().removeGroup(id)
+    setConfirmPrompt({
+      kind: 'confirm',
+      danger: true,
+      title: `删除分组「${name}」？`,
+      message: '组里的主机会被移到未分组，主机本身不会被删掉。',
+      confirmLabel: '删除分组',
+      onConfirm: () => void useApp.getState().removeGroup(id),
+    })
+  }
+
+  const deleteHost = (host: HostRecord) => {
+    setConfirmPrompt({
+      kind: 'confirm',
+      danger: true,
+      title: `删除主机「${host.name}」？`,
+      message: '只从列表里移除这台主机，已保存的密码/私钥会一起删掉。',
+      detail: `${host.username}@${host.address}:${host.port}`,
+      confirmLabel: '删除主机',
+      onConfirm: () => void removeHost(host.id),
+    })
   }
 
   /** 把主机拖到某个分组上 = 移入该分组 */
@@ -156,8 +172,8 @@ export function SessionTree() {
         <FolderOpen size={13} />
       </button>
       <button
-        onClick={() => void removeHost(host.id)}
-        className="ml-1 shrink-0 rounded p-0.5 text-ink-tertiary opacity-0 transition-opacity hover:text-danger group-hover:opacity-100"
+        onClick={() => deleteHost(host)}
+        className="ml-1 shrink-0 rounded p-0.5 text-ink-tertiary transition-colors hover:bg-surface-3 hover:text-danger"
         title="删除主机"
       >
         <Trash2 size={12} />
@@ -218,14 +234,14 @@ export function SessionTree() {
                 </button>
                 <button
                   onClick={() => renameGroup(group.id, group.name)}
-                  className="shrink-0 rounded p-0.5 opacity-0 transition-opacity hover:text-ink group-hover:opacity-100"
+                  className="shrink-0 rounded p-0.5 text-ink-tertiary transition-colors hover:bg-surface-3 hover:text-ink"
                   title="重命名分组"
                 >
                   <Pencil size={11} />
                 </button>
                 <button
                   onClick={() => deleteGroup(group.id, group.name)}
-                  className="shrink-0 rounded p-0.5 opacity-0 transition-opacity hover:text-danger group-hover:opacity-100"
+                  className="shrink-0 rounded p-0.5 text-ink-tertiary transition-colors hover:bg-surface-3 hover:text-danger"
                   title="删除分组"
                 >
                   <Trash2 size={11} />
