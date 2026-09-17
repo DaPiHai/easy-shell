@@ -386,6 +386,8 @@ export interface TunnelInfo {
   listenPort: number
   remoteHost: string
   remotePort: number
+  /** 最近一次开通道失败的原因（对面 AllowTcpForwarding no 之类），成功后一直为空 */
+  lastError: string | null
 }
 
 export function tunnelStart(

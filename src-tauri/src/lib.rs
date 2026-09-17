@@ -10,7 +10,8 @@ pub mod sftp;
 /// ssh 模块对外可见，tests/ 里的端到端测试要用 connect_and_auth
 pub mod ssh;
 mod store;
-mod tunnel;
+/// tunnel 模块对外可见，tests/ 里的端到端测试要驱动转发自身的监听循环
+pub mod tunnel;
 
 pub fn run() {
     let vault = store::Vault::new().expect("初始化密钥库失败");

@@ -139,23 +139,38 @@ export function TunnelDialog() {
               list.map((t) => (
                 <div
                   key={t.id}
-                  className="flex items-center gap-2 border-b border-hairline px-3 py-2 last:border-b-0"
+                  className="border-b border-hairline px-3 py-2 last:border-b-0"
                 >
-                  <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-success" />
-                  <span className="font-mono text-[12px] text-ink-muted">
-                    127.0.0.1:{t.listenPort}
-                  </span>
-                  <span className="text-ink-tertiary">→</span>
-                  <span className="font-mono text-[12px] text-ink-muted">
-                    {t.remoteHost}:{t.remotePort}
-                  </span>
-                  <button
-                    onClick={() => void stop(t.id)}
-                    className="ml-auto shrink-0 rounded p-1 text-ink-tertiary transition-colors hover:bg-surface-3 hover:text-danger"
-                    title="停止转发"
-                  >
-                    <Trash2 size={12} />
-                  </button>
+                  <div className="flex items-center gap-2">
+                    <span
+                      className={`h-1.5 w-1.5 shrink-0 rounded-full ${
+                        t.lastError ? 'bg-danger' : 'bg-success'
+                      }`}
+                    />
+                    <span className="font-mono text-[12px] text-ink-muted">
+                      127.0.0.1:{t.listenPort}
+                    </span>
+                    <span className="text-ink-tertiary">→</span>
+                    <span className="font-mono text-[12px] text-ink-muted">
+                      {t.remoteHost}:{t.remotePort}
+                    </span>
+                    <button
+                      onClick={() => void stop(t.id)}
+                      className="ml-auto shrink-0 rounded p-1 text-ink-tertiary transition-colors hover:bg-surface-3 hover:text-danger"
+                      title="停止转发"
+                    >
+                      <Trash2 size={12} />
+                    </button>
+                  </div>
+                  {/* 规则看着是"活着"的（端口确实在监听），但每次连接都被对面拒掉 ——
+                      不把原因摆出来，用户只会以为是自己填错了目标地址 */}
+                  {t.lastError && (
+                    <p className="mt-1 pl-3.5 text-[11px] leading-relaxed text-danger">
+                      转发被服务端拒绝：{t.lastError}
+                      <br />
+                      常见原因是对方 sshd 关了 AllowTcpForwarding，或不允许连这个目标。
+                    </p>
+                  )}
                 </div>
               ))
             )}

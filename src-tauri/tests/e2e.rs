@@ -8,6 +8,7 @@
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -15,6 +16,7 @@ use easy_shell_lib::ssh::{connect_and_auth, ConnectConfig, ConnectError};
 use russh::keys::{Algorithm, HashAlg, PrivateKey};
 use russh::server::{self, Auth, Msg, Server as _, Session};
 use russh::{cipher, kex, Channel, ChannelId, ChannelMsg, Preferred};
+use tokio::io::AsyncReadExt;
 use tokio::net::TcpListener;
 use tokio::sync::Mutex;
 
@@ -25,6 +27,8 @@ const TEST_PASS: &str = "secret";
 struct TestServer {
     clients: Arc<Mutex<HashMap<usize, (ChannelId, russh::server::Handle)>>>,
     id: usize,
+    /// 服务端收到的转发目标 (host, port)。真 sshd 会拿它去连，这里记下来给测试断言
+    forward_log: Arc<Mutex<Vec<(String, u32)>>>,
 }
 
 impl server::Server for TestServer {
@@ -92,7 +96,11 @@ impl server::Handler for TestServer {
         Ok(())
     }
 
-    /// 让端口转发测试有东西可连：把收到的字节原样塞回去
+    /// 让端口转发测试有东西可连：把收到的字节原样塞回去。
+    ///
+    /// 目标端口 0 一律拒 —— 真 sshd 会去连这个 (host, port)，端口 0 谁也连不上。
+    /// 假服务端如果闭眼 accept，转发代码把「目标」和「发起方」两组参数写反了
+    /// 也照样能收到数据，这个 bug 就是这么溜过去的。
     async fn channel_open_direct_tcpip(
         &mut self,
         channel: Channel<Msg>,
@@ -103,7 +111,17 @@ impl server::Handler for TestServer {
         reply: server::ChannelOpenHandle,
         session: &mut Session,
     ) -> Result<(), Self::Error> {
-        let _ = (host_to_connect, port_to_connect, originator_address, originator_port);
+        self.forward_log
+            .lock()
+            .await
+            .push((host_to_connect.to_string(), port_to_connect));
+        let _ = (originator_address, originator_port);
+        if port_to_connect == 0 {
+            reply
+                .reject(russh::ChannelOpenFailure::ConnectFailed)
+                .await;
+            return Ok(());
+        }
         reply.accept().await;
         // 不能在这里直接发：此刻通道还没确认，数据会被丢掉。
         // 交给另一个任务，等通道建好再推
@@ -124,6 +142,13 @@ async fn spawn_server() -> u16 {
 
 /// 起一个算法表被限定的服务端 —— 用来假装只认已废弃算法的老设备
 async fn spawn_server_with(preferred: Preferred) -> u16 {
+    spawn_server_recording(preferred).await.0
+}
+
+/// 同上，额外把「服务端收到的转发目标」交给测试断言
+async fn spawn_server_recording(
+    preferred: Preferred,
+) -> (u16, Arc<Mutex<Vec<(String, u32)>>>) {
     // 先占一个端口拿到号，再交给 run_on_address（它内部自己 bind，不借用外部 socket）
     let probe = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
     let port = probe.local_addr().unwrap().port();
@@ -139,9 +164,11 @@ async fn spawn_server_with(preferred: Preferred) -> u16 {
 
     // run_on_address 的 future 借用 &mut self，要 spawn 就得让它活得够久。
     // 测试里直接泄漏一份，进程退出就回收了
+    let log: Arc<Mutex<Vec<(String, u32)>>> = Arc::new(Mutex::new(Vec::new()));
     let instance: &'static mut TestServer = Box::leak(Box::new(TestServer {
         clients: Arc::new(Mutex::new(HashMap::new())),
         id: 0,
+        forward_log: log.clone(),
     }));
     let server = instance.run_on_address(config, ("127.0.0.1", port));
 
@@ -155,7 +182,7 @@ async fn spawn_server_with(preferred: Preferred) -> u16 {
     // （表现为偶发的「连接被拒绝」，或者更糟 —— 写进了另一个测试的 fixture）。
     for _ in 0..50 {
         if tokio::net::TcpStream::connect(("127.0.0.1", port)).await.is_ok() {
-            return port
+            return (port, log)
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
@@ -307,6 +334,66 @@ async fn 端口转发能开通道() {
 
     let got = read_until(&mut channel, b"TUNNEL:").await;
     assert!(got, "转发通道没收到服务端数据");
+}
+
+/// 走上层的转发代码（`tunnel::forward_accept_loop`），而不是直接调 russh 开通道。
+///
+/// 上面那条用例只证明「russh 的 API 会用」，没碰应用自己的参数拼装 ——
+/// tunnel.rs 把目标 (host, port) 和发起方 (addr, port) 两组参数写反了很久都没人发现，
+/// 真机上的表现是「本地端口能连上，然后一个字节都收不到就断」（服务端去连 127.0.0.1:0）。
+#[tokio::test]
+async fn 端口转发能把本地连接的数据带回来() {
+    let (port, forward_log) = spawn_server_recording(Preferred::DEFAULT).await;
+    let handle = connect_and_auth(&config_for(port)).await.unwrap();
+
+    // 监听端口交给内核分配，别和别的测试抢固定端口
+    let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let listen_port = listener.local_addr().unwrap().port();
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let last_error: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+    tokio::spawn(easy_shell_lib::tunnel::forward_accept_loop(
+        Arc::new(Mutex::new(handle)),
+        listener,
+        "127.0.0.1".to_string(),
+        22,
+        stop.clone(),
+        last_error.clone(),
+    ));
+
+    let mut client = tokio::net::TcpStream::connect(("127.0.0.1", listen_port))
+        .await
+        .unwrap();
+    let mut got = Vec::new();
+    let deadline = tokio::time::sleep(Duration::from_secs(5));
+    tokio::pin!(deadline);
+    loop {
+        let mut chunk = [0u8; 256];
+        tokio::select! {
+            _ = &mut deadline => break,
+            read = client.read(&mut chunk) => match read {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    got.extend_from_slice(&chunk[..n]);
+                    if got.windows(7).any(|w| w == b"TUNNEL:") {
+                        break
+                    }
+                }
+            }
+        }
+    }
+    stop.store(true, Ordering::SeqCst);
+
+    assert!(
+        got.windows(7).any(|w| w == b"TUNNEL:"),
+        "转发没把服务端数据带回来，收到的是 {:?}",
+        String::from_utf8_lossy(&got)
+    );
+    assert_eq!(
+        forward_log.lock().await.clone(),
+        vec![("127.0.0.1".to_string(), 22)],
+        "服务端收到的转发目标不对 —— 目标应写在前两个参数里"
+    );
 }
 
 /// 一直读 channel 直到累计数据里出现 target，或超时。

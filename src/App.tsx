@@ -37,8 +37,16 @@ export default function App() {
         return
       }
       if (e.key === 'Escape') {
+        // 所有自绘弹窗都要能被 Esc 关掉 —— 只关一部分的话，
+        // 用户在端口转发/命令片段上按 Esc 会以为按键坏了
+        const { tunnelOpen, setTunnelOpen, snippetsOpen, setSnippetsOpen, confirmPrompt, setConfirmPrompt } =
+          useApp.getState()
         if (paletteOpen) setPaletteOpen(false)
         if (connectOpen) setConnectOpen(false)
+        if (tunnelOpen) setTunnelOpen(false)
+        if (snippetsOpen) setSnippetsOpen(false)
+        // 安全确认框同理：Esc = 取消（确认框自己没处理，不在这里关就成了关不掉的框）
+        if (confirmPrompt) setConfirmPrompt(null)
       }
 
       /**
