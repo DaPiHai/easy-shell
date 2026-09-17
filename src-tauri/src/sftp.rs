@@ -309,13 +309,19 @@ fn part_path(target: &Path) -> PathBuf {
  *
  * 只比大小不够 —— 源端改了内容但大小没变时会被误判成已传完，用户拿到的是一份
  * 旧的却显示成功。取不到 mtime 就退回只比大小（比原来多一层保护，不会更差）。
+ *
+ * 留 2 秒容差是**真机上量出来的**：服务端与本机的时钟并不严格同步，试过本地那份
+ * 明明刚下完、mtime 却比远端早一秒，于是每次都白重下一遍。宁可容忍一秒的偏差，
+ * 也不要让「刚传过的文件又传一次」——后者对用户是实打实的带宽和时间。
  */
+const MTIME_TOLERANCE_SECS: u64 = 2;
+
 fn is_up_to_date(target_size: u64, target_mtime: Option<u64>, item: &Item) -> bool {
     if target_size != item.size {
         return false;
     }
     match (target_mtime, item.modified) {
-        (Some(target_t), Some(src_t)) => target_t >= src_t,
+        (Some(target_t), Some(src_t)) => target_t + MTIME_TOLERANCE_SECS >= src_t,
         _ => true,
     }
 }
