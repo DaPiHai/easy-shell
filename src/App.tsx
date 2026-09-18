@@ -15,7 +15,7 @@ import { SnippetsDialog } from '@/features/snippets/SnippetsDialog'
 import { EditorView } from '@/features/editor/EditorView'
 import { UnlockScreen } from '@/features/session/UnlockScreen'
 import { EmptyState, StatusBar } from '@/components/EmptyState'
-import { useApp, DEFAULT_FONT_SIZE, panesOf } from '@/lib/store'
+import { useApp, DEFAULT_FONT_SIZE, layoutOf, panesOf } from '@/lib/store'
 import { PaneGrid } from '@/components/PaneGrid'
 import { ErrorBoundary } from '@/components/ErrorBoundary'
 
@@ -202,6 +202,7 @@ export default function App() {
                   <PaneGrid
                     tabId={tab.id}
                     panes={panesOf(tab)}
+                    layout={layoutOf(tab)}
                     colRatio={splitRatio}
                     rowRatio={splitRatioY}
                     onColRatioChange={setSplitRatio}

@@ -1,9 +1,14 @@
-import { useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
+import { Check } from 'lucide-react'
 
 export interface TerminalMenuItem {
   label: string
   /** 右侧的快捷键提示 */
   hint?: string
+  /** 前置图标（分屏菜单用它画形状示意） */
+  icon?: ReactNode
+  /** 当前生效的那一项，右侧给个勾 */
+  checked?: boolean
   disabled?: boolean
   /** 危险动作（重置终端），标红 */
   danger?: boolean
@@ -122,13 +127,15 @@ export function TerminalMenu({ x, y, items, onClose }: Props) {
             onClose()
             item.onSelect()
           }}
-          className={`flex w-full items-center gap-6 px-3 py-1.5 text-left transition-colors disabled:opacity-40 ${
+          className={`flex w-full items-center gap-3 px-3 py-1.5 text-left transition-colors disabled:opacity-40 ${
             item.danger
               ? 'text-danger hover:bg-danger/10'
               : 'text-ink-muted hover:bg-surface-2 hover:text-ink'
           } disabled:hover:bg-transparent disabled:hover:text-ink-muted`}
         >
+          {item.icon}
           <span className="flex-1">{item.label}</span>
+          {item.checked && <Check size={12} className="shrink-0 text-accent" />}
           {item.hint && <span className="shrink-0 text-[11px] text-ink-tertiary">{item.hint}</span>}
         </button>
       ))}

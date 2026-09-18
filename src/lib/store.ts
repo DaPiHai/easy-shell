@@ -245,18 +245,188 @@ export interface Tab {
   /** sftp / editor 标签属于哪台主机；终端标签看各自 pane 的 hostId */
   hostId?: string
   /**
-   * 终端标签的格子，1–4 个。**顺序就是屏幕位置**：
-   * 1 格占满；2 格左右各一；3–4 格排成 2×2（左上 / 右上 / 左下 / 右下），
-   * 不满 4 个时最后一格是「＋ 添加终端」占位。本地 Shell 标签也是 1 个格子（kind='local'），
-   * 这样命令片段、查找、断线标记全都按 paneId 索引，不用维护"按标签"和"按格子"两套键。
+   * 终端标签的格子，1–4 个。**顺序就是视觉顺序**，摆成什么形状看 `layout`。
+   * 本地 Shell 标签也是 1 个格子（`kind='local'`），这样命令片段、查找、断线标记
+   * 全都按 paneId 索引，不用维护"按标签"和"按格子"两套键。
    */
   panes?: Pane[]
+  /** 这一屏怎么摆（左右二分 / 上下二分 / 三格的各种排法 / 四宫格…）。见 `PANE_LAYOUTS` */
+  layout?: PaneLayout
   /** kind 为 editor 时的打开目标 */
   editorTarget?: EditorTarget
 }
 
 /** 一个标签最多几格。2×2 的极限，也是 sshd `MaxSessions` 底下留得住的数 */
 export const MAX_PANES = 4
+
+/** 格子在网格里的位置：c / r 从 1 开始，cs / rs 是跨列 / 跨行数（默认 1） */
+interface CellSpec {
+  c: number
+  r: number
+  cs?: number
+  rs?: number
+}
+
+export interface LayoutSpec {
+  /** 菜单里显示的名字 */
+  label: string
+  /** 网格几列几行 */
+  cols: number
+  rows: number
+  /** 每个格子的位置，**下标 = panes 的下标**（也就是视觉顺序，拖拽换位换的就是这个顺序） */
+  cells: CellSpec[]
+}
+
+/**
+ * 分屏的形状。
+ *
+ * 光有"几格"不够：两台机器横摆还是竖摆、三台怎么排，取决于屏幕形状和"这台要看什么"。
+ * 所以形状是**每个标签自己的选择**（`Tab.layout`），比例（列 / 行）仍是全局的两个值
+ * （`splitRatio` / `splitRatioY`）—— 比例是手感偏好，形状是这一屏的摆法。
+ *
+ * 格子数必须跟 `Tab.panes` 一样长：换形状时少则补格、多则收格，都在 `setPaneLayout` 里做。
+ */
+export type PaneLayout =
+  | 'single'
+  | 'cols2'
+  | 'rows2'
+  | 'cols3'
+  | 'rows3'
+  | 'left1Right2'
+  | 'left2Right1'
+  | 'top1Bottom2'
+  | 'top2Bottom1'
+  | 'grid4'
+
+export const PANE_LAYOUTS: Record<PaneLayout, LayoutSpec> = {
+  single: { label: '单格', cols: 1, rows: 1, cells: [{ c: 1, r: 1 }] },
+  cols2: {
+    label: '左右二分',
+    cols: 2,
+    rows: 1,
+    cells: [
+      { c: 1, r: 1 },
+      { c: 2, r: 1 },
+    ],
+  },
+  rows2: {
+    label: '上下二分',
+    cols: 1,
+    rows: 2,
+    cells: [
+      { c: 1, r: 1 },
+      { c: 1, r: 2 },
+    ],
+  },
+  cols3: {
+    label: '三列',
+    cols: 3,
+    rows: 1,
+    cells: [
+      { c: 1, r: 1 },
+      { c: 2, r: 1 },
+      { c: 3, r: 1 },
+    ],
+  },
+  rows3: {
+    label: '三行',
+    cols: 1,
+    rows: 3,
+    cells: [
+      { c: 1, r: 1 },
+      { c: 1, r: 2 },
+      { c: 1, r: 3 },
+    ],
+  },
+  left1Right2: {
+    label: '左一右二',
+    cols: 2,
+    rows: 2,
+    cells: [
+      { c: 1, r: 1, rs: 2 },
+      { c: 2, r: 1 },
+      { c: 2, r: 2 },
+    ],
+  },
+  left2Right1: {
+    label: '左二右一',
+    cols: 2,
+    rows: 2,
+    cells: [
+      { c: 1, r: 1 },
+      { c: 1, r: 2 },
+      { c: 2, r: 1, rs: 2 },
+    ],
+  },
+  top1Bottom2: {
+    label: '上一下二',
+    cols: 2,
+    rows: 2,
+    cells: [
+      { c: 1, r: 1, cs: 2 },
+      { c: 1, r: 2 },
+      { c: 2, r: 2 },
+    ],
+  },
+  top2Bottom1: {
+    label: '上二下一',
+    cols: 2,
+    rows: 2,
+    cells: [
+      { c: 1, r: 1 },
+      { c: 2, r: 1 },
+      { c: 1, r: 2, cs: 2 },
+    ],
+  },
+  grid4: {
+    label: '四宫格',
+    cols: 2,
+    rows: 2,
+    cells: [
+      { c: 1, r: 1 },
+      { c: 2, r: 1 },
+      { c: 1, r: 2 },
+      { c: 2, r: 2 },
+    ],
+  },
+}
+
+/** 菜单里的排列顺序：先按格数，再按形状 */
+export const LAYOUT_ORDER: PaneLayout[] = [
+  'single',
+  'cols2',
+  'rows2',
+  'cols3',
+  'rows3',
+  'left1Right2',
+  'left2Right1',
+  'top1Bottom2',
+  'top2Bottom1',
+  'grid4',
+]
+
+/**
+ * 每种格数回落到哪个形状：关掉一格、并进一个标签之后格数会变，
+ * 原来那个形状的格子数就对不上了。挑的是"换过去动得最少"的那个 ——
+ * 从四宫格关掉右下角，剩下的正好是「上二下一」。
+ */
+export const DEFAULT_LAYOUT_BY_COUNT: Record<number, PaneLayout> = {
+  1: 'single',
+  2: 'cols2',
+  3: 'top2Bottom1',
+  4: 'grid4',
+}
+
+/** 格数变了之后该用哪个形状：当前形状的格子数对得上就留着，对不上回落默认 */
+function layoutForCount(count: number, current: PaneLayout | undefined): PaneLayout {
+  if (current && PANE_LAYOUTS[current].cells.length === count) return current
+  return DEFAULT_LAYOUT_BY_COUNT[count] ?? 'single'
+}
+
+/** 标签当前的形状。没记过（或者记的跟格子数对不上）就按格数取默认 */
+export function layoutOf(tab: Tab | undefined | null): PaneLayout {
+  return layoutForCount(panesOf(tab).length, tab?.layout)
+}
 
 /** 标签的格子。非终端标签（SFTP / 编辑器）没有格子，返回空数组 */
 export function panesOf(tab: Tab | undefined | null): Pane[] {
@@ -541,17 +711,14 @@ interface AppState {
   activePane: () => Pane | null
 
   /**
-   * 调整分屏档位：1 / 2 / 4 格。多出来的格子**继承第一格的连接** ——
-   * 同一条会话再开一条 shell 通道，不用重新认证也不用再选一次主机；
-   * 想连别的机器在格子标题条上换（`PaneHostDialog`）。
-   * 降档只是把多出来的格子从数组里去掉，对应的终端卸载即关掉自己的通道。
+   * 换分屏形状（左右二分 / 上下二分 / 三格的几种排法 / 四宫格…）。
+   *
+   * 格子多了就补（新格子**继承第一格的连接** —— 同一条会话再开一条 shell 通道，
+   * 不用重新认证也不用再选一次主机），少了就把末尾几个收掉（各自的 shell 随之结束，
+   * 界面上会给一句回执，别让终端悄悄没了）。
+   * 格数相同的形状之间切换只是重新摆位，**一个格子都不会动**。
    */
-  setPaneCount: (tabId: string, count: 1 | 2 | 4) => void
-  /**
-   * 2 → 3 格：占位格上那个「＋」，新增的一格同样继承第一格的连接。
-   * 返回新格子的 id（调用方要接着把它交给「换主机」对话框），没加成就是 null。
-   */
-  addPane: (tabId: string) => string | null
+  setPaneLayout: (tabId: string, layout: PaneLayout) => void
   /** 关掉一格（标题条上的 ✕）。只剩一格时不给关 —— 那等于关标签，走标签的 ✕ */
   closePane: (tabId: string, paneId: string) => void
   /**
@@ -1112,22 +1279,23 @@ export const useApp = create<AppState>((set, get) => ({
     }),
 
   /**
-   * 调整分屏档位（1 / 2 / 4 格）。
+   * 换分屏形状。
    *
-   * 两个守卫都在这里：不是能分屏的标签、档位没变的，一动不动。
-   * 入口（标签栏、命令面板）各自还给一句提示，这里只保证状态不被翻坏。
+   * 两个守卫在这里：不是能分屏的标签、形状没变的，一动不动。
+   * 入口（标签栏的布局菜单、命令面板）各自还给一句提示。
    */
-  setPaneCount: (tabId, count) =>
+  setPaneLayout: (tabId, layout) =>
     set((s) => {
       const tab = s.tabs.find((t) => t.id === tabId)
       if (!isSplittable(tab)) return {}
+      const cells = PANE_LAYOUTS[layout].cells.length
       const panes = panesOf(tab)
-      if (panes.length === count) return {}
+      if (layoutOf(tab) === layout && panes.length === cells) return {}
       const base = panes[0]
-      const next = panes.slice(0, count)
+      const next = panes.slice(0, cells)
       // 新格子继承**第一格**的连接：同一条会话再开一条 shell 通道，不重新认证。
-      // 挑第一格而不是当前聚焦那格：标签栏上按的是"这个标签"，行为要可预期
-      while (next.length < count) {
+      // 挑第一格而不是当前聚焦那格：菜单上选的是"这个标签"的形状，行为要可预期
+      while (next.length < cells) {
         next.push(
           makePane({
             kind: base.kind,
@@ -1137,27 +1305,26 @@ export const useApp = create<AppState>((set, get) => ({
           }),
         )
       }
-      // 降档丢掉的那些格子：它们身上的断线标记、查找栏指向都要一起收拾，
+      // 收掉的那些格子：它们身上的断线标记、查找栏指向都要一起收拾，
       // 留着就是拿着不存在的 paneId 的状态
-      const gone = panes.slice(count).map((p) => p.id)
+      const gone = panes.slice(cells).map((p) => p.id)
       const nextDead = { ...s.deadPanes }
       for (const pid of gone) delete nextDead[pid]
+      if (gone.length > 0) {
+        // 收格子会终止那些终端，说一句 —— 别让一屏的 shell 悄悄没了
+        queueMicrotask(() =>
+          get().setError(`已收掉末尾 ${gone.length} 格（各自的 shell 也结束了）`),
+        )
+      }
       return {
-        tabs: s.tabs.map((t) => (t.id === tabId ? { ...t, panes: next } : t)),
+        tabs: s.tabs.map((t) => (t.id === tabId ? { ...t, panes: next, layout } : t)),
         deadPanes: nextDead,
         findPaneId: s.findPaneId && gone.includes(s.findPaneId) ? null : s.findPaneId,
+        focusedPane: gone.includes(s.focusedPane[tabId] ?? '')
+          ? { ...s.focusedPane, [tabId]: next[0].id }
+          : s.focusedPane,
       }
     }),
-
-  addPane: (tabId) => {
-    const tab = get().tabs.find((t) => t.id === tabId)
-    const count = panesOf(tab).length
-    if (!isSplittable(tab) || count >= MAX_PANES) return null
-    // 占位格只出现在 3 格的时候（2×2 缺一角），补上就是满格
-    get().setPaneCount(tabId, count === 1 ? 2 : 4)
-    const next = get().tabs.find((t) => t.id === tabId)
-    return panesOf(next).at(-1)?.id ?? null
-  },
 
   closePane: (tabId, paneId) =>
     set((s) => {
@@ -1171,7 +1338,10 @@ export const useApp = create<AppState>((set, get) => ({
       const nextDead = { ...s.deadPanes }
       delete nextDead[paneId]
       return {
-        tabs: s.tabs.map((t) => (t.id === tabId ? { ...t, panes: next } : t)),
+        // 格数变了，形状跟着回落（原来那个形状的格子数已经对不上了）
+        tabs: s.tabs.map((t) =>
+          t.id === tabId ? { ...t, panes: next, layout: layoutForCount(next.length, t.layout) } : t,
+        ),
         deadPanes: nextDead,
         findPaneId: s.findPaneId === paneId ? null : s.findPaneId,
         focusedPane:
@@ -1179,6 +1349,7 @@ export const useApp = create<AppState>((set, get) => ({
             ? { ...s.focusedPane, [tabId]: next[0].id }
             : s.focusedPane,
       }
+
     }),
 
   movePane: (tabId, fromPaneId, toPaneId) =>
@@ -1267,7 +1438,14 @@ export const useApp = create<AppState>((set, get) => ({
     )
     set((st) => ({
       tabs: st.tabs.map((t) =>
-        t.id === target.id ? { ...t, panes: [...panesOf(t), ...clones] } : t,
+        t.id === target.id
+          ? {
+              ...t,
+              panes: [...panesOf(t), ...clones],
+              // 格数变了：原来那个形状的格子数已经对不上，按新格数回落一个默认形状
+              layout: layoutForCount(panesOf(t).length + clones.length, t.layout),
+            }
+          : t,
       ),
       activeTabId: target.id,
     }))

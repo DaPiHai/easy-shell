@@ -1,11 +1,61 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { ChevronDown, FolderOpen, Plus, RotateCw, Terminal, X } from 'lucide-react'
-import { acceptsPanes, MAX_PANES, panesOf, useApp, type Pane } from '@/lib/store'
+import { ChevronDown, FolderOpen, RotateCw, Terminal, X } from 'lucide-react'
+import { acceptsPanes, MAX_PANES, PANE_LAYOUTS, panesOf, useApp, type Pane, type PaneLayout } from '@/lib/store'
 
 /** 拖拽判定阈值：手抖点一下不该被当成拖动 */
 const DRAG_THRESHOLD = 5
 /** 分割线离两端的最近距离，别让某一格被拖到看不见 */
 const MIN_PANE = 120
+
+/**
+ * 一条可拖的分割线：位置和跨度都用容器的比例（0–1）表示。
+ * `at` 是它压在哪个比例上（列线看 colRatio，行线看 rowRatio），
+ * from / to 是它在**另一条轴**上从哪儿画到哪儿 —— 三格的几种排法里，
+ * 那条短线只该画在它真正分界的那一段上（比如「左一右二」的横线只在右列里）。
+ */
+interface Divider {
+  axis: 'col' | 'row'
+  at: number
+  from: number
+  to: number
+}
+
+/** 这一形状有哪些可拖的分割线。等分的三列 / 三行没有（固定 1fr，不值得为它加两个比例） */
+function dividersOf(layout: PaneLayout, col: number, row: number): Divider[] {
+  switch (layout) {
+    case 'cols2':
+      return [{ axis: 'col', at: col, from: 0, to: 1 }]
+    case 'rows2':
+      return [{ axis: 'row', at: row, from: 0, to: 1 }]
+    case 'grid4':
+      return [
+        { axis: 'col', at: col, from: 0, to: 1 },
+        { axis: 'row', at: row, from: 0, to: 1 },
+      ]
+    case 'left1Right2':
+      return [
+        { axis: 'col', at: col, from: 0, to: 1 },
+        { axis: 'row', at: row, from: col, to: 1 },
+      ]
+    case 'left2Right1':
+      return [
+        { axis: 'col', at: col, from: 0, to: 1 },
+        { axis: 'row', at: row, from: 0, to: col },
+      ]
+    case 'top1Bottom2':
+      return [
+        { axis: 'row', at: row, from: 0, to: 1 },
+        { axis: 'col', at: col, from: row, to: 1 },
+      ]
+    case 'top2Bottom1':
+      return [
+        { axis: 'row', at: row, from: 0, to: 1 },
+        { axis: 'col', at: col, from: 0, to: row },
+      ]
+    default:
+      return []
+  }
+}
 
 /** 拖标签落到本窗口时的几种结果：能并 / 拖到了自己身上 / 满了 / 放不下 / 有一边不是终端 */
 type TabDropState = 'ok' | 'self' | 'full' | 'tight' | 'notTerminal'
@@ -22,8 +72,10 @@ const TAB_DROP_TEXT: Record<TabDropState, string> = {
 
 interface Props {
   tabId: string
-  /** 1–4 个格子，**顺序就是屏幕位置**（见 store 的 `Tab.panes`） */
+  /** 1–4 个格子，**顺序就是视觉顺序**（见 store 的 `Tab.panes`） */
   panes: Pane[]
+  /** 这一屏摆成什么形状（见 store 的 `PANE_LAYOUTS`） */
+  layout: PaneLayout
   colRatio: number
   rowRatio: number
   onColRatioChange: (ratio: number) => void
@@ -52,6 +104,7 @@ interface Props {
 export function PaneGrid({
   tabId,
   panes,
+  layout,
   colRatio,
   rowRatio,
   onColRatioChange,
@@ -64,12 +117,21 @@ export function PaneGrid({
 
   const focusedPaneId = useApp((s) => s.focusedPane[tabId])
 
+  const spec = PANE_LAYOUTS[layout]
   const count = panes.length
-  // 3 格是 2×2 缺一角，所以从第 3 格起就是两行
-  const twoRows = count >= 3
   // 单格不显示标题条（保持现在的干净外观），但**位置留着**，用 hidden 藏 —— 理由见文件头第 1 条
   const showTitle = count > 1
   const activeId = focusedPaneId && panes.some((p) => p.id === focusedPaneId) ? focusedPaneId : panes[0]?.id
+
+  /**
+   * 网格的列宽 / 行高。两列时用拖出来的比例，三列 / 三行是等分（不给它们各配一个比例，
+   * 那得再加两个持久化字段，而三格等分本来也没什么可调的）。
+   */
+  const gridColumns =
+    spec.cols === 1 ? '1fr' : spec.cols === 2 ? `${colRatio}fr ${1 - colRatio}fr` : '1fr 1fr 1fr'
+  const gridRows =
+    spec.rows === 1 ? '1fr' : spec.rows === 2 ? `${rowRatio}fr ${1 - rowRatio}fr` : '1fr 1fr 1fr'
+  const dividers = dividersOf(layout, colRatio, rowRatio)
 
   /* ---------------- 分隔条 ---------------- */
 
@@ -315,85 +377,70 @@ export function PaneGrid({
       <div
         className="grid h-full"
         style={{
-          gridTemplateColumns: count > 1 ? `${colRatio}fr ${1 - colRatio}fr` : '1fr',
-          gridTemplateRows: twoRows ? `${rowRatio}fr ${1 - rowRatio}fr` : '1fr',
+          gridTemplateColumns: gridColumns,
+          gridTemplateRows: gridRows,
         }}
       >
-        {panes.map((pane) => (
-          <PaneFrame
-            key={pane.id}
-            tabId={tabId}
-            pane={pane}
-            showTitle={showTitle}
-            focused={pane.id === activeId}
-            dragging={swapSource === pane.id}
-            dropActive={swapTarget === pane.id}
-            closable={count > 1}
-            registerCell={(el) => {
-              if (el) cellsRef.current.set(pane.id, el)
-              else cellsRef.current.delete(pane.id)
-            }}
-            onTitleMouseDown={beginSwap(pane.id)}
-          >
-            {renderPane(pane)}
-          </PaneFrame>
-        ))}
-        {/* 3 格时补一个「＋」角。它只跟格子数有关，跟哪个格子被关掉无关 */}
-        {count === 3 && (
-          <div className="grid place-items-center border border-dashed border-hairline-strong">
-            <div className="flex flex-col items-center gap-1">
-              <button
-                onClick={() => useApp.getState().addPane(tabId)}
-                title="新格子沿用第一格的连接（同一条会话再开一条 shell，不重新认证）"
-                className="flex flex-col items-center gap-1 rounded-md px-4 py-2 text-[12px] text-ink-subtle transition-colors hover:bg-surface-2 hover:text-ink"
-              >
-                <Plus size={16} />
-                添加终端
-              </button>
-              {/*
-                这条路是给"四格四台机器"用的：先按普通方式建格（沿用第一格），
-                立刻弹出换主机对话框。取消了也不亏 —— 格子照样能用
-              */}
-              <button
-                onClick={() => {
-                  const paneId = useApp.getState().addPane(tabId)
-                  if (paneId) useApp.getState().setPaneHostTarget({ tabId, paneId })
-                }}
-                className="rounded px-2 py-0.5 text-[11px] text-ink-tertiary transition-colors hover:bg-surface-2 hover:text-ink"
-              >
-                或连别的主机…
-              </button>
-            </div>
-          </div>
-        )}
+        {panes.map((pane, i) => {
+          // 位置由形状决定：panes 的下标 → 网格里的行列（见 store 的 PANE_LAYOUTS）。
+          // 这层映射是"形状"唯一的落地点，换形状时格子挪窝但组件不重建
+          const cell = spec.cells[i] ?? { c: 1, r: 1 }
+          return (
+            <PaneFrame
+              key={pane.id}
+              tabId={tabId}
+              pane={pane}
+              cell={cell}
+              showTitle={showTitle}
+              focused={pane.id === activeId}
+              dragging={swapSource === pane.id}
+              dropActive={swapTarget === pane.id}
+              closable={count > 1}
+              registerCell={(el) => {
+                if (el) cellsRef.current.set(pane.id, el)
+                else cellsRef.current.delete(pane.id)
+              }}
+              onTitleMouseDown={beginSwap(pane.id)}
+            >
+              {renderPane(pane)}
+            </PaneFrame>
+          )
+        })}
       </div>
 
-      {/* 竖线：左右两格之间（2 格就是唯一的线，四宫格里是列分隔） */}
-      {count > 1 && (
+      {/* 分割线：按形状给位置和跨度，能拖的才画（等分三列 / 三行没有） */}
+      {dividers.map((d) => (
         <div
+          key={`${d.axis}-${d.at}-${d.from}-${d.to}`}
           role="separator"
-          aria-orientation="vertical"
-          onPointerDown={startAxisDrag('col')}
-          title="拖动调整左右比例"
-          className="group absolute inset-y-0 w-px cursor-col-resize bg-hairline transition-colors hover:bg-accent/60"
-          style={{ left: `calc(${colRatio * 100}% - 0.5px)` }}
+          aria-orientation={d.axis === 'col' ? 'vertical' : 'horizontal'}
+          onPointerDown={startAxisDrag(d.axis)}
+          title={d.axis === 'col' ? '拖动调整左右比例' : '拖动调整上下比例'}
+          className={`group absolute bg-hairline transition-colors hover:bg-accent/60 ${
+            d.axis === 'col' ? 'w-px cursor-col-resize' : 'h-px cursor-row-resize'
+          }`}
+          style={
+            d.axis === 'col'
+              ? // 两头都钉住（top + bottom），不留"只写宽度"的余地 —— 见文件头第 2 条
+                {
+                  left: `calc(${d.at * 100}% - 0.5px)`,
+                  top: `${d.from * 100}%`,
+                  bottom: `${(1 - d.to) * 100}%`,
+                }
+              : {
+                  top: `calc(${d.at * 100}% - 0.5px)`,
+                  left: `${d.from * 100}%`,
+                  right: `${(1 - d.to) * 100}%`,
+                }
+          }
         >
-          <div className="absolute inset-y-0 -left-2 -right-2" />
+          <div
+            className={`absolute -left-2 -right-2 -top-2 -bottom-2 ${
+              d.axis === 'col' ? 'cursor-col-resize' : 'cursor-row-resize'
+            }`}
+          />
         </div>
-      )}
-      {/* 横线：四宫格才有 */}
-      {twoRows && (
-        <div
-          role="separator"
-          aria-orientation="horizontal"
-          onPointerDown={startAxisDrag('row')}
-          title="拖动调整上下比例"
-          className="group absolute inset-x-0 h-px cursor-row-resize bg-hairline transition-colors hover:bg-accent/60"
-          style={{ top: `calc(${rowRatio * 100}% - 0.5px)` }}
-        >
-          <div className="absolute -top-2 -bottom-2 inset-x-0" />
-        </div>
-      )}
+      ))}
 
       {/*
         标签栏里拖着某个标签落在本窗口上：整块高亮 + 一句说明，松手就拼进来。
@@ -418,6 +465,8 @@ export function PaneGrid({
 interface FrameProps {
   tabId: string
   pane: Pane
+  /** 在网格里占哪一格（行列从 1 开始，可跨行跨列） */
+  cell: { c: number; r: number; cs?: number; rs?: number }
   showTitle: boolean
   focused: boolean
   /** 这一格正在被拖动 */
@@ -438,6 +487,7 @@ interface FrameProps {
 function PaneFrame({
   tabId,
   pane,
+  cell,
   showTitle,
   focused,
   dragging,
@@ -452,6 +502,11 @@ function PaneFrame({
   return (
     <div
       ref={registerCell}
+      // 位置由形状给（行列 + 跨度）
+      style={{
+        gridColumn: `${cell.c} / span ${cell.cs ?? 1}`,
+        gridRow: `${cell.r} / span ${cell.rs ?? 1}`,
+      }}
       // 点这一格里任何地方都算聚焦：命令片段投给谁、查找搜谁都以它为准
       onMouseDownCapture={() => useApp.getState().focusPane(tabId, pane.id)}
       className={`relative flex min-h-0 min-w-0 flex-col overflow-hidden transition-opacity ${

@@ -1,48 +1,20 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { FileCode2, FolderOpen, FolderTree, RotateCw, Terminal, X } from 'lucide-react'
 import {
-  Columns2,
-  FileCode2,
-  FolderOpen,
-  FolderTree,
-  Grid2x2,
-  RotateCw,
-  Square,
-  Terminal,
-  X,
-} from 'lucide-react'
-import { isSplittable, panesOf, tabHasDeadPane, useApp, type Tab } from '@/lib/store'
+  isSplittable,
+  LAYOUT_ORDER,
+  layoutOf,
+  PANE_LAYOUTS,
+  panesOf,
+  tabHasDeadPane,
+  useApp,
+  type Tab,
+} from '@/lib/store'
+import { LayoutIcon } from '@/components/LayoutIcon'
+import { TerminalMenu } from './TerminalMenu'
 
 /** 拖拽判定阈值：手抖点一下不该被当成拖动 */
 const DRAG_THRESHOLD = 5
-
-/**
- * 分屏档位循环：1 → 2 → 4 → 1。
- *
- * 3 格（关掉四宫格里的一格就到这个状态）必须**补满到 4**，不能落进"回到 2 格"那一档 ——
- * 那等于按一下按钮就悄悄关掉一格终端。踩过：拼进来三格之后再点分屏，结果少了一格。
- */
-function nextPaneCount(current: number): 1 | 2 | 4 {
-  if (current >= 4) return 1
-  if (current === 1) return 2
-  return 4
-}
-
-/** 按钮上的图标画的是**当前**档位，提示语说的是点下去会变成什么 */
-function SplitIcon({ count }: { count: number }) {
-  if (count >= 3) return <Grid2x2 size={12} />
-  if (count === 2) return <Columns2 size={12} />
-  return <Square size={12} />
-}
-
-function splitTitle(count: number): string {
-  if (count >= 4) return '恢复单格'
-  if (count === 1) {
-    // 新格沿用这条连接是"立刻能用"的默认；去哪换机器得写在提示里，
-    // 不然用户会以为分屏只能连同一台
-    return '左右分屏 —— 新格沿用这条连接，点格子标题可换成别的主机'
-  }
-  return `分成四宫格（现在 ${count} 格；四格可各自连不同主机）`
-}
 
 /** 这个标签当前聚焦的格子；没记过就取第一个。SFTP 按钮按它取会话 */
 function focusedPaneOf(tab: Tab, focusedPane: Record<string, string>) {
@@ -56,11 +28,14 @@ export function TabBar() {
     activeTabId,
     setActiveTab,
     requestCloseTab,
-    setPaneCount,
+    setPaneLayout,
     deadPanes,
     reconnectSinks,
     focusedPane,
   } = useApp()
+
+  /** 分屏布局菜单：锚在哪个标签的按钮上、画在哪儿 */
+  const [layoutMenu, setLayoutMenu] = useState<{ tabId: string; x: number; y: number } | null>(null)
 
   /* ---------------- 拖标签排序 ---------------- */
 
@@ -266,10 +241,19 @@ export function TabBar() {
                 />
               </span>
             )}
-            {/* 分屏只对远程终端有意义：本地 shell 和文件面板没这个需求 */}
+            {/*
+              分屏布局：点开菜单选形状（左右二分 / 上下二分 / 三格的几种排法 / 四宫格）。
+              早先是一个"循环切档位"的按钮 —— 形状多起来之后循环就说不清了：
+              用户要的是"三格摆成左一右二"，而不是按 N 下碰运气。
+              图标画的是**当前**形状（同一份 PANE_LAYOUTS 数据算出来的）。
+            */}
             {isSplittable(tab) && (
               // title 挂 span 上：svg 元素的 title 属性不弹提示
-              <span data-no-drag title={splitTitle(panes.length)} className="flex shrink-0">
+              <span
+                data-no-drag
+                title={`分屏布局（现在：${PANE_LAYOUTS[layoutOf(tab)].label}，${panes.length} 格）`}
+                className="flex shrink-0"
+              >
                 <span
                   className={`flex transition-colors ${
                     panes.length > 1
@@ -278,10 +262,11 @@ export function TabBar() {
                   }`}
                   onClick={(e) => {
                     e.stopPropagation()
-                    setPaneCount(tab.id, nextPaneCount(panes.length))
+                    const r = e.currentTarget.getBoundingClientRect()
+                    setLayoutMenu({ tabId: tab.id, x: r.left, y: r.bottom + 4 })
                   }}
                 >
-                  <SplitIcon count={panes.length} />
+                  <LayoutIcon layout={layoutOf(tab)} size={12} />
                 </span>
               </span>
             )}
@@ -322,6 +307,32 @@ export function TabBar() {
           className="pointer-events-none absolute inset-y-0 z-10 w-0.5 bg-accent"
           style={{ left: insertX }}
           aria-hidden
+        />
+      )}
+
+      {/*
+        分屏布局菜单。十种形状平铺一列：每一行左边是形状示意图、右边是格数，
+        当前那种打勾。挑格数变小的形状会收掉末尾几格（那些终端的 shell 会结束），
+        所以格数写在每一行上 —— 选之前就该看见。
+      */}
+      {layoutMenu && (
+        <TerminalMenu
+          x={layoutMenu.x}
+          y={layoutMenu.y}
+          onClose={() => setLayoutMenu(null)}
+          items={LAYOUT_ORDER.map((key) => {
+            const target = tabs.find((t) => t.id === layoutMenu.tabId)
+            const cells = PANE_LAYOUTS[key].cells.length
+            return {
+              label: PANE_LAYOUTS[key].label,
+              hint: `${cells} 格`,
+              icon: <LayoutIcon layout={key} size={14} />,
+              checked: !!target && layoutOf(target) === key,
+              // 只对还没连上的标签禁用（比如那个标签刚被关掉）
+              disabled: !target || !isSplittable(target),
+              onSelect: () => setPaneLayout(layoutMenu.tabId, key),
+            }
+          })}
         />
       )}
     </div>

@@ -1,11 +1,9 @@
 import { Command } from 'cmdk'
 import {
   ArrowRightLeft,
-  Columns2,
   FileCode2,
   FolderOpen,
   FolderPlus,
-  Grid2x2,
   KeyRound,
   Lock,
   PanelLeftClose,
@@ -15,14 +13,14 @@ import {
   ScrollText,
   Search,
   Settings,
-  Square,
   SunMoon,
   TerminalSquare,
   X,
   ZoomIn,
   ZoomOut,
 } from 'lucide-react'
-import { isSplittable, panesOf, terminalTab, useApp, DEFAULT_FONT_SIZE } from '@/lib/store'
+import { isSplittable, panesOf, terminalTab, useApp, DEFAULT_FONT_SIZE, type PaneLayout } from '@/lib/store'
+import { LayoutIcon } from '@/components/LayoutIcon'
 import { listSchemeChoices } from '@/lib/termSchemes'
 import { Swatches } from '../settings/Swatches'
 
@@ -47,17 +45,17 @@ export function CommandPalette() {
   const close = () => setPaletteOpen(false)
 
   /**
-   * 切分屏档位。守卫只有这一份：分屏只对远程终端标签有效 ——
+   * 换分屏形状。守卫只有这一份：形状要在已有连接上再开 shell 才谈得上 ——
    * 不提示的话按下去什么都不发生，用户只会以为按键/菜单坏了。
    */
-  const splitTo = (count: 1 | 2 | 4) => {
+  const splitTo = (layout: PaneLayout) => {
     const s = useApp.getState()
     const tab = s.tabs.find((t) => t.id === s.activeTabId)
     if (!isSplittable(tab)) {
-      s.setError('分屏只对远程终端标签有效 —— 本地 Shell 和文件面板没有第二条通道')
+      s.setError('分屏要在已有连接上再开一条 shell —— 本地 Shell 标签和文件面板没有这条路')
       return
     }
-    s.setPaneCount(tab.id, count)
+    s.setPaneLayout(tab.id, layout)
   }
 
   return (
@@ -236,38 +234,69 @@ export function CommandPalette() {
                 打开 SFTP 双栏
               </Command.Item>
               {/*
-                分屏列成三条而不是一条"切换"：档位是 1 / 2 / 4，
-                盲循环在面板里说不清"点下去会变成几格"。三档共用下面这个守卫。
+                分屏形状列成几条常用的（完整的十种在标签栏那个布局菜单里）：
+                面板里适合放"最常用的那几个"，全铺开会淹没其他命令。
+                共用下面这个守卫 —— 形状要在已有连接上再开 shell 才谈得上。
               */}
               <Command.Item
-                keywords={['分屏', '左右', '两格', 'split', 'columns']}
+                keywords={['分屏', '左右', '两格', '竖直', 'split', 'columns']}
                 onSelect={() => {
                   close()
-                  splitTo(2)
+                  splitTo('cols2')
                 }}
               >
-                <Columns2 size={14} />
-                左右分屏
+                <LayoutIcon layout="cols2" size={14} />
+                左右二分
+              </Command.Item>
+              <Command.Item
+                keywords={['分屏', '上下', '两格', '水平', 'split', 'rows']}
+                onSelect={() => {
+                  close()
+                  splitTo('rows2')
+                }}
+              >
+                <LayoutIcon layout="rows2" size={14} />
+                上下二分
+              </Command.Item>
+              <Command.Item
+                keywords={['分屏', '三格', '左一右二', '左右', 'split']}
+                onSelect={() => {
+                  close()
+                  splitTo('left1Right2')
+                }}
+              >
+                <LayoutIcon layout="left1Right2" size={14} />
+                三格：左一右二
+              </Command.Item>
+              <Command.Item
+                keywords={['分屏', '三格', '上一下二', '上下', 'split']}
+                onSelect={() => {
+                  close()
+                  splitTo('top1Bottom2')
+                }}
+              >
+                <LayoutIcon layout="top1Bottom2" size={14} />
+                三格：上一下二
               </Command.Item>
               <Command.Item
                 keywords={['分屏', '四宫格', '四格', '2x2', 'grid', 'quad']}
                 onSelect={() => {
                   close()
-                  splitTo(4)
+                  splitTo('grid4')
                 }}
               >
-                <Grid2x2 size={14} />
-                分成四宫格
+                <LayoutIcon layout="grid4" size={14} />
+                四宫格
                 <span className="ml-auto text-[11px] text-ink-tertiary">每格可连不同主机</span>
               </Command.Item>
               <Command.Item
                 keywords={['分屏', '取消', '合并', '单格', 'unsplit']}
                 onSelect={() => {
                   close()
-                  splitTo(1)
+                  splitTo('single')
                 }}
               >
-                <Square size={14} />
+                <LayoutIcon layout="single" size={14} />
                 取消分屏
               </Command.Item>
               <Command.Item
