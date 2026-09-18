@@ -5,6 +5,7 @@ import { TerminalView } from '@/features/terminal/TerminalView'
 import { CommandPalette } from '@/features/palette/CommandPalette'
 import { SftpPanel } from '@/features/sftp/SftpPanel'
 import { ConnectDialog } from '@/features/session/ConnectDialog'
+import { PaneHostDialog } from '@/features/session/PaneHostDialog'
 import { ConfirmDialog } from '@/features/session/ConfirmDialog'
 import { ChangePasswordDialog } from '@/features/session/ChangePasswordDialog'
 import { RecoveryPromptDialog } from '@/features/session/RecoveryPromptDialog'
@@ -14,8 +15,8 @@ import { SnippetsDialog } from '@/features/snippets/SnippetsDialog'
 import { EditorView } from '@/features/editor/EditorView'
 import { UnlockScreen } from '@/features/session/UnlockScreen'
 import { EmptyState, StatusBar } from '@/components/EmptyState'
-import { useApp, DEFAULT_FONT_SIZE } from '@/lib/store'
-import { SplitPane } from '@/components/SplitPane'
+import { useApp, DEFAULT_FONT_SIZE, panesOf } from '@/lib/store'
+import { PaneGrid } from '@/components/PaneGrid'
 import { ErrorBoundary } from '@/components/ErrorBoundary'
 
 export default function App() {
@@ -60,7 +61,7 @@ export default function App() {
        * 在这儿吃掉按键只会让人以为按键坏了。
        */
       if ((e.metaKey || e.ctrlKey) && e.shiftKey && !e.altKey && e.key.toLowerCase() === 'f') {
-        if (!useApp.getState().findableTab()) return
+        if (!useApp.getState().findablePane()) return
         e.preventDefault()
         useApp.getState().toggleFind()
         return
@@ -79,11 +80,19 @@ export default function App() {
           setChangePasswordOpen,
           recoveryPromptOpen,
           setRecoveryPromptOpen,
+          paneHostTarget,
+          setPaneHostTarget,
           confirmPrompt,
           setConfirmPrompt,
+          setConnectPaneTarget,
         } = useApp.getState()
         if (paletteOpen) setPaletteOpen(false)
-        if (connectOpen) setConnectOpen(false)
+        // 关对话框时把「这一格要连主机」的目标一起清掉，理由见 ConnectDialog.close
+        if (connectOpen) {
+          setConnectOpen(false)
+          setConnectPaneTarget(null)
+        }
+        if (paneHostTarget) setPaneHostTarget(null)
         if (tunnelOpen) setTunnelOpen(false)
         if (snippetsOpen) setSnippetsOpen(false)
         if (settingsOpen) setSettingsOpen(false)
@@ -157,6 +166,8 @@ export default function App() {
   const error = useApp((s) => s.error)
   const splitRatio = useApp((s) => s.splitRatio)
   const setSplitRatio = useApp((s) => s.setSplitRatio)
+  const splitRatioY = useApp((s) => s.splitRatioY)
+  const setSplitRatioY = useApp((s) => s.setSplitRatioY)
 
   if (phase === 'loading') {
     return (
@@ -186,23 +197,39 @@ export default function App() {
                   <EditorView target={tab.editorTarget} tabId={tab.id} />
                 ) : tab.kind === 'sftp' && tab.sessionId ? (
                   <SftpPanel sessionId={tab.sessionId} />
-                ) : tab.kind === 'local' ? (
-                  <TerminalView
-                    kind="local"
+                ) : (tab.kind === 'terminal' || tab.kind === 'local') &&
+                  panesOf(tab).length > 0 ? (
+                  <PaneGrid
                     tabId={tab.id}
-                    onClosed={() => useApp.getState().closeTab(tab.id)}
-                  />
-                ) : tab.kind === 'terminal' && tab.sessionId ? (
-                  <SplitPane
-                    split={!!tab.split}
-                    ratio={splitRatio}
-                    onRatioChange={setSplitRatio}
-                    left={<TerminalView sessionId={tab.sessionId} tabId={tab.id} />}
-                    // 右半边共享 tabId（这样断线时标签栏的 ↻ 能同时拉起两边），
-                    // 但不接命令片段，否则会把左半边顶掉
-                    right={
-                      <TerminalView sessionId={tab.sessionId} tabId={tab.id} snippets={false} />
-                    }
+                    panes={panesOf(tab)}
+                    colRatio={splitRatio}
+                    rowRatio={splitRatioY}
+                    onColRatioChange={setSplitRatio}
+                    onRowRatioChange={setSplitRatioY}
+                    // 每格各包一层 ErrorBoundary：一格炸了（xterm 渲染器那类问题）
+                    // 不该把同一个标签里其它三格一起带走
+                    renderPane={(pane) => (
+                      <ErrorBoundary label={`「${tab.title}」的这一格出错了`}>
+                        <TerminalView
+                          paneId={pane.id}
+                          kind={pane.kind}
+                          sessionId={pane.sessionId}
+                          // 本地 shell 退出就是退出，没有重连可言。
+                          // 只关这一格 —— 本地 Shell 跟远程并到一屏之后（拖标签进来），
+                          // 一句 exit 不该把旁边的远程终端一起带走；只剩它自己时才关标签
+                          onClosed={
+                            pane.kind === 'local'
+                              ? () => {
+                                  const s = useApp.getState()
+                                  const live = s.tabs.find((t) => t.id === tab.id)
+                                  if (panesOf(live).length > 1) s.closePane(tab.id, pane.id)
+                                  else s.closeTab(tab.id)
+                                }
+                              : undefined
+                          }
+                        />
+                      </ErrorBoundary>
+                    )}
                   />
                 ) : (
                   <EmptyState />
@@ -216,6 +243,8 @@ export default function App() {
       <StatusBar />
       <CommandPalette />
       <ConnectDialog />
+      {/* 「换主机」紧跟着快速连接：那条路会先把它收掉再开连接框 */}
+      <PaneHostDialog />
       <ConfirmDialog />
       <ChangePasswordDialog />
       {/* 排在改密码那个之后：它可能是「改完密码紧接着弹出来」的，要压在上面 */}

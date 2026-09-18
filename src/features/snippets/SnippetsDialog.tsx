@@ -14,7 +14,7 @@ const inputClass =
 const labelClass = 'mb-1.5 block text-[11px] font-medium tracking-[0.4px] text-ink-subtle'
 
 export function SnippetsDialog() {
-  const { snippetsOpen, setSnippetsOpen, activeTabId, setError } = useApp()
+  const { snippetsOpen, setSnippetsOpen, setError } = useApp()
 
   const [list, setList] = useState<SnippetRecord[]>([])
   const [name, setName] = useState('')
@@ -52,7 +52,9 @@ export function SnippetsDialog() {
 
   /** 把命令塞进当前终端并回车执行 */
   const send = (snippet: SnippetRecord) => {
-    const sink = activeTabId ? useApp.getState().terminalSinks[activeTabId] : undefined
+    // 投给**当前聚焦的那一格**：分屏下"当前终端"必须唯一，否则命令进哪一格全靠猜
+    const pane = useApp.getState().activePane()
+    const sink = pane ? useApp.getState().terminalSinks[pane.id] : undefined
     if (!sink) {
       setError('当前标签不是终端，先切到一个终端标签')
       return

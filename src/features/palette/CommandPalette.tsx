@@ -1,10 +1,11 @@
 import { Command } from 'cmdk'
 import {
   ArrowRightLeft,
-  Columns,
+  Columns2,
   FileCode2,
   FolderOpen,
   FolderPlus,
+  Grid2x2,
   KeyRound,
   Lock,
   PanelLeftClose,
@@ -14,13 +15,14 @@ import {
   ScrollText,
   Search,
   Settings,
+  Square,
   SunMoon,
   TerminalSquare,
   X,
   ZoomIn,
   ZoomOut,
 } from 'lucide-react'
-import { isSplittable, useApp, DEFAULT_FONT_SIZE } from '@/lib/store'
+import { isSplittable, panesOf, terminalTab, useApp, DEFAULT_FONT_SIZE } from '@/lib/store'
 import { listSchemeChoices } from '@/lib/termSchemes'
 import { Swatches } from '../settings/Swatches'
 
@@ -43,6 +45,20 @@ export function CommandPalette() {
   if (!paletteOpen) return null
 
   const close = () => setPaletteOpen(false)
+
+  /**
+   * 切分屏档位。守卫只有这一份：分屏只对远程终端标签有效 ——
+   * 不提示的话按下去什么都不发生，用户只会以为按键/菜单坏了。
+   */
+  const splitTo = (count: 1 | 2 | 4) => {
+    const s = useApp.getState()
+    const tab = s.tabs.find((t) => t.id === s.activeTabId)
+    if (!isSplittable(tab)) {
+      s.setError('分屏只对远程终端标签有效 —— 本地 Shell 和文件面板没有第二条通道')
+      return
+    }
+    s.setPaneCount(tab.id, count)
+  }
 
   return (
     <div className="fixed inset-0 z-50">
@@ -71,7 +87,7 @@ export function CommandPalette() {
               </Command.Item>
               <Command.Item
                 onSelect={() => {
-                  useApp.getState().addTab({ title: '本地 Shell', kind: 'local' })
+                  useApp.getState().addTab(terminalTab({ title: '本地 Shell', kind: 'local' }))
                   close()
                 }}
               >
@@ -150,7 +166,7 @@ export function CommandPalette() {
                 onSelect={() => {
                   const s = useApp.getState()
                   close()
-                  if (!s.findableTab()) {
+                  if (!s.findablePane()) {
                     s.setError('当前标签没有终端可搜 —— 编辑器用 Ctrl+F；SFTP 的搜索还没做')
                     return
                   }
@@ -192,14 +208,16 @@ export function CommandPalette() {
               <Command.Item
                 onSelect={() => {
                   const s = useApp.getState()
-                  // SFTP 复用已有 SSH 连接。优先用当前标签那条；
-                  // 停在别的标签（本地 Shell、编辑器）时 current 没有 sessionId，
-                  // 但机器可能还连着 —— 这时该复用任意一条活着的，
-                  // 而不是报「先连一台主机」，那句提示在明明连着的时候是错的。
-                  const current = s.tabs.find((t) => t.id === s.activeTabId)
-                  const target =
-                    (current?.sessionId && !s.deadTabs[current.id] ? current : undefined) ??
-                    s.tabs.find((t) => t.sessionId && !s.deadTabs[t.id])
+                  // SFTP 复用已有 SSH 连接。优先用当前标签**聚焦那一格**的会话；
+                  // 停在别的标签（本地 Shell、编辑器）或者那一格断了时，
+                  // 退而用任意一条活着的连接 —— 这时该复用而不是报「先连一台主机」，
+                  // 那句提示在明明连着的时候是错的。四宫格下每格可能是不同主机，所以逐格找。
+                  const live = (p: { sessionId?: string; id: string } | null | undefined) =>
+                    !!p?.sessionId && !s.deadPanes[p.id]
+                  const focused = s.activePane()
+                  const target = live(focused)
+                    ? focused
+                    : s.tabs.flatMap(panesOf).find((p) => live(p))
                   if (!target?.sessionId) {
                     s.setError('还没有连上的主机 —— SFTP 要复用 SSH 连接，先 Ctrl+N 连一台')
                     close()
@@ -217,22 +235,40 @@ export function CommandPalette() {
                 <FolderOpen size={14} />
                 打开 SFTP 双栏
               </Command.Item>
+              {/*
+                分屏列成三条而不是一条"切换"：档位是 1 / 2 / 4，
+                盲循环在面板里说不清"点下去会变成几格"。三档共用下面这个守卫。
+              */}
               <Command.Item
+                keywords={['分屏', '左右', '两格', 'split', 'columns']}
                 onSelect={() => {
-                  const s = useApp.getState()
                   close()
-                  const tab = s.tabs.find((t) => t.id === s.activeTabId)
-                  // 分屏只对远程终端有效。不提示的话，按下去什么都不发生，
-                  // 用户只会以为按键/菜单坏了
-                  if (!isSplittable(tab)) {
-                    s.setError('分屏只对远程终端标签有效 —— 本地 Shell 和文件面板没有第二条通道')
-                    return
-                  }
-                  s.toggleSplit(tab.id)
+                  splitTo(2)
                 }}
               >
-                <Columns size={14} />
-                切换分屏
+                <Columns2 size={14} />
+                左右分屏
+              </Command.Item>
+              <Command.Item
+                keywords={['分屏', '四宫格', '四格', '2x2', 'grid', 'quad']}
+                onSelect={() => {
+                  close()
+                  splitTo(4)
+                }}
+              >
+                <Grid2x2 size={14} />
+                分成四宫格
+                <span className="ml-auto text-[11px] text-ink-tertiary">每格可连不同主机</span>
+              </Command.Item>
+              <Command.Item
+                keywords={['分屏', '取消', '合并', '单格', 'unsplit']}
+                onSelect={() => {
+                  close()
+                  splitTo(1)
+                }}
+              >
+                <Square size={14} />
+                取消分屏
               </Command.Item>
               <Command.Item
                 onSelect={() => {

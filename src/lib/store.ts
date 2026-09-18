@@ -76,6 +76,29 @@ function writeLocal(key: string, value: string) {
   }
 }
 
+/**
+ * 分屏比例（列 / 行各一份）。夹在 0.2–0.8：再极端两边就看不清了。
+ * 上下限写在读写两处共用的一份里，免得改了一边忘了另一边。
+ */
+const MIN_SPLIT_RATIO = 0.2
+const MAX_SPLIT_RATIO = 0.8
+
+function readRatio(key: string): number {
+  try {
+    const v = localStorage.getItem(key)
+    const n = v ? Number(v) : NaN
+    return Number.isFinite(n) && n >= MIN_SPLIT_RATIO && n <= MAX_SPLIT_RATIO ? n : 0.5
+  } catch {
+    return 0.5
+  }
+}
+
+function writeRatio(key: string, ratio: number): number {
+  const clamped = Math.min(MAX_SPLIT_RATIO, Math.max(MIN_SPLIT_RATIO, ratio))
+  writeLocal(key, String(clamped))
+  return clamped
+}
+
 /** 用户自定义配色方案的 key */
 const CUSTOM_SCHEMES_KEY = 'termCustomSchemes'
 
@@ -189,35 +212,136 @@ export interface EditorGuard {
   save: () => Promise<string | null>
 }
 
+/**
+ * 分屏里的一个终端格子。
+ *
+ * 每格是**自己一条 SSH 连接**，这是「自由组合连接主机」的全部含义：
+ * 同一个标签的四格可以挂四台不同的机器。格子自己的终端实例、滚动历史、
+ * 通道都在它身上，所以拖动换位时格子整个搬走（见 `movePane`）。
+ */
+export interface Pane {
+  id: string
+  /** terminal 走 SSH；local 是本机 shell（只有单格标签用得上，本地 shell 不可分屏） */
+  kind: 'terminal' | 'local'
+  /** SSH 会话 id。kind 为 local 时没有 */
+  sessionId?: string
+  /**
+   * 这一格属于哪台主机（vault 里的 HostRecord.id）。
+   * 会话树点「打开 SFTP」时靠它找到已经建好的连接复用，而不是再拨一次 ——
+   * 二次连接意味着二次认证，还可能撞上服务端的连接数限制。
+   * 快速连接（没存进 vault）的格子没有这个字段。
+   */
+  hostId?: string
+  /** 格子标题条上显示的名字 */
+  title: string
+}
+
 export interface Tab {
   id: string
   title: string
   kind: TabKind
+  /** SSH 会话 id。**只有 sftp / editor 标签用它**，终端标签的连接在 `panes` 里 */
   sessionId?: string
-  /**
-   * 这条标签属于哪台主机（vault 里的 HostRecord.id）。
-   * 用来在会话树上点「打开 SFTP」时找到已经建好的连接复用，
-   * 而不是再拨一次 —— 二次连接意味着二次认证，还可能撞上服务端的连接数限制。
-   * 快速连接（没存进 vault）的标签没有这个字段。
-   */
+  /** sftp / editor 标签属于哪台主机；终端标签看各自 pane 的 hostId */
   hostId?: string
-  /** 是否左右分屏（同一会话开两个 shell 通道） */
-  split?: boolean
+  /**
+   * 终端标签的格子，1–4 个。**顺序就是屏幕位置**：
+   * 1 格占满；2 格左右各一；3–4 格排成 2×2（左上 / 右上 / 左下 / 右下），
+   * 不满 4 个时最后一格是「＋ 添加终端」占位。本地 Shell 标签也是 1 个格子（kind='local'），
+   * 这样命令片段、查找、断线标记全都按 paneId 索引，不用维护"按标签"和"按格子"两套键。
+   */
+  panes?: Pane[]
   /** kind 为 editor 时的打开目标 */
   editorTarget?: EditorTarget
 }
 
+/** 一个标签最多几格。2×2 的极限，也是 sshd `MaxSessions` 底下留得住的数 */
+export const MAX_PANES = 4
+
+/** 标签的格子。非终端标签（SFTP / 编辑器）没有格子，返回空数组 */
+export function panesOf(tab: Tab | undefined | null): Pane[] {
+  return tab?.panes ?? []
+}
+
+/** 一个标签里所有活着的 SSH 会话（终端标签的每格各一条，SFTP/编辑器标签是它自己那条） */
+export function tabSessionIds(tab: Tab): string[] {
+  const ids = panesOf(tab)
+    .map((p) => p.sessionId)
+    .filter((id): id is string => !!id)
+  if (tab.sessionId) ids.push(tab.sessionId)
+  return ids
+}
+
+/** 标签里有没有断线不管了的格子（标签栏的 ↻ 认它） */
+export function tabHasDeadPane(tab: Tab, deadPanes: Record<string, true>): boolean {
+  return panesOf(tab).some((p) => deadPanes[p.id])
+}
+
+let paneSeq = 0
+
 /**
- * 这条标签能不能分屏。
+ * 造一个格子 id。带上自增序号：同一个标签里连开两格可能落在同一毫秒，
+ * 只靠时间戳 + 随机尾巴有撞号的余地，而撞号意味着两个终端共用一个注册键。
+ */
+export function newPaneId(): string {
+  paneSeq += 1
+  return `pane-${Date.now().toString(36)}-${paneSeq.toString(36)}${Math.random().toString(36).slice(2, 5)}`
+}
+
+/** 造一个格子。id 统一在这里生成，别在调用点手拼 */
+export function makePane(input: Omit<Pane, 'id'>): Pane {
+  return { ...input, id: newPaneId() }
+}
+
+/**
+ * 造一条终端标签（连带它那唯一一格）。
  *
- * 只有**远程终端**能：分屏靠的是同一条 SSH 会话上再开一条 shell 通道，
- * 本地 Shell 没有第二条通道可开，SFTP / 编辑器更没有。
- * 「哪些标签能分屏」只在这里定义一次 —— 标签栏的按钮、命令面板的条目、
- * store 的 `toggleSplit` 都认它。之前命令面板直接调 toggleSplit 没有守卫，
- * 在本地 Shell 标签上按下去只是翻了个没人读的标志位，界面毫无变化也不提示。
+ * 终端标签**必须**有格子：没有格子的终端标签在界面上是一片空白。
+ * 让调用点各写一遍 `panes: [makePane({...})]` 迟早会漏一处，所以收在这里。
+ * （SFTP / 编辑器标签不吃这套，它们只有 sessionId / editorTarget，没有格子。）
+ */
+export function terminalTab(input: {
+  title: string
+  kind?: 'terminal' | 'local'
+  sessionId?: string
+  hostId?: string
+}): Omit<Tab, 'id'> {
+  const kind = input.kind ?? 'terminal'
+  return {
+    title: input.title,
+    kind,
+    panes: [makePane({ kind, sessionId: input.sessionId, hostId: input.hostId, title: input.title })],
+  }
+}
+
+/**
+ * 这条标签能不能调分屏档位（1 / 2 / 4 格）。
+ *
+ * 判据是**第一格有 SSH 连接**：加格子靠的是"继承第一格的连接再开一条 shell"，
+ * 本地 Shell 没有连接可继承（纯本地标签因此仍然不显示分屏按钮 —— 它要更多 shell
+ * 直接再开一个标签就行）。用第一格而不是"有一格是远程"：本地 Shell 排在头一位的
+ * 混合标签，点分屏生出来的也该是本地 shell，可它并不是用户按这个按钮想要的东西。
+ *
+ * 这个谓词同时兜住了 SFTP / 编辑器标签：它们压根没有格子。
  */
 export function isSplittable(tab: Tab | undefined | null): tab is Tab {
-  return !!tab && tab.kind === 'terminal' && !!tab.sessionId
+  const panes = panesOf(tab)
+  return panes.length > 0 && !!panes[0].sessionId
+}
+
+/**
+ * 这条标签能不能当"把别的标签并进来"的落点。有格子的标签才行 ——
+ * 也就是远程终端标签和本地 Shell 标签；SFTP / 编辑器标签里没有分屏这一说。
+ *
+ * 本地 Shell 能当落点是刻意的：一屏里"左边远程、右边本机 PowerShell"是很常见的用法，
+ * 早先只放远程标签进来过一次（用户拿本地 Shell 标签拖进来被挡下）。
+ */
+export function acceptsPanes(tab: Tab | undefined | null): boolean {
+  return (
+    !!tab &&
+    (tab.kind === 'terminal' || tab.kind === 'local') &&
+    panesOf(tab).length > 0
+  )
 }
 
 export type TransferStatus = 'active' | 'done' | 'error'
@@ -373,21 +497,21 @@ interface AppState {
   toggleSidebar: () => void
 
   /**
-   * 哪个标签的「在终端里查找」栏开着，全局只有一个。
+   * 哪个格子（paneId）的「在终端里查找」栏开着，全局只有一个。
    *
    * 放 store 而不是 TerminalView 自己的 state：快捷键、状态栏、命令面板三处
    * 都要能把它叫出来，而它们够不着某个组件内部的 state。
    * 切标签**不清**它 —— 跟 Windows Terminal / VS Code 一样，搜索框和查询内容
-   * 跟着那条标签走，切回来还在。同时在两条终端标签里搜做不到（一个值只指一条），
-   * 在后一条里打开时前一条自然收起。
+   * 跟着那条标签走，切回来还在。同时在两个格子里搜做不到（一个值只指一格），
+   * 在后一格打开时前一格自然收起。
    */
-  findTabId: string | null
+  findPaneId: string | null
   /**
-   * 当前标签里头有没有能搜的终端，有就返回它。
+   * 当前标签里聚焦的那一格有没有终端可搜，有就返回它。
    * 编辑器有自己的 Ctrl+F（CodeMirror 自带），SFTP 还没有 —— 在那些标签上叫查找，
    * 该说一句而不是弹一个搜不到东西的框。
    */
-  findableTab: () => Tab | null
+  findablePane: () => Pane | null
   /** 开/关当前标签的查找栏。三处入口都调它，别各自判断 */
   toggleFind: () => void
   /** 关掉查找栏（查找栏自己的 ✕ / Esc 走这条，不经过 toggle） */
@@ -403,7 +527,82 @@ interface AppState {
    * 否则直接关。程序自动关（本地 shell 退出、锁库清标签）仍用 closeTab 绕开它。
    */
   requestCloseTab: (id: string) => void
-  toggleSplit: (id: string) => void
+
+  /**
+   * 每个标签聚焦在哪一格（tabId → paneId）。点格子里的任何地方都会记一笔，
+   * 命令片段投给谁、查找搜谁、状态栏显示谁，都以它为准。
+   * 没记录过（或记的那格已经关了）就取第一个格子。
+   */
+  focusedPane: Record<string, string>
+  focusPane: (tabId: string, paneId: string) => void
+  /** 某个标签当前聚焦的格子；标签不存在就返回 null */
+  focusedPaneOf: (tabId: string) => Pane | null
+  /** 当前标签聚焦的格子 */
+  activePane: () => Pane | null
+
+  /**
+   * 调整分屏档位：1 / 2 / 4 格。多出来的格子**继承第一格的连接** ——
+   * 同一条会话再开一条 shell 通道，不用重新认证也不用再选一次主机；
+   * 想连别的机器在格子标题条上换（`PaneHostDialog`）。
+   * 降档只是把多出来的格子从数组里去掉，对应的终端卸载即关掉自己的通道。
+   */
+  setPaneCount: (tabId: string, count: 1 | 2 | 4) => void
+  /**
+   * 2 → 3 格：占位格上那个「＋」，新增的一格同样继承第一格的连接。
+   * 返回新格子的 id（调用方要接着把它交给「换主机」对话框），没加成就是 null。
+   */
+  addPane: (tabId: string) => string | null
+  /** 关掉一格（标题条上的 ✕）。只剩一格时不给关 —— 那等于关标签，走标签的 ✕ */
+  closePane: (tabId: string, paneId: string) => void
+  /**
+   * 把一个标签的终端**并进另一个标签的窗口**（把标签拖到终端窗口里松手）。
+   *
+   * 实现是"先在目标标签里按同样的连接开新格子，等新格子真的连上了再收掉源标签"，
+   * **不是**把格子搬过去。搬过去会让旧通道和新通道的开关撞在一起：格子搬走时
+   * 旧终端卸载、通道关闭，而后端的 `close_session_if_idle` 一看到这条会话一条
+   * 通道都不剩就把会话整个回收 —— 新格子的 `ssh_open_shell` 于是落在一个
+   * 已经不存在的会话上（`ssh_open_shell` 是**网络往返之后**才登记通道的，
+   * 关通道那侧却不用等网络，这个赛跑几乎必输）。
+   * 等新通道起来了再收源标签，会话两侧交接得上。
+   */
+  mergeTabIntoPane: (targetTabId: string, sourceTabId: string) => void
+  /**
+   * 正在被拖的标签（标签栏拖起来时写，放下或 Esc 取消时清）。
+   * 跨组件用：PaneGrid 靠它区分"拖着标签来找地方拼"和"拖格子换位"这两件事。
+   */
+  draggingTabId: string | null
+  setDraggingTabId: (id: string | null) => void
+  /**
+   * 已经开出 shell 通道的格子。
+   *
+   * 只有 `mergeTabIntoPane` 用它：得等新格子真的连上了才敢收源标签，
+   * 否则就是上面说的那个"会话被提前回收"。除此之外没人读它。
+   */
+  livePanes: Record<string, true>
+  setPaneLive: (paneId: string, live: boolean) => void
+  /** 两个格子互换位置（拖标题条）。格子整体搬走，终端现场不丢 */
+  movePane: (tabId: string, fromPaneId: string, toPaneId: string) => void
+  /** 给某一格换主机（先连上再把会话写进来，见 `PaneHostDialog`） */
+  setPaneConnection: (
+    tabId: string,
+    paneId: string,
+    conn: { sessionId: string; hostId?: string; title: string },
+  ) => void
+  /** 标签排序（拖标签）。`from` / `to` 都是数组下标，`to` 是落点下标 */
+  moveTab: (from: number, to: number) => void
+
+  /**
+   * 「这一格要连哪台主机」的选择对话框。null = 没开。
+   * 从格子标题条进来，选中后把连接写进那一格，而不是开新标签。
+   */
+  paneHostTarget: { tabId: string; paneId: string } | null
+  setPaneHostTarget: (target: { tabId: string; paneId: string } | null) => void
+  /**
+   * 「快速连接」的目标格。非 null 时 ConnectDialog 连完把会话写进这一格，
+   * 而不是开一个新标签。
+   */
+  connectPaneTarget: { tabId: string; paneId: string } | null
+  setConnectPaneTarget: (target: { tabId: string; paneId: string } | null) => void
 
   /**
    * 编辑器标签注册的守卫。关标签时要同步问"脏不脏"，
@@ -416,6 +615,9 @@ interface AppState {
   /** 左右分屏的比例（左半 / 总宽），拖过分隔条就改这里，localStorage 持久化 */
   splitRatio: number
   setSplitRatio: (ratio: number) => void
+  /** 四宫格里横线的位置（上半 / 总高），和列比例一样持久化 */
+  splitRatioY: number
+  setSplitRatioY: (ratio: number) => void
 
   /**
    * 终端字号。13px 在 1080p 上刚好，高分屏上就偏小了 ——
@@ -471,29 +673,32 @@ interface AppState {
   resetSettings: () => void
 
   /**
-   * 每个终端标签注册一个"投喂函数"，命令片段面板靠它把命令送进对应终端。
+   * 每个终端格子注册一个"投喂函数"，命令片段面板靠它把命令送进对应终端。
+   * 键是 **paneId**（不是 tabId）：一个标签有好几格时，片段该投给聚焦的那一格，
+   * 而"哪一格聚焦"是 store 的事（`focusedPane`）。
    * 不放进 React state，避免每次注册都触发重渲染。
    */
   terminalSinks: Record<string, (text: string) => void>
-  registerTerminalSink: (tabId: string, sink: (text: string) => void) => void
-  unregisterTerminalSink: (tabId: string) => void
+  registerTerminalSink: (paneId: string, sink: (text: string) => void) => void
+  unregisterTerminalSink: (paneId: string) => void
 
   /**
-   * 每个终端标签注册的"手动重连"回调。
+   * 每个终端格子注册的"手动重连"回调。
    *
    * 断线自动重试几次都失败之后，标签栏得给一个 ↻ 让用户再试一次 ——
    * 否则唯一的出路就是关掉标签重开，之前看的东西全没了。
    *
-   * 用数组是因为分屏时一个标签挂着两个终端：点一次 ↻ 要能同时把两边都拉起来，
-   * 只存一个的话后注册的会把先注册的顶掉。
+   * 一格一个键，不需要数组：格子各有各的 paneId，不会互相顶掉。
+   * 点 ↻ 会把该标签所有格子都拉一遍（`reconnectSession` 按 sessionId 去重，
+   * 同一条会话上的几格不会互相清通道）。
    */
-  reconnectSinks: Record<string, Array<() => void>>
-  registerReconnect: (tabId: string, fn: () => void) => void
-  unregisterReconnect: (tabId: string, fn: () => void) => void
+  reconnectSinks: Record<string, () => void>
+  registerReconnect: (paneId: string, fn: () => void) => void
+  unregisterReconnect: (paneId: string) => void
 
-  /** 自动重连已放弃、正等着用户手动介入的标签 */
-  deadTabs: Record<string, true>
-  setTabDead: (tabId: string, dead: boolean) => void
+  /** 自动重连已放弃、正等着用户手动介入的格子 */
+  deadPanes: Record<string, true>
+  setPaneDead: (paneId: string, dead: boolean) => void
 
   /** 传输队列，最新在前 */
   transfers: TransferItem[]
@@ -725,13 +930,8 @@ export const useApp = create<AppState>((set, get) => ({
         return
       }
     }
-    const sessionIds = [
-      ...new Set(
-        get()
-          .tabs.map((t) => t.sessionId)
-          .filter((id): id is string => !!id),
-      ),
-    ]
+    // 一个标签可能挂着好几条会话（每格一条），都要收 —— 只按 tab.sessionId 收会漏掉分屏
+    const sessionIds = [...new Set(get().tabs.flatMap(tabSessionIds))]
     await vaultLock()
     set({
       phase: 'locked',
@@ -739,7 +939,9 @@ export const useApp = create<AppState>((set, get) => ({
       groups: [],
       tabs: [],
       activeTabId: null,
-      findTabId: null,
+      findPaneId: null,
+      focusedPane: {},
+      deadPanes: {},
       // 「这一轮是用恢复密钥进来的」是**会话**状态，锁了就没了
       vaultByRecovery: false,
     })
@@ -765,7 +967,9 @@ export const useApp = create<AppState>((set, get) => ({
       groups: [],
       tabs: [],
       activeTabId: null,
-      findTabId: null,
+      findPaneId: null,
+      focusedPane: {},
+      deadPanes: {},
     })
   },
 
@@ -819,20 +1023,34 @@ export const useApp = create<AppState>((set, get) => ({
   activeTabId: null,
   setActiveTab: (id) => set({ activeTabId: id }),
 
-  findTabId: null,
-  findableTab: () => {
-    const { tabs, activeTabId } = get()
-    const tab = tabs.find((t) => t.id === activeTabId)
+  focusedPane: {},
+  focusPane: (tabId, paneId) =>
+    set((s) => (s.focusedPane[tabId] === paneId ? {} : { focusedPane: { ...s.focusedPane, [tabId]: paneId } })),
+  focusedPaneOf: (tabId) => {
+    const tab = get().tabs.find((t) => t.id === tabId)
     if (!tab) return null
-    return tab.kind === 'terminal' || tab.kind === 'local' ? tab : null
+    const panes = panesOf(tab)
+    return panes.find((p) => p.id === get().focusedPane[tabId]) ?? panes[0] ?? null
+  },
+  activePane: () => {
+    const { activeTabId } = get()
+    return activeTabId ? get().focusedPaneOf(activeTabId) : null
+  },
+
+  findPaneId: null,
+  findablePane: () => {
+    // 聚焦的那一格就是查找的目标：分屏下"当前终端"必须唯一，
+    // 否则搜的是哪一格全靠猜
+    const pane = get().activePane()
+    return pane && (pane.kind === 'terminal' || pane.kind === 'local') ? pane : null
   },
   toggleFind: () =>
     set((s) => {
-      const tab = get().findableTab()
-      if (!tab) return {}
-      return { findTabId: s.findTabId === tab.id ? null : tab.id }
+      const pane = get().findablePane()
+      if (!pane) return {}
+      return { findPaneId: s.findPaneId === pane.id ? null : pane.id }
     }),
-  closeFind: () => set({ findTabId: null }),
+  closeFind: () => set({ findPaneId: null }),
 
   addTab: (tab) => {
     const id = `tab-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`
@@ -843,10 +1061,24 @@ export const useApp = create<AppState>((set, get) => ({
   closeTab: (id) =>
     set((s) => {
       const index = s.tabs.findIndex((t) => t.id === id)
+      const closed = s.tabs.find((t) => t.id === id)
       const tabs = s.tabs.filter((t) => t.id !== id)
       const nextActive =
         s.activeTabId === id ? (tabs[Math.min(index, tabs.length - 1)]?.id ?? null) : s.activeTabId
-      return { tabs, activeTabId: nextActive, findTabId: s.findTabId === id ? null : s.findTabId }
+      // 跟着这个标签走的还有三份旁路状态：查找栏指向的格子、聚焦格子、断线标记。
+      // 不清的话它们会拿着已经不存在的 paneId 一直留着
+      const gonePanes = new Set(panesOf(closed).map((p) => p.id))
+      const nextFocused = { ...s.focusedPane }
+      delete nextFocused[id]
+      const nextDead = { ...s.deadPanes }
+      for (const pid of gonePanes) delete nextDead[pid]
+      return {
+        tabs,
+        activeTabId: nextActive,
+        findPaneId: s.findPaneId && gonePanes.has(s.findPaneId) ? null : s.findPaneId,
+        focusedPane: nextFocused,
+        deadPanes: nextDead,
+      }
     }),
 
   requestCloseTab: (id) => {
@@ -879,14 +1111,202 @@ export const useApp = create<AppState>((set, get) => ({
       return { editorGuards: next }
     }),
 
-  // 守卫放在这里而不是各入口：不是可分的标签就一动不动。
-  // 入口（标签栏、命令面板）各自还会给一句提示，这里只保证状态不被翻坏
-  toggleSplit: (id) =>
+  /**
+   * 调整分屏档位（1 / 2 / 4 格）。
+   *
+   * 两个守卫都在这里：不是能分屏的标签、档位没变的，一动不动。
+   * 入口（标签栏、命令面板）各自还给一句提示，这里只保证状态不被翻坏。
+   */
+  setPaneCount: (tabId, count) =>
     set((s) => {
-      const tab = s.tabs.find((t) => t.id === id)
+      const tab = s.tabs.find((t) => t.id === tabId)
       if (!isSplittable(tab)) return {}
-      return { tabs: s.tabs.map((t) => (t.id === id ? { ...t, split: !t.split } : t)) }
+      const panes = panesOf(tab)
+      if (panes.length === count) return {}
+      const base = panes[0]
+      const next = panes.slice(0, count)
+      // 新格子继承**第一格**的连接：同一条会话再开一条 shell 通道，不重新认证。
+      // 挑第一格而不是当前聚焦那格：标签栏上按的是"这个标签"，行为要可预期
+      while (next.length < count) {
+        next.push(
+          makePane({
+            kind: base.kind,
+            sessionId: base.sessionId,
+            hostId: base.hostId,
+            title: base.title,
+          }),
+        )
+      }
+      // 降档丢掉的那些格子：它们身上的断线标记、查找栏指向都要一起收拾，
+      // 留着就是拿着不存在的 paneId 的状态
+      const gone = panes.slice(count).map((p) => p.id)
+      const nextDead = { ...s.deadPanes }
+      for (const pid of gone) delete nextDead[pid]
+      return {
+        tabs: s.tabs.map((t) => (t.id === tabId ? { ...t, panes: next } : t)),
+        deadPanes: nextDead,
+        findPaneId: s.findPaneId && gone.includes(s.findPaneId) ? null : s.findPaneId,
+      }
     }),
+
+  addPane: (tabId) => {
+    const tab = get().tabs.find((t) => t.id === tabId)
+    const count = panesOf(tab).length
+    if (!isSplittable(tab) || count >= MAX_PANES) return null
+    // 占位格只出现在 3 格的时候（2×2 缺一角），补上就是满格
+    get().setPaneCount(tabId, count === 1 ? 2 : 4)
+    const next = get().tabs.find((t) => t.id === tabId)
+    return panesOf(next).at(-1)?.id ?? null
+  },
+
+  closePane: (tabId, paneId) =>
+    set((s) => {
+      const tab = s.tabs.find((t) => t.id === tabId)
+      if (!isSplittable(tab)) return {}
+      const panes = panesOf(tab)
+      // 只剩一格不给关：那等于关标签，得走标签的 ✕（编辑器还有未保存守卫）
+      if (panes.length <= 1) return {}
+      const next = panes.filter((p) => p.id !== paneId)
+      if (next.length === panes.length) return {}
+      const nextDead = { ...s.deadPanes }
+      delete nextDead[paneId]
+      return {
+        tabs: s.tabs.map((t) => (t.id === tabId ? { ...t, panes: next } : t)),
+        deadPanes: nextDead,
+        findPaneId: s.findPaneId === paneId ? null : s.findPaneId,
+        focusedPane:
+          s.focusedPane[tabId] === paneId
+            ? { ...s.focusedPane, [tabId]: next[0].id }
+            : s.focusedPane,
+      }
+    }),
+
+  movePane: (tabId, fromPaneId, toPaneId) =>
+    set((s) => {
+      const tab = s.tabs.find((t) => t.id === tabId)
+      if (!tab) return {}
+      const panes = [...panesOf(tab)]
+      const a = panes.findIndex((p) => p.id === fromPaneId)
+      const b = panes.findIndex((p) => p.id === toPaneId)
+      if (a < 0 || b < 0 || a === b) return {}
+      // 换的是**位置上的两个格子**，不是格子里的内容：格子带着自己的终端实例、
+      // 通道和滚动历史整个搬走（React key 用 pane.id，组件实例不重建）
+      ;[panes[a], panes[b]] = [panes[b], panes[a]]
+      return { tabs: s.tabs.map((t) => (t.id === tabId ? { ...t, panes } : t)) }
+    }),
+
+  setPaneConnection: (tabId, paneId, conn) =>
+    set((s) => {
+      // 换过主机的格子不再是"那台断了"，旧标记跟着清
+      const nextDead = { ...s.deadPanes }
+      delete nextDead[paneId]
+      return {
+        tabs: s.tabs.map((t) =>
+          t.id === tabId
+            ? { ...t, panes: panesOf(t).map((p) => (p.id === paneId ? { ...p, ...conn } : p)) }
+            : t,
+        ),
+        deadPanes: nextDead,
+      }
+    }),
+
+  moveTab: (from, to) =>
+    set((s) => {
+      if (from === to || from < 0 || from >= s.tabs.length) return {}
+      const target = Math.max(0, Math.min(s.tabs.length - 1, to))
+      const tabs = [...s.tabs]
+      const [moved] = tabs.splice(from, 1)
+      tabs.splice(target, 0, moved)
+      return { tabs }
+    }),
+
+  draggingTabId: null,
+  setDraggingTabId: (id) =>
+    set((s) => (s.draggingTabId === id ? {} : { draggingTabId: id })),
+
+  livePanes: {},
+  setPaneLive: (paneId, live) =>
+    set((s) => {
+      if (!!s.livePanes[paneId] === live) return {}
+      const next = { ...s.livePanes }
+      if (live) next[paneId] = true
+      else delete next[paneId]
+      return { livePanes: next }
+    }),
+
+  mergeTabIntoPane: (targetTabId, sourceTabId) => {
+    const s = get()
+    const target = s.tabs.find((t) => t.id === targetTabId)
+    const source = s.tabs.find((t) => t.id === sourceTabId)
+    if (!target || !source || target.id === source.id) return
+
+    const moving = panesOf(source)
+    const room = MAX_PANES - panesOf(target).length
+    // 分开判、分开说：这两种"并不进来"的原因不一样，混成一句用户不知道该动哪边
+    if (moving.length === 0) {
+      s.setError(`「${source.title}」里没有终端可以并 —— 文件面板和编辑器没有格子`)
+      return
+    }
+    if (!acceptsPanes(target)) {
+      s.setError(`「${target.title}」里没有格子 —— 并进终端或本地 Shell 的窗口里才行`)
+      return
+    }
+    if (moving.length > room) {
+      s.setError(
+        room <= 0
+          ? `「${target.title}」已经四格了 —— 先关掉一格再拼`
+          : `拼不进来：那边只剩 ${room} 格，这个标签有 ${moving.length} 格`,
+      )
+      return
+    }
+
+    // 阶段一：按同样的连接在目标标签里开新格子。这时候源标签的通道还开着，
+    // 会话不会因为"最后一条通道关了"被回收
+    const clones = moving.map((p) =>
+      makePane({ kind: p.kind, sessionId: p.sessionId, hostId: p.hostId, title: p.title }),
+    )
+    set((st) => ({
+      tabs: st.tabs.map((t) =>
+        t.id === target.id ? { ...t, panes: [...panesOf(t), ...clones] } : t,
+      ),
+      activeTabId: target.id,
+    }))
+
+    // 阶段二：等新格子把 shell 开起来再收源标签。给 5 秒上限，
+    // 超了就整体回滚 —— 宁可这次没拼成，也不能把用户的终端弄丢
+    const deadline = Date.now() + 5000
+    const settle = () => {
+      const st = get()
+      // 用户手快把哪边关掉了：什么都不做，别去动一个不存在的标签
+      if (!st.tabs.some((t) => t.id === target.id)) return
+      if (!st.tabs.some((t) => t.id === source.id)) return
+
+      if (clones.every((c) => st.livePanes[c.id])) {
+        // 新通道已经在会话上了，现在收源标签是安全的
+        st.closeTab(source.id)
+        return
+      }
+      if (Date.now() >= deadline) {
+        const cloneIds = new Set(clones.map((c) => c.id))
+        set((cur) => ({
+          tabs: cur.tabs.map((t) =>
+            t.id === target.id
+              ? { ...t, panes: panesOf(t).filter((p) => !cloneIds.has(p.id)) }
+              : t,
+          ),
+        }))
+        get().setError(`没能在这台机器上再开一条 shell —— 「${source.title}」还留着`)
+        return
+      }
+      setTimeout(settle, 60)
+    }
+    setTimeout(settle, 60)
+  },
+
+  paneHostTarget: null,
+  setPaneHostTarget: (target) => set({ paneHostTarget: target }),
+  connectPaneTarget: null,
+  setConnectPaneTarget: (target) => set({ connectPaneTarget: target }),
 
   // 分组的取名/改名放 store 而不是组件里：会话树和命令面板都要用，
   // 而且都得走自绘输入弹窗（window.prompt 在打包版里是原生框，观感对不上）
@@ -937,26 +1357,12 @@ export const useApp = create<AppState>((set, get) => ({
     })
   },
 
-  // 从 localStorage 读上次拖出来的位置，找不到或者解析失败就 0.5
-  splitRatio: (() => {
-    try {
-      const v = localStorage.getItem('splitRatio')
-      const n = v ? Number(v) : NaN
-      return Number.isFinite(n) && n >= 0.2 && n <= 0.8 ? n : 0.5
-    } catch {
-      return 0.5
-    }
-  })(),
-  setSplitRatio: (ratio) => {
-    // 拖得太极端两边就看不清了，夹一下
-    const clamped = Math.min(0.8, Math.max(0.2, ratio))
-    try {
-      localStorage.setItem('splitRatio', String(clamped))
-    } catch {
-      /* 隐私模式可能写不动，忽略 */
-    }
-    set({ splitRatio: clamped })
-  },
+  // 从 localStorage 读上次拖出来的位置，找不到或者解析失败就 0.5。
+  // 列（左右两格 / 四宫格的竖线）沿用改造前就有的 splitRatio 键，老用户的位置不丢
+  splitRatio: readRatio('splitRatio'),
+  setSplitRatio: (ratio) => set({ splitRatio: writeRatio('splitRatio', ratio) }),
+  splitRatioY: readRatio('splitRatioY'),
+  setSplitRatioY: (ratio) => set({ splitRatioY: writeRatio('splitRatioY', ratio) }),
 
   termFontSize: (() => {
     try {
@@ -1090,39 +1496,35 @@ export const useApp = create<AppState>((set, get) => ({
   },
 
   terminalSinks: {},
-  registerTerminalSink: (tabId, sink) =>
-    set((s) => ({ terminalSinks: { ...s.terminalSinks, [tabId]: sink } })),
-  unregisterTerminalSink: (tabId) =>
+  registerTerminalSink: (paneId, sink) =>
+    set((s) => ({ terminalSinks: { ...s.terminalSinks, [paneId]: sink } })),
+  unregisterTerminalSink: (paneId) =>
     set((s) => {
       const next = { ...s.terminalSinks }
-      delete next[tabId]
+      delete next[paneId]
       return { terminalSinks: next }
     }),
 
   reconnectSinks: {},
-  registerReconnect: (tabId, fn) =>
-    set((s) => ({
-      reconnectSinks: { ...s.reconnectSinks, [tabId]: [...(s.reconnectSinks[tabId] ?? []), fn] },
-    })),
-  unregisterReconnect: (tabId, fn) =>
+  registerReconnect: (paneId, fn) =>
+    set((s) => ({ reconnectSinks: { ...s.reconnectSinks, [paneId]: fn } })),
+  unregisterReconnect: (paneId) =>
     set((s) => {
-      const rest = (s.reconnectSinks[tabId] ?? []).filter((f) => f !== fn)
+      if (!s.reconnectSinks[paneId]) return {}
       const next = { ...s.reconnectSinks }
-      // 全撤了就把 key 删掉，别留一堆空数组
-      if (rest.length) next[tabId] = rest
-      else delete next[tabId]
+      delete next[paneId]
       return { reconnectSinks: next }
     }),
 
-  deadTabs: {},
-  setTabDead: (tabId, dead) =>
+  deadPanes: {},
+  setPaneDead: (paneId, dead) =>
     set((s) => {
       // 没变化就别造新对象，省得白触发一轮重渲染
-      if (!!s.deadTabs[tabId] === dead) return s
-      const next = { ...s.deadTabs }
-      if (dead) next[tabId] = true
-      else delete next[tabId]
-      return { deadTabs: next }
+      if (!!s.deadPanes[paneId] === dead) return s
+      const next = { ...s.deadPanes }
+      if (dead) next[paneId] = true
+      else delete next[paneId]
+      return { deadPanes: next }
     }),
 
   transfers: [],

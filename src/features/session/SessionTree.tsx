@@ -13,24 +13,9 @@ import {
   SquareTerminal,
   Trash2,
 } from 'lucide-react'
-import { useApp } from '@/lib/store'
-import { parseConnectError, sshConnect, type HostRecord } from '@/lib/api'
-
-/**
- * `compatOverride` 供确认框里的「用兼容算法重试」把兼容模式强开一次；
- * 平时走 host.compat —— 那是保存时勾了兼容模式的主机，不带上等于白存。
- */
-function hostToConfig(host: HostRecord, compatOverride?: boolean) {
-  return {
-    host: host.address,
-    port: host.port,
-    username: host.username,
-    password: host.auth.type === 'password' ? host.auth.password : undefined,
-    privateKeyPath: host.auth.type === 'key' ? host.auth.privateKeyPath : undefined,
-    passphrase: host.auth.type === 'key' ? (host.auth.passphrase ?? undefined) : undefined,
-    compat: compatOverride ?? host.compat ?? false,
-  }
-}
+import { useApp, panesOf, terminalTab } from '@/lib/store'
+import type { HostRecord } from '@/lib/api'
+import { connectHost } from './connectHost'
 
 export function SessionTree() {
   const {
@@ -41,80 +26,54 @@ export function SessionTree() {
     sidebarCollapsed,
     toggleSidebar,
     tabs,
-    deadTabs,
+    deadPanes,
     setConnectOpen,
     setSnippetsOpen,
     setTunnelOpen,
     setSettingsOpen,
     openLocalFileDialog,
     addTab,
-    setError,
     removeHost,
     setConfirmPrompt,
     promptNewGroup,
     promptRenameGroup,
   } = useApp()
 
-  /** retried：已经"忘掉旧密钥"重试过一次就别再弹窗了，否则会死循环 */
-  const connect = async (
-    host: HostRecord,
-    kind: 'terminal' | 'sftp' = 'terminal',
-    retried = false,
-    forceCompat = false,
-  ) => {
-    try {
-      const sessionId = await sshConnect(hostToConfig(host, forceCompat))
-      addTab({
-        title: kind === 'sftp' ? `${host.name} · 文件` : `${host.username}@${host.address}`,
-        kind,
-        sessionId,
-        hostId: host.id,
-      })
-    } catch (e) {
-      const failure = parseConnectError(e)
-      if (failure.kind === 'host_key_mismatch' && !retried) {
-        setConfirmPrompt({
-          kind: 'host_key_mismatch',
-          host: failure.host,
-          detail: failure.detail,
-          retry: () => void connect(host, kind, true),
-        })
-        return
-      }
-      // 老设备在这里第一次露馅：给「用兼容算法重试」这条路，
-      // 而不是让用户自己去翻对话框重新填一遍。compatHint 为 false 时不给，理由同 ConnectDialog
-      if (failure.kind === 'algorithms_unsupported' && failure.compatHint && !retried) {
-        setConfirmPrompt({
-          kind: 'algo_compat',
-          message: failure.message,
-          retry: () => void connect(host, kind, true, true),
-        })
-        return
-      }
-      setError(`连接 ${host.name} 失败：${failure.message}`)
-    }
+  /** 连上之后开一条标签。失败路径（密钥不符 / 算法不兼容）在 connectHost 里统一处理 */
+  const connect = (host: HostRecord, kind: 'terminal' | 'sftp' = 'terminal') => {
+    void connectHost(host, (sessionId) => {
+      const title = kind === 'sftp' ? `${host.name} · 文件` : `${host.username}@${host.address}`
+      addTab(
+        kind === 'sftp'
+          ? { title, kind, sessionId, hostId: host.id }
+          : terminalTab({ title, sessionId, hostId: host.id }),
+      )
+    })
   }
 
   /**
    * 打开这台主机的 SFTP 双栏。
    *
-   * 先找有没有已经连上的标签能复用 —— 直接重拨意味着要重新认证一次，
+   * 先找有没有已经连上的格子能复用 —— 直接重拨意味着要重新认证一次，
    * 有些服务端还限制单用户连接数，多拨一条会把先前那条顶掉。
-   * 断线了（deadTabs）的不算，那条连接已经废了，得重新连。
+   * 断线了（deadPanes）的不算，那条连接已经废了，得重新连。
+   * 四宫格下同一台主机可能有好几格，随便挑一条活的都行。
    */
   const openSftp = (host: HostRecord) => {
     const s = useApp.getState()
-    const existing = s.tabs.find((t) => t.hostId === host.id && t.sessionId && !s.deadTabs[t.id])
-    if (existing?.sessionId) {
+    const live = s.tabs
+      .flatMap(panesOf)
+      .find((p) => p.hostId === host.id && p.sessionId && !s.deadPanes[p.id])
+    if (live?.sessionId) {
       s.addTab({
         title: `${host.name} · 文件`,
         kind: 'sftp',
-        sessionId: existing.sessionId,
+        sessionId: live.sessionId,
         hostId: host.id,
       })
       return
     }
-    void connect(host, 'sftp')
+    connect(host, 'sftp')
   }
 
   const createGroup = () => {
@@ -161,16 +120,17 @@ export function SessionTree() {
   if (sidebarCollapsed) return null
 
   /**
-   * 哪几台主机「连着」：有标签挂着它的 sessionId，且那条连接还没断。
+   * 哪几台主机「连着」：有**某一格**挂着它的 sessionId，且那条连接还没断。
    *
    * 跟 openSftp 挑"能复用的连接"是同一条规则 —— 点亮就等于告诉用户
-   * 点「打开 SFTP」不会再拨一次、不会再认证一次。
-   * 快速连接（没有 hostId）的标签不点亮任何主机；反过来，只剩 SFTP 标签时
-   * 断了也没人标 deadTabs（那是终端在管的），那一格要等下次交互才发现已经死了。
+   * 点「打开 SFTP」不会再拨一次、不会再认证一次。四宫格可以四格四台机器，
+   * 所以这里要逐格看，不能只看标签上那一条。
+   * 快速连接（没有 hostId）的格子不点亮任何主机；反过来，只剩 SFTP 标签时
+   * 断了也没人标 deadPanes（那是终端在管的），那一格要等下次交互才发现已经死了。
    */
   const connectedHosts = new Set<string>()
-  for (const t of tabs) {
-    if (t.hostId && t.sessionId && !deadTabs[t.id]) connectedHosts.add(t.hostId)
+  for (const p of tabs.flatMap(panesOf)) {
+    if (p.hostId && p.sessionId && !deadPanes[p.id]) connectedHosts.add(p.hostId)
   }
 
   const renderHost = (host: HostRecord) => (
@@ -334,7 +294,7 @@ export function SessionTree() {
       */}
       <div className="shrink-0 space-y-0.5 border-t border-hairline p-2">
         <button
-          onClick={() => addTab({ title: '本地 Shell', kind: 'local' })}
+          onClick={() => addTab(terminalTab({ title: '本地 Shell', kind: 'local' }))}
           className="flex h-7 w-full items-center gap-2 rounded px-2 text-[12px] text-ink-subtle transition-colors hover:bg-surface-2 hover:text-ink"
           title="在本机开一个终端（Windows 走 PowerShell / ConPTY）"
         >

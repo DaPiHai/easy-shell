@@ -80,30 +80,22 @@ function pasteFromClipboard(getTerm: () => Terminal | null) {
 }
 
 interface Props {
+  /**
+   * 这个终端属于哪一格（Pane.id）。
+   *
+   * 命令片段投喂、手动重连、断线标记、查找栏都以它为准 —— 一个标签可以有好几格，
+   * 用 tabId 的话几格会互相顶掉（改造前两分屏就是靠 `snippets` 手动让位才没出问题）。
+   */
+  paneId: string
+  /** local=本机 shell，terminal=远程 ssh */
+  kind: 'terminal' | 'local'
   /** 远程 ssh 必填；本地 shell 不需要 */
   sessionId?: string
-  /** local=本机 shell，terminal=远程 ssh */
-  kind?: 'terminal' | 'local'
-  /** 传了就注册到 store，命令片段面板可以往这个终端投递命令 */
-  tabId?: string
-  /**
-   * 是否作为命令片段的投递目标，默认 true。
-   * 分屏时左右两个终端共用 tabId，只有一边该接命令片段，另一边传 false。
-   * 查找栏也认这一位 —— 两者都是「这条标签的终端」级别的动作，都只挂左半边。
-   */
-  snippets?: boolean
   onClosed?: () => void
 }
 
-export function TerminalView({
-  sessionId,
-  kind = 'terminal',
-  tabId,
-  snippets = true,
-  onClosed,
-}: Props) {
+export function TerminalView({ paneId, kind, sessionId, onClosed }: Props) {
   const hostRef = useRef<HTMLDivElement>(null)
-  /** 分屏时左右两个终端共用 sessionId，只有注册了 tabId 的那个才接收片段 */
   const channelIdRef = useRef<number | null>(null)
   const kindRef = useRef(kind)
   kindRef.current = kind
@@ -279,7 +271,7 @@ export function TerminalView({
         // 这里**不能**关标签：断线就自动把标签干掉的话，用户正在看的输出、
         // 报错信息全没了，等于毁掉现场。留着，让标签栏给个 ↻ 自己决定
         term.writeln('\r\n\x1b[90m连接已关闭。点标签栏的 ↻ 可以再试一次。\x1b[0m')
-        if (tabId) useApp.getState().setTabDead(tabId, true)
+        useApp.getState().setPaneDead(paneId, true)
         return
       }
       if (manual) retries = 0
@@ -304,7 +296,8 @@ export function TerminalView({
         }
         syncChannel()
         retries = 0
-        if (tabId) useApp.getState().setTabDead(tabId, false)
+        useApp.getState().setPaneDead(paneId, false)
+        useApp.getState().setPaneLive(paneId, true)
         term.writeln('\r\n\x1b[32m✓ 已重连\x1b[0m')
       } catch (e) {
         const failure = parseConnectError(e)
@@ -368,6 +361,9 @@ export function TerminalView({
         }
         channelId = id
         syncChannel()
+        // 「这一格真的连上了」要报给 store：把标签拼进另一个窗口时，
+        // 得等新格子开好通道才敢收掉源标签（理由见 store 的 mergeTabIntoPane）
+        useApp.getState().setPaneLive(paneId, true)
       })
       .catch((err: unknown) => {
         if (disposed) return
@@ -397,7 +393,8 @@ export function TerminalView({
       manualReconnectRef.current = null
       termRef.current = null
       safeFitRef.current = null
-      if (tabId) useApp.getState().setTabDead(tabId, false)
+      useApp.getState().setPaneDead(paneId, false)
+      useApp.getState().setPaneLive(paneId, false)
       // 后端还会往这个 channel 推事件，先掐掉回调，避免卸载后再动 terminal
       channel.onmessage = () => {}
       // 卸载即关闭自己这条通道：
@@ -419,7 +416,9 @@ export function TerminalView({
         console.warn('[easy-shell] terminal dispose 抛错（已忽略）:', e)
       }
     }
-  }, [sessionId, kind])
+    // paneId 在组件生命周期里不会变（React key 就是它），列进来只是为了让
+    // effect 读的每一份外部状态都有着落；sessionId 变了说明这一格换了主机，要重连
+  }, [sessionId, kind, paneId])
 
   // 字号 / 字体 / 行高变了要应用到已经开着的终端，并重算行列
   const fontSize = useApp((s) => s.termFontSize)
@@ -466,42 +465,37 @@ export function TerminalView({
     term.options.theme = xtermTheme
   }, [xtermTheme])
 
-  // 注册成命令片段的投递目标，同时挂上手动重连
+  // 命令片段的投递目标 + 手动重连回调。一格一个键：同一标签的多格各注册各的，
+  // 不会互相顶掉（投给谁由 store 的 focusedPane 决定，见 SnippetsDialog）
   useEffect(() => {
-    if (!tabId) return
     const reconnect = () => manualReconnectRef.current?.()
-    // 分屏时左右两个终端共用 tabId，但命令片段只该投给其中一个，
-    // 都注册的话后注册的会把先注册的顶掉
-    if (snippets) {
-      const sink = (text: string) => {
-        const id = channelIdRef.current
-        if (id === null) return
-        if (kindRef.current === 'local') void localShellInput(id, text)
-        else void sshInput(id, text)
-      }
-      useApp.getState().registerTerminalSink(tabId, sink)
+    const sink = (text: string) => {
+      const id = channelIdRef.current
+      if (id === null) return
+      if (kindRef.current === 'local') void localShellInput(id, text)
+      else void sshInput(id, text)
     }
-    useApp.getState().registerReconnect(tabId, reconnect)
+    useApp.getState().registerTerminalSink(paneId, sink)
+    useApp.getState().registerReconnect(paneId, reconnect)
     return () => {
-      if (snippets) useApp.getState().unregisterTerminalSink(tabId)
-      useApp.getState().unregisterReconnect(tabId, reconnect)
+      useApp.getState().unregisterTerminalSink(paneId)
+      useApp.getState().unregisterReconnect(paneId)
     }
-  }, [tabId, snippets])
+  }, [paneId])
 
   /**
-   * 查找栏开不开，由 store 里「哪个标签在搜」决定 —— 快捷键、状态栏、命令面板
-   * 三处入口都够不着组件内部的 state，只能放那儿。分屏时两半共用 tabId，
-   * 所以再要求 snippets：搜索框只该有一个，挂在左半边那个终端上。
+   * 查找栏开不开，由 store 里「哪一格在搜」决定 —— 快捷键、状态栏、命令面板
+   * 三处入口都够不着组件内部的 state，只能放那儿。
    */
-  const findTabId = useApp((s) => s.findTabId)
-  const findOpen = !!tabId && snippets && findTabId === tabId
+  const findPaneId = useApp((s) => s.findPaneId)
+  const findOpen = findPaneId === paneId
 
   /**
    * padding 留在外层，xterm 挂到不带 padding 的内层。
    *
    * FitAddon 按父元素的**盒高**算行列，而 terminal 元素是从 padding 之后的 content box
    * 开始排的 —— 上下各 8px 就凭空多出一行，终端底部会溢出容器（盖住状态栏再往下露一截）。
-   * 远程终端有 SplitPane 的 overflow-hidden 兜着看不出来，本地 Shell 没有，肉眼可见。
+   * 远程终端有 PaneGrid 的 overflow-hidden 兜着看不出来，本地 Shell 没有，肉眼可见。
    */
   return (
     // padding 那一圈用终端自己的底色，而不是画布色：换了非默认配色之后，

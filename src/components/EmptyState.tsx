@@ -8,7 +8,7 @@ import {
   SquareTerminal,
   Terminal,
 } from 'lucide-react'
-import { DEFAULT_FONT_SIZE, MAX_FONT_SIZE, MIN_FONT_SIZE, useApp } from '@/lib/store'
+import { DEFAULT_FONT_SIZE, MAX_FONT_SIZE, MIN_FONT_SIZE, panesOf, terminalTab, useApp } from '@/lib/store'
 import { SchemeMenu } from '@/features/settings/SchemeMenu'
 
 const isMac = navigator.platform.toLowerCase().includes('mac')
@@ -53,7 +53,7 @@ export function EmptyState() {
             <span>新建会话</span>
           </button>
           <button
-            onClick={() => addTab({ title: '本地 Shell', kind: 'local' })}
+            onClick={() => addTab(terminalTab({ title: '本地 Shell', kind: 'local' }))}
             className={rowClass}
           >
             <SquareTerminal size={13} className="shrink-0" />
@@ -81,22 +81,35 @@ export function StatusBar() {
     bumpTermFontSize,
     sidebarCollapsed,
     toggleSidebar,
-    findTabId,
+    findPaneId,
+    focusedPane,
   } = useApp()
   // 写死"未连接"是纯假信息 —— 至少把当前这个标签是什么说清楚
   const active = tabs.find((t) => t.id === activeTabId)
-  // 有终端可搜的标签（远程 / 本地），查找按钮才亮
-  const findable = !!active && (active.kind === 'terminal' || active.kind === 'local')
-  const findOpen = !!active && findTabId === active.id
+  const panes = panesOf(active)
+  // 当前聚焦的那一格：查找、片段投递都以它为准，状态栏显示它连的是谁
+  const focused =
+    panes.find((p) => p.id === focusedPane[active?.id ?? '']) ?? panes[0] ?? null
+  // 焦点所在的那一格能不能搜（远程 / 本地终端都有 xterm 的查找）
+  const findable = !!focused
+  const findOpen = !!focused && findPaneId === focused.id
+  // 标签类型跟着**聚焦那一格**走，不跟着标签自己的 kind：把本地 Shell 并进远程标签之后
+  // （或反过来），标签的 kind 只代表它是怎么建出来的，状态栏写错就等于骗人
   const kindLabel = !active
     ? null
-    : active.kind === 'local'
-      ? '本地 Shell'
-      : active.kind === 'sftp'
-        ? 'SFTP'
-        : active.kind === 'editor'
-          ? '编辑器'
+    : active.kind === 'sftp'
+      ? 'SFTP'
+      : active.kind === 'editor'
+        ? '编辑器'
+        : focused?.kind === 'local'
+          ? '本地 Shell'
           : 'SSH'
+  // 分屏时标出聚焦的是哪一格 —— 否则状态栏写的还是标签原本那台机器，跟手里的终端对不上
+  const detail = !active
+    ? '未连接'
+    : focused && panes.length > 1
+      ? `${kindLabel} · ${focused.title}（${panes.length} 格）`
+      : `${kindLabel} · ${active.title}`
 
   return (
     <footer className="flex h-6 shrink-0 items-center justify-between border-t border-hairline bg-surface-1 px-3 text-[11px] text-ink-subtle">
@@ -104,9 +117,7 @@ export function StatusBar() {
         <span
           className={`h-1.5 w-1.5 shrink-0 rounded-full ${active ? 'bg-success' : 'bg-ink-tertiary'}`}
         />
-        <span className="truncate">
-          {active ? `${kindLabel} · ${active.title}` : '未连接'}
-        </span>
+        <span className="truncate">{detail}</span>
       </div>
       <div className="flex items-center gap-3">
         {/*

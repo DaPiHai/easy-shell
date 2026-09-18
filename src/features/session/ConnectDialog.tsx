@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { X } from 'lucide-react'
-import { useApp } from '@/lib/store'
+import { terminalTab, useApp } from '@/lib/store'
 import { isDesktop, parseConnectError, pickFile, sshConnect } from '@/lib/api'
 
 const inputClass =
@@ -11,6 +11,11 @@ const labelClass = 'mb-1.5 block text-[11px] font-medium tracking-[0.4px] text-i
 export function ConnectDialog() {
   const { connectOpen, setConnectOpen, addTab, saveHost, setError: showError, setConfirmPrompt } =
     useApp()
+  /**
+   * 从某一格的「换主机 → 快速连接」进来时非空：连上后会话写进那一格，不开新标签。
+   * 读的是 store 里的即时值（不是进对话框时快照），因为确认框重试会绕回来再走一遍这里。
+   */
+  const connectPaneTarget = useApp((s) => s.connectPaneTarget)
 
   const [host, setHost] = useState('')
   const [port, setPort] = useState('22')
@@ -28,6 +33,8 @@ export function ConnectDialog() {
 
   const close = () => {
     setConnectOpen(false)
+    // 目标格必须跟着对话框一起清：留着它，下次 Ctrl+N 建会话会莫名其妙写进那一格
+    useApp.getState().setConnectPaneTarget(null)
     setError(null)
   }
 
@@ -71,12 +78,18 @@ export function ConnectDialog() {
       // 存进 vault 的才给 hostId：会话树靠它找到这条已建立的连接，
       // 点 SFTP 时直接复用，不必再拨一次
       const hostId = saveToVault ? crypto.randomUUID() : undefined
-      addTab({
-        title: `${username}@${host}`,
-        kind: 'terminal',
-        sessionId,
-        hostId,
-      })
+      const title = `${username}@${host}`
+      if (connectPaneTarget) {
+        // 从格子标题条进来的：会话交给那一格，标签栏不新增东西
+        useApp.getState().setPaneConnection(connectPaneTarget.tabId, connectPaneTarget.paneId, {
+          sessionId,
+          hostId,
+          title,
+        })
+        useApp.getState().setConnectPaneTarget(null)
+      } else {
+        addTab(terminalTab({ title, sessionId, hostId }))
+      }
 
       if (saveToVault) {
         await saveHost({
@@ -132,7 +145,9 @@ export function ConnectDialog() {
       <div className="absolute inset-0 bg-black/60" onClick={close} />
       <div className="absolute left-1/2 top-[18%] w-[420px] -translate-x-1/2 rounded-xl border border-hairline-tertiary bg-surface-1">
         <div className="flex h-11 items-center justify-between border-b border-hairline px-4">
-          <span className="text-[13px] font-medium text-ink">新建会话</span>
+          <span className="text-[13px] font-medium text-ink">
+            {connectPaneTarget ? '连接这一格' : '新建会话'}
+          </span>
           <button
             onClick={close}
             className="grid h-5 w-5 place-items-center rounded text-ink-subtle hover:bg-surface-3 hover:text-ink"
