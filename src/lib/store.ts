@@ -80,6 +80,21 @@ function writeLocal(key: string, value: string) {
 const CUSTOM_SCHEMES_KEY = 'termCustomSchemes'
 
 /**
+ * 「配一把恢复公钥吧」这个提示被永久关掉了没。
+ *
+ * 走 localStorage 而不是库里的 meta：这是「我不想再看见这个提示」的表达，
+ * 属于用户偏好（同主题、字号）。用户偏好不属于密钥库，也不该跟着库一起被加密。
+ */
+const RECOVERY_PROMPT_MUTED = 'recoveryPromptMuted'
+const isRecoveryPromptMuted = () => {
+  try {
+    return localStorage.getItem(RECOVERY_PROMPT_MUTED) === '1'
+  } catch {
+    return false
+  }
+}
+
+/**
  * 读自定义配色。**逐套校验**：这份 JSON 是用户可能手改的、跨版本升级的，
  * 半套色板渲染出来比没有更糟（终端会变成一片白），坏数据直接丢掉。
  */
@@ -281,6 +296,18 @@ interface AppState {
   /** 「修改主密码」对话框开着没 */
   changePasswordOpen: boolean
   setChangePasswordOpen: (open: boolean) => void
+
+  /**
+   * 「给主密码配一把恢复公钥？」这个提示开着没。
+   *
+   * 触发点是**刚设完主密码**（新建库、改密码都算）—— 那是唯一说得上话的时机：
+   * 用户手里还有这把密码，也刚意识到「密码忘了会怎样」。藏在设置面板里没人会去看，
+   * 而这一条恰恰是「等你想起来的时候已经晚了」的那类设置。
+   */
+  recoveryPromptOpen: boolean
+  setRecoveryPromptOpen: (open: boolean) => void
+  /** 「不再提示」：永久关掉这个提示（用户偏好，存 localStorage） */
+  muteRecoveryPrompt: () => void
 
   /** 全局轻提示，4 秒后自动消失 */
   error: string | null
@@ -528,6 +555,13 @@ export const useApp = create<AppState>((set, get) => ({
   changePasswordOpen: false,
   setChangePasswordOpen: (open) => set({ changePasswordOpen: open }),
 
+  recoveryPromptOpen: false,
+  setRecoveryPromptOpen: (open) => set({ recoveryPromptOpen: open }),
+  muteRecoveryPrompt: () => {
+    writeLocal(RECOVERY_PROMPT_MUTED, '1')
+    set({ recoveryPromptOpen: false })
+  },
+
   error: null,
   setError: (message) => {
     set({ error: message })
@@ -586,8 +620,14 @@ export const useApp = create<AppState>((set, get) => ({
       // 空串 = 用户在上一步明确选了「不设密码」，标记要跟着走。
       // 新库还没有恢复密钥，那两项也一并归零（重置过的库里可能留着旧的指纹）
       set({ vaultNoPassword: password === '', vaultRecoveryFp: null, vaultByRecovery: false })
+      // 这是个**新库**：上一轮「不再提示」的偏好不该跟过来，重新问一次
+      writeLocal(RECOVERY_PROMPT_MUTED, '0')
       await get().refreshHosts()
-      set({ phase: 'ready' })
+      set({
+        phase: 'ready',
+        // 没设密码就谈不上「忘密码」，那时恢复密钥没有意义（设置面板里也是这么写的）
+        recoveryPromptOpen: password !== '',
+      })
     } catch (e) {
       set({ vaultError: String(e) })
       throw e
@@ -639,7 +679,17 @@ export const useApp = create<AppState>((set, get) => ({
     await vaultChangePassword(oldPassword, newPassword)
     // 后端已经把内存里的钥匙换成新的了；hosts 存的是明文凭据，不用重读。
     // 翻掉这两个标记：改完密码就不再是「用恢复密钥进来的那一轮」了
-    set({ vaultNoPassword: newPassword === '', vaultByRecovery: false })
+    const state = get()
+    const prompt =
+      newPassword !== '' && !state.vaultRecoveryFp && !isRecoveryPromptMuted()
+    set({
+      vaultNoPassword: newPassword === '',
+      vaultByRecovery: false,
+      // 要弹恢复密钥的提示就先收起改密码那个框 —— 两个 ModalShell 都是
+      // `fixed inset-0 z-50`，叠着就是两层遮罩、两层 Esc
+      changePasswordOpen: prompt ? false : state.changePasswordOpen,
+      recoveryPromptOpen: prompt,
+    })
   },
 
   /**

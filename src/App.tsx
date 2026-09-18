@@ -7,6 +7,7 @@ import { SftpPanel } from '@/features/sftp/SftpPanel'
 import { ConnectDialog } from '@/features/session/ConnectDialog'
 import { ConfirmDialog } from '@/features/session/ConfirmDialog'
 import { ChangePasswordDialog } from '@/features/session/ChangePasswordDialog'
+import { RecoveryPromptDialog } from '@/features/session/RecoveryPromptDialog'
 import { SettingsDialog } from '@/features/settings/SettingsDialog'
 import { TunnelDialog } from '@/features/tunnel/TunnelDialog'
 import { SnippetsDialog } from '@/features/snippets/SnippetsDialog'
@@ -76,6 +77,8 @@ export default function App() {
           setSettingsOpen,
           changePasswordOpen,
           setChangePasswordOpen,
+          recoveryPromptOpen,
+          setRecoveryPromptOpen,
           confirmPrompt,
           setConfirmPrompt,
         } = useApp.getState()
@@ -85,6 +88,7 @@ export default function App() {
         if (snippetsOpen) setSnippetsOpen(false)
         if (settingsOpen) setSettingsOpen(false)
         if (changePasswordOpen) setChangePasswordOpen(false)
+        if (recoveryPromptOpen) setRecoveryPromptOpen(false)
         // 安全确认框同理：Esc = 取消（确认框自己没处理，不在这里关就成了关不掉的框）
         if (confirmPrompt) setConfirmPrompt(null)
       }
@@ -214,6 +218,8 @@ export default function App() {
       <ConnectDialog />
       <ConfirmDialog />
       <ChangePasswordDialog />
+      {/* 排在改密码那个之后：它可能是「改完密码紧接着弹出来」的，要压在上面 */}
+      <RecoveryPromptDialog />
       <SettingsDialog />
       <TunnelDialog />
       <SnippetsDialog />
