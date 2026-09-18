@@ -15,6 +15,7 @@ import {
   pickFile,
   sshClose,
   syncWindowTheme,
+  vaultChangePassword,
   vaultLock,
   vaultReset,
   vaultSetup,
@@ -256,6 +257,18 @@ interface AppState {
 
   phase: VaultPhase
   vaultError: string | null
+  /**
+   * 密钥库里没设主密码。
+   *
+   * 三个地方读它：启动时（直接解锁，不弹锁屏）、锁屏上（只有一个「解锁」按钮，
+   * 没有密码框）、以及改密码对话框（当前密码那一栏该不该出现）。
+   * 来源永远是后端 `vault_status`，别在本地猜。
+   */
+  vaultNoPassword: boolean
+
+  /** 「修改主密码」对话框开着没 */
+  changePasswordOpen: boolean
+  setChangePasswordOpen: (open: boolean) => void
 
   /** 全局轻提示，4 秒后自动消失 */
   error: string | null
@@ -272,6 +285,13 @@ interface AppState {
   lockVault: (force?: boolean) => Promise<void>
   /** 清空密钥库回到「首次使用」。**不可撤销**，调用前必须让用户明确确认 */
   resetVault: () => Promise<void>
+  /**
+   * 换主密码；`newPassword` 传空串就是「改成不设密码」。
+   *
+   * 只有在库**已解锁**时才调得通（后端要拿当前这把钥匙重新加密全部凭据），
+   * 失败原样抛出 —— 错误属于那个对话框，不该污染锁屏的 `vaultError`。
+   */
+  changeMasterPassword: (oldPassword: string, newPassword: string) => Promise<void>
 
   hosts: HostRecord[]
   groups: GroupRecord[]
@@ -478,6 +498,10 @@ export const useApp = create<AppState>((set, get) => ({
 
   phase: 'loading',
   vaultError: null,
+  vaultNoPassword: false,
+
+  changePasswordOpen: false,
+  setChangePasswordOpen: (open) => set({ changePasswordOpen: open }),
 
   error: null,
   setError: (message) => {
@@ -490,11 +514,31 @@ export const useApp = create<AppState>((set, get) => ({
   initVault: async () => {
     try {
       const status = await vaultStatus()
+      set({ vaultNoPassword: status.noPassword })
       if (!status.initialized) {
         set({ phase: 'setup', vaultError: null })
         return
       }
       if (!status.unlocked) {
+        /**
+         * 无密码库直接进 —— 这是「不设主密码」的全部意义：启动时不该被一个
+         * 空心密码框再挡一次。
+         *
+         * 失败就退回锁屏而不是把错误抛给用户：标记与实际校验串不一致（手改过的库、
+         * 跨版本迁移）时也没别的办法，用户在那里点一下「解锁」同样能进去。
+         * 启动路径上不弹看不懂的错，是这个分支唯一的讲究。
+         */
+        if (status.noPassword) {
+          try {
+            await vaultUnlock('')
+            await get().refreshHosts()
+            set({ phase: 'ready' })
+            return
+          } catch {
+            set({ phase: 'locked', vaultError: null })
+            return
+          }
+        }
         set({ phase: 'locked', vaultError: null })
         return
       }
@@ -509,6 +553,8 @@ export const useApp = create<AppState>((set, get) => ({
     set({ vaultError: null })
     try {
       await vaultSetup(password)
+      // 空串 = 用户在上一步明确选了「不设密码」，标记要跟着走
+      set({ vaultNoPassword: password === '' })
       await get().refreshHosts()
       set({ phase: 'ready' })
     } catch (e) {
@@ -527,6 +573,13 @@ export const useApp = create<AppState>((set, get) => ({
       set({ vaultError: String(e) })
       throw e
     }
+  },
+
+  changeMasterPassword: async (oldPassword, newPassword) => {
+    await vaultChangePassword(oldPassword, newPassword)
+    // 后端已经把内存里的钥匙换成新的了；hosts 存的是明文凭据，不用重读。
+    // 只翻这一个标记：它决定锁屏上还有没有密码框
+    set({ vaultNoPassword: newPassword === '' })
   },
 
   /**
@@ -585,6 +638,8 @@ export const useApp = create<AppState>((set, get) => ({
     set({
       phase: 'setup',
       vaultError: null,
+      // 回到「首次使用」：无密码标记随库一起清了，新版由用户重新选
+      vaultNoPassword: false,
       hosts: [],
       groups: [],
       tabs: [],

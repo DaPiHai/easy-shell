@@ -43,6 +43,8 @@ pub fn run() {
             store::vault_status,
             store::vault_setup,
             store::vault_unlock,
+            // 改主密码（传空串 = 改成不设密码），所有凭据用新密钥重新加密
+            store::vault_change_password,
             store::vault_lock,
             // 清空密钥库（忘记主密码时的唯一出路），不可撤销
             store::vault_reset,

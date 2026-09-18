@@ -125,6 +125,27 @@ const INIT_KEY = 'mockVaultInitialized'
 const readInitialized = () => localStorage.getItem(INIT_KEY) !== 'false'
 const setInitialized = (v: boolean) => localStorage.setItem(INIT_KEY, String(v))
 
+/**
+ * 预览里库有没有设主密码（对应真后端的 `nopass` 标记）。
+ *
+ * 要在预览里看「无密码」这条路，控制台敲一句
+ * `localStorage.setItem('mockVaultNoPassword', 'true')` 再刷新即可。
+ */
+const NOPASS_KEY = 'mockVaultNoPassword'
+const readNoPassword = () => localStorage.getItem(NOPASS_KEY) === 'true'
+const setNoPassword = (v: boolean) => localStorage.setItem(NOPASS_KEY, String(v))
+
+/**
+ * 预览里库锁没锁。
+ *
+ * 以前 mock 的 `unlocked` 恒等于 `initialized`，于是**锁屏在预览里根本到不了** ——
+ * 而「锁定」这条链路（收连接、清标签、无密码库的锁屏）恰恰是这轮改的东西。
+ * 锁定状态同样得落在 localStorage 里，不然一刷新就又解锁了，等于没验。
+ */
+const LOCK_KEY = 'mockVaultLocked'
+const readLocked = () => localStorage.getItem(LOCK_KEY) === 'true'
+const setLocked = (v: boolean) => localStorage.setItem(LOCK_KEY, String(v))
+
 /** 塞给 xterm 的假输出：带颜色、中文、emoji，顺便测宽字符对齐 */
 const BANNER = [
   '\x1b[1;38;2;94;106;210m  easy-shell\x1b[0m \x1b[90m· mock 会话（浏览器预览）\x1b[0m\r\n',
@@ -180,16 +201,30 @@ export async function invoke<T>(cmd: string, args: Record<string, unknown> = {})
   switch (cmd) {
     case 'vault_status': {
       const initialized = readInitialized()
-      return later({ initialized, unlocked: initialized } as T)
+      return later({
+        initialized,
+        unlocked: initialized && !readLocked(),
+        noPassword: readNoPassword(),
+      } as T)
     }
     case 'vault_setup':
       setInitialized(true)
+      setNoPassword((args.password as string) === '')
+      setLocked(false)
       return later(undefined as T)
     case 'vault_reset':
       setInitialized(false)
+      setNoPassword(false)
+      setLocked(false)
       return later(undefined as T)
     case 'vault_unlock':
+      setLocked(false)
+      return later(undefined as T)
     case 'vault_lock':
+      setLocked(true)
+      return later(undefined as T)
+    case 'vault_change_password':
+      setNoPassword((args.newPassword as string) === '')
       return later(undefined as T)
 
     case 'hosts_list':

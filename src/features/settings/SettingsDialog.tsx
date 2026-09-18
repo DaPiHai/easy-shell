@@ -54,9 +54,21 @@ function SettingsBody({ onClose }: { onClose: () => void }) {
     transferResumeDefault,
     setTransferResumeDefault,
     resetSettings,
+    vaultNoPassword,
+    setChangePasswordOpen,
   } = useApp()
 
   const [fontDraft, setFontDraft] = useState(termFontFamily)
+
+  /**
+   * 改主密码要开的是另一个弹窗。这里**先关掉设置面板**再开它 ——
+   * 两个 ModalShell 都是 `fixed inset-0 z-50`，叠着就是两层遮罩、两层 Esc，
+   * 看起来像界面坏了。跳出去把当前的收掉，是这个项目里更稳的做法。
+   */
+  const openChangePassword = () => {
+    onClose()
+    setChangePasswordOpen(true)
+  }
 
   return (
     <ModalShell
@@ -183,6 +195,26 @@ function SettingsBody({ onClose }: { onClose: () => void }) {
             }`}
           >
             {transferResumeDefault ? '开' : '关'}
+          </button>
+        </Row>
+      </Section>
+
+      {/*
+        密钥库这一节只有一个「改密码」入口 —— 主密码本身不在这里编辑，
+        那边要验当前密码、要重新加密全部凭据，值得一个正经的对话框。
+        锁定在状态栏和命令面板上，不再重复放一份。
+      */}
+      <Section title="密钥库">
+        <Row
+          label="主密码"
+          hint={
+            vaultNoPassword
+              ? '当前没有设置密码：启动直接进主界面，凭据在 vault.db 里只做混淆'
+              : '用于加密已保存的密码和私钥。改密码会用新密码重新加密全部凭据'
+          }
+        >
+          <button onClick={openChangePassword} className={modalButton}>
+            {vaultNoPassword ? '设置主密码…' : '修改…'}
           </button>
         </Row>
       </Section>

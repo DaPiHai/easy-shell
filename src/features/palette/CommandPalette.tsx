@@ -5,6 +5,7 @@ import {
   FileCode2,
   FolderOpen,
   FolderPlus,
+  KeyRound,
   Lock,
   PanelLeftClose,
   PanelLeftOpen,
@@ -36,6 +37,7 @@ export function CommandPalette() {
     setConnectOpen,
     setTunnelOpen,
     setSnippetsOpen,
+    vaultNoPassword,
   } = useApp()
 
   if (!paletteOpen) return null
@@ -273,6 +275,20 @@ export function CommandPalette() {
             </Command.Group>
 
             <Command.Group heading="安全">
+              <Command.Item
+                // cmdk 只按条目文字过滤，只写「修改主密码」的话搜「改密码」「密码」都找不到它
+                keywords={['改密码', '密码', '主密码', '密钥库', 'vault', '无密码', 'password']}
+                onSelect={() => {
+                  useApp.getState().setChangePasswordOpen(true)
+                  close()
+                }}
+              >
+                <KeyRound size={14} />
+                修改主密码
+                <span className="ml-auto text-[11px] text-ink-tertiary">
+                  {vaultNoPassword ? '当前未设置' : ''}
+                </span>
+              </Command.Item>
               <Command.Item
                 onSelect={() => {
                   close()

@@ -170,18 +170,34 @@ export interface GroupRecord {
 export interface VaultStatus {
   initialized: boolean
   unlocked: boolean
+  /** 库里没设主密码。启动时据此跳过锁屏直接解锁 */
+  noPassword: boolean
 }
 
 export function vaultStatus(): Promise<VaultStatus> {
   return invoke<VaultStatus>('vault_status')
 }
 
+/**
+ * 首次使用：设置主密码。**空串表示不设密码** —— 库里会记下标记，
+ * 之后启动直接进主界面，锁屏上也只剩一个「解锁」按钮。
+ */
 export function vaultSetup(password: string): Promise<void> {
   return invoke<void>('vault_setup', { password })
 }
 
 export function vaultUnlock(password: string): Promise<void> {
   return invoke<void>('vault_unlock', { password })
+}
+
+/**
+ * 换主密码（`newPassword` 传空串 = 改成不设密码）。
+ *
+ * 后端会用新密码派生的密钥把**所有已保存凭据重新加密**，整段在一个事务里，
+ * 失败就整体回滚。要求密钥库已解锁，且 `oldPassword` 要再验一次。
+ */
+export function vaultChangePassword(oldPassword: string, newPassword: string): Promise<void> {
+  return invoke<void>('vault_change_password', { oldPassword, newPassword })
 }
 
 export function vaultLock(): Promise<void> {

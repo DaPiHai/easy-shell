@@ -6,6 +6,7 @@ import { CommandPalette } from '@/features/palette/CommandPalette'
 import { SftpPanel } from '@/features/sftp/SftpPanel'
 import { ConnectDialog } from '@/features/session/ConnectDialog'
 import { ConfirmDialog } from '@/features/session/ConfirmDialog'
+import { ChangePasswordDialog } from '@/features/session/ChangePasswordDialog'
 import { SettingsDialog } from '@/features/settings/SettingsDialog'
 import { TunnelDialog } from '@/features/tunnel/TunnelDialog'
 import { SnippetsDialog } from '@/features/snippets/SnippetsDialog'
@@ -73,6 +74,8 @@ export default function App() {
           setSnippetsOpen,
           settingsOpen,
           setSettingsOpen,
+          changePasswordOpen,
+          setChangePasswordOpen,
           confirmPrompt,
           setConfirmPrompt,
         } = useApp.getState()
@@ -81,6 +84,7 @@ export default function App() {
         if (tunnelOpen) setTunnelOpen(false)
         if (snippetsOpen) setSnippetsOpen(false)
         if (settingsOpen) setSettingsOpen(false)
+        if (changePasswordOpen) setChangePasswordOpen(false)
         // 安全确认框同理：Esc = 取消（确认框自己没处理，不在这里关就成了关不掉的框）
         if (confirmPrompt) setConfirmPrompt(null)
       }
@@ -209,6 +213,7 @@ export default function App() {
       <CommandPalette />
       <ConnectDialog />
       <ConfirmDialog />
+      <ChangePasswordDialog />
       <SettingsDialog />
       <TunnelDialog />
       <SnippetsDialog />
