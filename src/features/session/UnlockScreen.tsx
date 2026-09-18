@@ -235,15 +235,15 @@ export function UnlockScreen() {
               用恢复密钥解锁
             </div>
             <p className="mb-2.5 text-[11px] leading-relaxed text-ink-tertiary">
-              库里配的是 <span className="font-mono">{vaultRecoveryFp}</span>
-              。选那把对应的私钥即可 —— 私钥只被读一次，不会存进库里。
+              已配置的公钥指纹为 <span className="font-mono">{vaultRecoveryFp}</span>
+              。请选择对应的私钥文件 —— 私钥仅在解锁时读取，不会被保存。
             </p>
             <div className="mb-2 flex gap-1.5">
               <input
                 className={inputClass}
                 value={keyPath}
                 onChange={(e) => setKeyPath(e.target.value)}
-                placeholder={'私钥文件，例如 C:\\Users\\你\\.ssh\\id_ed25519'}
+                placeholder={'私钥文件，例如 C:\\Users\\<用户名>\\.ssh\\id_ed25519'}
                 onKeyDown={(e) => {
                   if (e.key === 'Enter') void submitKey()
                 }}
@@ -300,8 +300,8 @@ export function UnlockScreen() {
             */}
             {vaultRecoveryFp ? (
               <p className="text-[11px] leading-relaxed text-ink-tertiary">
-                主密码忘了就用下面的私钥解锁，没法清空重来 —— 配了恢复密钥的库
-                不再提供「清空」入口，免得有人顺手把你的主机列表抹掉。
+                {'已配置恢复密钥。忘记主密码时，可用对应的 SSH 私钥解锁；' +
+                  '本密钥库不再提供「清空重来」入口，以免他人在锁屏界面清除数据。'}
               </p>
             ) : resetArmed ? (
               <div className="text-[12px] leading-relaxed">

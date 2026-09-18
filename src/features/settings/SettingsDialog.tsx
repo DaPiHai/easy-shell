@@ -98,15 +98,15 @@ function SettingsBody({ onClose }: { onClose: () => void }) {
         : 'import'
 
   const recoveryHint = vaultByRecovery
-    ? '这一轮是用恢复密钥解锁的，要改恢复密钥请先用主密码解锁'
+    ? '本次是用恢复密钥解锁的。更换或移除恢复密钥前，请先用主密码解锁。'
     : vaultNoPassword
       ? vaultRecoveryFp
-        ? '库已经没有主密码了，恢复密钥用不上（凭据本来就只做混淆），可以移除'
-        : '没有主密码就用不上恢复密钥 —— 先设一个主密码，忘密码才有意义'
+        ? '密钥库未设置主密码，恢复密钥已无作用，可以移除。'
+        : '未设置主密码时无需恢复密钥。请先设置主密码。'
       : vaultRecoveryFp
-        ? `忘主密码时用对应的私钥解锁。配的是 ${vaultRecoveryFp}`
-        : '配一把 SSH 公钥：忘主密码时用对应的私钥把库拿回来，数据不丢。' +
-          '注意它只等于那把私钥的保管强度 —— 私钥要是没口令又摆在同一个用户目录里，等于没设'
+        ? `忘记主密码时，可用对应的 SSH 私钥解锁。已配置：${vaultRecoveryFp}`
+        : '配置一把 SSH 公钥：忘记主密码时可用对应的私钥解锁密钥库，数据不会丢失。' +
+          '其安全性等同于该私钥的保管强度 —— 私钥未设置口令、且与本程序位于同一用户目录时，等同于未配置。'
 
   const importRecovery = async () => {
     const picked = await pickFile('选择作为恢复密钥的 SSH 公钥', [
@@ -135,7 +135,7 @@ function SettingsBody({ onClose }: { onClose: () => void }) {
       danger: true,
       title: '移除恢复密钥？',
       message:
-        '移掉之后，忘掉主密码就只能清空密钥库重来（主机、分组、命令片段一起没）。' +
+        '移除后，忘记主密码将无法恢复数据，只能清空密钥库重新初始化，已保存的主机、分组和命令片段都会丢失。' +
         '锁屏上的「忘记主密码」入口也会重新出现。',
       confirmLabel: '仍然移除',
       onConfirm: () => {
@@ -306,7 +306,7 @@ function SettingsBody({ onClose }: { onClose: () => void }) {
               {(recoveryAction === 'import' || recoveryAction === 'replace') && (
                 <button
                   onClick={() => void importRecovery()}
-                  title="选一把 SSH 公钥（.pub）。预览模式下打不开原生文件框"
+                  title="选择 SSH 公钥文件（.pub）。预览模式下不提供原生文件选择框"
                   className={modalButton}
                 >
                   {recoveryAction === 'replace' ? '更换公钥…' : '导入公钥…'}
