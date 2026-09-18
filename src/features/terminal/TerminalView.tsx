@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import { WebglAddon } from '@xterm/addon-webgl'
@@ -21,6 +21,8 @@ import {
 } from '@/lib/api'
 import { useApp, DEFAULT_TERM_FONT } from '@/lib/store'
 import { resolveTermTheme } from '@/lib/termSchemes'
+import { FindBar } from './FindBar'
+import { TerminalMenu } from './TerminalMenu'
 import '@xterm/xterm/css/xterm.css'
 
 /** 多久没收到输出就提示一下，别让用户对着黑屏干等 */
@@ -56,6 +58,27 @@ async function copyText(text: string): Promise<boolean> {
   return ok
 }
 
+/**
+ * 从剪贴板粘到终端里。
+ *
+ * Ctrl+Shift+V 与右键菜单共用：读不到剪贴板是 webview 的常见限制，两处必须给同一句提示，
+ * 不然会变成「快捷键能粘、菜单点了没反应」这种查不出来的差异。
+ * 传 getter 而不是实例：读剪贴板是异步的，读完那个终端可能已经卸载了。
+ */
+function pasteFromClipboard(getTerm: () => Terminal | null) {
+  void navigator.clipboard
+    .readText()
+    .then((text) => {
+      const term = getTerm()
+      if (text && term) term.paste(text)
+    })
+    .catch(() => {
+      // 明确告诉用户还有 Ctrl+V 这条路 —— 别提右键菜单之外的原生菜单，
+      // 那是我们刚换掉的东西
+      useApp.getState().setError('读不到剪贴板内容，试试 Ctrl+V')
+    })
+}
+
 interface Props {
   /** 远程 ssh 必填；本地 shell 不需要 */
   sessionId?: string
@@ -66,6 +89,7 @@ interface Props {
   /**
    * 是否作为命令片段的投递目标，默认 true。
    * 分屏时左右两个终端共用 tabId，只有一边该接命令片段，另一边传 false。
+   * 查找栏也认这一位 —— 两者都是「这条标签的终端」级别的动作，都只挂左半边。
    */
   snippets?: boolean
   onClosed?: () => void
@@ -91,6 +115,9 @@ export function TerminalView({
   /** 手动重连。由第一个 effect 填，标签栏通过 store 间接调它 */
   const manualReconnectRef = useRef<(() => void) | null>(null)
 
+  /** 右键菜单的位置。null = 没开。位置用 clientX/clientY（逻辑像素），直接喂给 fixed 定位 */
+  const [menuAt, setMenuAt] = useState<{ x: number; y: number } | null>(null)
+
   // 字号是外部可改的，得能拿到 term 和 safeFit 才能在变化时应用
   const termRef = useRef<Terminal | null>(null)
   const safeFitRef = useRef<(() => void) | null>(null)
@@ -114,6 +141,14 @@ export function TerminalView({
         useApp.getState().theme,
         useApp.getState().customSchemes,
       ),
+      /**
+       * 必须开：查找用的 `@xterm/addon-search` 靠 `registerDecoration` 画匹配高亮，
+       * 而那个 API 在 xterm 里标着 proposed —— 不开的话搜索当场抛
+       * 「You must set the allowProposedApi option to true」，整个标签被 ErrorBoundary 接走。
+       * 风险可控：xterm 的版本在本仓库是锁死的（升级要自己动 package.json），
+       * 不存在"依赖偷偷升级、proposed API 变了"这种情况。
+       */
+      allowProposedApi: true,
     })
 
     const fit = new FitAddon()
@@ -203,20 +238,15 @@ export function TerminalView({
         return false
       }
       if (e.ctrlKey && e.shiftKey && key === 'v') {
-        void navigator.clipboard
-          .readText()
-          .then((text) => {
-            if (text && !disposed) term.paste(text)
-          })
-          .catch(() => {
-            // 读不到剪贴板（webview 常见限制），明确告诉用户还有 Ctrl+V 这条路 ——
-            // 别提右键：右键菜单还没做，那是 P2-2
-            useApp
-              .getState()
-              .setError('读不到剪贴板内容，试试 Ctrl+V')
-          })
+        pasteFromClipboard(() => (disposed ? null : term))
         return false
       }
+      /**
+       * Ctrl+Shift+F 是应用层的「终端内查找」，App.tsx 已经在 capture 阶段开好了查找栏。
+       * 这里再吞一次是必须的：xterm **不看 `defaultPrevented`**，不吞的话它还会顺手把 ^F
+       * 发给远端（readline 里是"前进一个字符"），光标平白挪一格。
+       */
+      if (e.ctrlKey && e.shiftKey && key === 'f') return false
       return true
     })
 
@@ -459,6 +489,14 @@ export function TerminalView({
   }, [tabId, snippets])
 
   /**
+   * 查找栏开不开，由 store 里「哪个标签在搜」决定 —— 快捷键、状态栏、命令面板
+   * 三处入口都够不着组件内部的 state，只能放那儿。分屏时两半共用 tabId，
+   * 所以再要求 snippets：搜索框只该有一个，挂在左半边那个终端上。
+   */
+  const findTabId = useApp((s) => s.findTabId)
+  const findOpen = !!tabId && snippets && findTabId === tabId
+
+  /**
    * padding 留在外层，xterm 挂到不带 padding 的内层。
    *
    * FitAddon 按父元素的**盒高**算行列，而 terminal 元素是从 padding 之后的 content box
@@ -469,11 +507,69 @@ export function TerminalView({
     // padding 那一圈用终端自己的底色，而不是画布色：换了非默认配色之后，
     // 画布色会在终端周围留一圈对不上的边。应用默认那套里 --term-bg 本就等于
     // --canvas（深色都是 #010102、浅色都是 #ffffff），所以观感不变。
+    // relative 是给查找栏做定位锚点：它浮在终端右上角，不挤占终端的行列
     <div
-      className="h-full w-full overflow-hidden p-2"
+      className="relative h-full w-full overflow-hidden p-2"
       style={{ background: xtermTheme.background }}
+      onContextMenu={(e) => {
+        // 菜单自己身上的右键别再重开一次（否则菜单会跳到光标下）
+        if ((e.target as HTMLElement).closest('[role="menu"]')) return
+        // xterm 自己也监听右键，但它只把选中文本塞进 textarea 好让**原生菜单**的复制能用，
+        // 并不拦原生菜单 —— 想换成自绘菜单就得自己 preventDefault
+        e.preventDefault()
+        setMenuAt({ x: e.clientX, y: e.clientY })
+      }}
     >
       <div ref={hostRef} className="h-full w-full" />
+      {findOpen && <FindBar termRef={termRef} onClose={() => useApp.getState().closeFind()} />}
+      {menuAt && (
+        <TerminalMenu
+          x={menuAt.x}
+          y={menuAt.y}
+          onClose={() => setMenuAt(null)}
+          items={[
+            {
+              label: '复制',
+              hint: 'Ctrl+Shift+C',
+              // 没选中东西时置灰，而不是点了没反应
+              disabled: !termRef.current?.hasSelection(),
+              onSelect: () => {
+                const term = termRef.current
+                if (term) void copyText(term.getSelection())
+              },
+            },
+            {
+              label: '粘贴',
+              hint: 'Ctrl+Shift+V',
+              onSelect: () => pasteFromClipboard(() => termRef.current),
+            },
+            { label: '全选', onSelect: () => termRef.current?.selectAll() },
+            { label: '清屏', onSelect: () => termRef.current?.clear() },
+            {
+              label: '重置终端',
+              danger: true,
+              onSelect: () => {
+                const term = termRef.current
+                if (!term) return
+                // 回滚历史丢了就找不回来，所以问一句（远端不受影响，别让人以为会重启会话）
+                useApp.getState().setConfirmPrompt({
+                  kind: 'confirm',
+                  title: '重置终端',
+                  message: '会清掉这个终端的回滚历史。远端那边的会话不受影响，继续吗？',
+                  confirmLabel: '重置',
+                  danger: true,
+                  onConfirm: () => term.reset(),
+                })
+              },
+            },
+            {
+              label: '查找…',
+              hint: 'Ctrl+Shift+F',
+              onSelect: () => useApp.getState().toggleFind(),
+            },
+          ]}
+        />
+      )}
     </div>
   )
 }

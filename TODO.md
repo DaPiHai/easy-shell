@@ -35,8 +35,6 @@
 
 ## P2 体验补齐
 
-- **P2-1** 终端内搜索 —— `@xterm/addon-search` 没装（`package.json` 只有 canvas/fit/unicode11/webgl）。
-- **P2-2** 终端右键菜单，以及清屏/重置终端的入口（现在只有收到首条输出时自动 `term.clear()`，没有用户入口）。
 - **P2-3** 标签重命名 / 拖动排序 / 固定 —— `Tab` 接口只有 id/title/kind/sessionId/hostId/split/editorTarget。
 - **P2-4** 会话树搜索过滤 —— 侧栏只能折叠分组，命令面板只过滤静态命令项、不含主机。
 - **P2-5** **关窗确认 / 托盘** —— 现在关窗即退出进程，所有连接一并消失，没有拦截也没有托盘常驻。

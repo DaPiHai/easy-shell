@@ -28,6 +28,12 @@ import { APP_SCHEME_ID, isKnownSchemeId, isValidScheme, type TermScheme } from '
 /** 终端字号可调范围。再小就看不清，再大一个屏幕放不下几行 */
 export const MIN_FONT_SIZE = 9
 export const MAX_FONT_SIZE = 28
+/**
+ * 终端默认字号。1080p 上 13px 刚好，高分屏偏小 —— 所以是可调的。
+ * Ctrl+0、状态栏那个「13px」、命令面板的复位项、设置面板的复位都认它，
+ * 别再各写一遍：改默认值的时候漏掉一处，用户就会发现"复位到的地方不一样"。
+ */
+export const DEFAULT_FONT_SIZE = 13
 
 /** 终端默认字体栈。用户在设置里填了自定义字体就用他填的 */
 export const DEFAULT_TERM_FONT =
@@ -182,6 +188,19 @@ export interface Tab {
   editorTarget?: EditorTarget
 }
 
+/**
+ * 这条标签能不能分屏。
+ *
+ * 只有**远程终端**能：分屏靠的是同一条 SSH 会话上再开一条 shell 通道，
+ * 本地 Shell 没有第二条通道可开，SFTP / 编辑器更没有。
+ * 「哪些标签能分屏」只在这里定义一次 —— 标签栏的按钮、命令面板的条目、
+ * store 的 `toggleSplit` 都认它。之前命令面板直接调 toggleSplit 没有守卫，
+ * 在本地 Shell 标签上按下去只是翻了个没人读的标志位，界面毫无变化也不提示。
+ */
+export function isSplittable(tab: Tab | undefined | null): tab is Tab {
+  return !!tab && tab.kind === 'terminal' && !!tab.sessionId
+}
+
 export type TransferStatus = 'active' | 'done' | 'error'
 
 export interface TransferItem {
@@ -282,6 +301,27 @@ interface AppState {
    */
   sidebarCollapsed: boolean
   toggleSidebar: () => void
+
+  /**
+   * 哪个标签的「在终端里查找」栏开着，全局只有一个。
+   *
+   * 放 store 而不是 TerminalView 自己的 state：快捷键、状态栏、命令面板三处
+   * 都要能把它叫出来，而它们够不着某个组件内部的 state。
+   * 切标签**不清**它 —— 跟 Windows Terminal / VS Code 一样，搜索框和查询内容
+   * 跟着那条标签走，切回来还在。同时在两条终端标签里搜做不到（一个值只指一条），
+   * 在后一条里打开时前一条自然收起。
+   */
+  findTabId: string | null
+  /**
+   * 当前标签里头有没有能搜的终端，有就返回它。
+   * 编辑器有自己的 Ctrl+F（CodeMirror 自带），SFTP 还没有 —— 在那些标签上叫查找，
+   * 该说一句而不是弹一个搜不到东西的框。
+   */
+  findableTab: () => Tab | null
+  /** 开/关当前标签的查找栏。三处入口都调它，别各自判断 */
+  toggleFind: () => void
+  /** 关掉查找栏（查找栏自己的 ✕ / Esc 走这条，不经过 toggle） */
+  closeFind: () => void
 
   tabs: Tab[]
   activeTabId: string | null
@@ -530,7 +570,7 @@ export const useApp = create<AppState>((set, get) => ({
       ),
     ]
     await vaultLock()
-    set({ phase: 'locked', hosts: [], groups: [], tabs: [], activeTabId: null })
+    set({ phase: 'locked', hosts: [], groups: [], tabs: [], activeTabId: null, findTabId: null })
     for (const id of sessionIds) void sshClose(id)
   },
 
@@ -549,6 +589,7 @@ export const useApp = create<AppState>((set, get) => ({
       groups: [],
       tabs: [],
       activeTabId: null,
+      findTabId: null,
     })
   },
 
@@ -602,6 +643,21 @@ export const useApp = create<AppState>((set, get) => ({
   activeTabId: null,
   setActiveTab: (id) => set({ activeTabId: id }),
 
+  findTabId: null,
+  findableTab: () => {
+    const { tabs, activeTabId } = get()
+    const tab = tabs.find((t) => t.id === activeTabId)
+    if (!tab) return null
+    return tab.kind === 'terminal' || tab.kind === 'local' ? tab : null
+  },
+  toggleFind: () =>
+    set((s) => {
+      const tab = get().findableTab()
+      if (!tab) return {}
+      return { findTabId: s.findTabId === tab.id ? null : tab.id }
+    }),
+  closeFind: () => set({ findTabId: null }),
+
   addTab: (tab) => {
     const id = `tab-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`
     set((s) => ({ tabs: [...s.tabs, { ...tab, id }], activeTabId: id }))
@@ -614,7 +670,7 @@ export const useApp = create<AppState>((set, get) => ({
       const tabs = s.tabs.filter((t) => t.id !== id)
       const nextActive =
         s.activeTabId === id ? (tabs[Math.min(index, tabs.length - 1)]?.id ?? null) : s.activeTabId
-      return { tabs, activeTabId: nextActive }
+      return { tabs, activeTabId: nextActive, findTabId: s.findTabId === id ? null : s.findTabId }
     }),
 
   requestCloseTab: (id) => {
@@ -647,10 +703,14 @@ export const useApp = create<AppState>((set, get) => ({
       return { editorGuards: next }
     }),
 
+  // 守卫放在这里而不是各入口：不是可分的标签就一动不动。
+  // 入口（标签栏、命令面板）各自还会给一句提示，这里只保证状态不被翻坏
   toggleSplit: (id) =>
-    set((s) => ({
-      tabs: s.tabs.map((t) => (t.id === id ? { ...t, split: !t.split } : t)),
-    })),
+    set((s) => {
+      const tab = s.tabs.find((t) => t.id === id)
+      if (!isSplittable(tab)) return {}
+      return { tabs: s.tabs.map((t) => (t.id === id ? { ...t, split: !t.split } : t)) }
+    }),
 
   // 分组的取名/改名放 store 而不是组件里：会话树和命令面板都要用，
   // 而且都得走自绘输入弹窗（window.prompt 在打包版里是原生框，观感对不上）
@@ -725,9 +785,9 @@ export const useApp = create<AppState>((set, get) => ({
   termFontSize: (() => {
     try {
       const n = Number(localStorage.getItem('termFontSize'))
-      return Number.isFinite(n) && n >= MIN_FONT_SIZE && n <= MAX_FONT_SIZE ? n : 13
+      return Number.isFinite(n) && n >= MIN_FONT_SIZE && n <= MAX_FONT_SIZE ? n : DEFAULT_FONT_SIZE
     } catch {
-      return 13
+      return DEFAULT_FONT_SIZE
     }
   })(),
   setTermFontSize: (size) => {
@@ -843,7 +903,7 @@ export const useApp = create<AppState>((set, get) => ({
     get().setTheme('dark')
     // 自定义配色方案本身不删：那是用户自己造的东西，不是「设置」
     get().setTermScheme(APP_SCHEME_ID)
-    get().setTermFontSize(13)
+    get().setTermFontSize(DEFAULT_FONT_SIZE)
     get().setTermFontFamily('')
     get().setTermLineHeight(1.5)
     get().setTermCursorStyle('bar')

@@ -2,7 +2,9 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import CodeMirror from '@uiw/react-codemirror'
 import { LanguageDescription, type LanguageSupport } from '@codemirror/language'
 import { languages } from '@codemirror/language-data'
-import { Check, Loader2, Save } from 'lucide-react'
+import { openSearchPanel } from '@codemirror/search'
+import type { EditorView as CodeMirrorView } from '@codemirror/view'
+import { Check, Loader2, Save, Search } from 'lucide-react'
 import {
   localReadText,
   localWriteText,
@@ -68,6 +70,16 @@ export function EditorView({ target, tabId }: { target: EditorTarget; tabId?: st
    */
   const originalRef = useRef('')
   originalRef.current = original
+
+  /**
+   * CodeMirror 的 EditorView 实例，给工具栏的「查找」按钮用。
+   *
+   * 查找面板是 CodeMirror 自带的（`@codemirror/search`），但它的入口只有 Ctrl+F ——
+   * 工具栏上没有任何按钮，等于"知道才用得上"。这里拿到 view 就能调 `openSearchPanel`。
+   * 注意 `@uiw/react-codemirror` 只 re-export view / state / basic-setup，**不含 search**，
+   * 所以那个包是本项目的直接依赖（版本必须与 @uiw 用的那份去重，见 AGENTS.md）。
+   */
+  const cmViewRef = useRef<CodeMirrorView | null>(null)
 
   useEffect(() => {
     let alive = true
@@ -160,10 +172,33 @@ export function EditorView({ target, tabId }: { target: EditorTarget; tabId?: st
         </span>
         <span className="truncate text-[11px] text-ink-tertiary">{target.path}</span>
         {dirty && <span className="shrink-0 text-[11px] text-warning">未保存</span>}
+        {/*
+          查找/替换面板的入口。CodeMirror 的面板本来只能按 Ctrl+F 叫出来，
+          工具栏上没有任何痕迹 —— 跟终端里的查找是同一类问题（功能在，入口不存在）。
+        */}
+        <button
+          onClick={() => {
+            const view = cmViewRef.current
+            if (!view) return
+            try {
+              if (!openSearchPanel(view)) {
+                setError('打不开查找面板 —— 编辑器可能还没就绪，稍后再试')
+              }
+            } catch (e) {
+              // 面板打不开不该把整个标签带崩，说清楚就行
+              setError(`打不开查找面板：${String(e)}`)
+            }
+          }}
+          className="ml-auto flex shrink-0 items-center gap-1 rounded-md border border-hairline px-2 py-1 text-[12px] text-ink-muted transition-colors hover:bg-surface-2 hover:text-ink"
+          title="在文件里查找 / 替换（Ctrl+F）"
+        >
+          <Search size={12} />
+          查找
+        </button>
         <button
           onClick={() => void save()}
           disabled={saving || !dirty}
-          className="ml-auto flex shrink-0 items-center gap-1 rounded-md border border-hairline px-2 py-1 text-[12px] text-ink-muted transition-colors hover:bg-surface-2 hover:text-ink disabled:opacity-40 disabled:hover:bg-transparent"
+          className="flex shrink-0 items-center gap-1 rounded-md border border-hairline px-2 py-1 text-[12px] text-ink-muted transition-colors hover:bg-surface-2 hover:text-ink disabled:opacity-40 disabled:hover:bg-transparent"
           title="Ctrl+S"
         >
           {saving ? (
@@ -189,6 +224,11 @@ export function EditorView({ target, tabId }: { target: EditorTarget; tabId?: st
             foldGutter: false,
             highlightActiveLine: true,
             autocompletion: false,
+          }}
+          // 拿到 view 才能用工具栏的「查找」调 openSearchPanel。
+          // 语言包加载完 extensions 会变，@uiw 重建 view 时这里会再回调一次，ref 跟着更新
+          onCreateEditor={(view) => {
+            cmViewRef.current = view
           }}
           className="h-full text-[13px]"
         />

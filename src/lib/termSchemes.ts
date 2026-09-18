@@ -589,6 +589,65 @@ function toXtermTheme(p: TermPalette): ITheme {
   }
 }
 
+/** 颜色解析：`#rgb` / `#rrggbb` / `#rrggbbaa` / `rgb()` / `rgba()`。解析不了返回 null */
+function parseColor(color: string): { r: number; g: number; b: number; a: number } | null {
+  const text = color.trim().toLowerCase()
+  if (text.startsWith('#')) {
+    const hex = text.slice(1)
+    const full =
+      hex.length === 3
+        ? hex
+            .split('')
+            .map((c) => c + c)
+            .join('')
+        : hex
+    if (!/^[0-9a-f]{6}([0-9a-f]{2})?$/.test(full)) return null
+    return {
+      r: parseInt(full.slice(0, 2), 16),
+      g: parseInt(full.slice(2, 4), 16),
+      b: parseInt(full.slice(4, 6), 16),
+      a: full.length === 8 ? parseInt(full.slice(6, 8), 16) / 255 : 1,
+    }
+  }
+  const match = /^rgba?\(([^)]+)\)$/.exec(text)
+  if (!match) return null
+  const parts = match[1].split(',').map((p) => Number(p.trim()))
+  if (parts.length < 3 || parts.slice(0, 3).some((n) => !Number.isFinite(n))) return null
+  const alpha = parts[3]
+  return {
+    r: parts[0],
+    g: parts[1],
+    b: parts[2],
+    a: alpha === undefined || !Number.isFinite(alpha) ? 1 : alpha,
+  }
+}
+
+/**
+ * 查找高亮用的两个实色（普通匹配 / 当前匹配）。
+ *
+ * xterm 的搜索装饰只认 `#RRGGBB`，喂 rgba 进去它当没给 —— 所以得把方案自己的
+ * **选中色**按背景压平成实色。挑选中色是因为它就是这套配色里专为「文字底下铺一层」
+ * 定的颜色：8 套方案、深浅两版、用户自定义，都不会糊掉。
+ * 当前匹配必须明显比普通匹配重，不然按「下一个」时看不出跳到哪了。
+ */
+export function searchHighlightColors(p: TermPalette): { match: string; active: string } {
+  const base = parseColor(p.selection ?? withAlpha(p.foreground, 0.28))
+  const bg = parseColor(p.background)
+  // 解析不了就退回应用强调色：宁可不好看，也不能让高亮整个消失
+  if (!base || !bg) return { match: '#5e6ad2', active: '#828fff' }
+
+  const flatten = (alpha: number) => {
+    const a = Math.min(0.85, Math.max(0, alpha))
+    const channel = (from: number, to: number) =>
+      Math.round(from * (1 - a) + to * a)
+        .toString(16)
+        .padStart(2, '0')
+    return `#${channel(bg.r, base.r)}${channel(bg.g, base.g)}${channel(bg.b, base.b)}`
+  }
+
+  return { match: flatten(base.a), active: flatten(Math.max(base.a * 2, base.a + 0.25)) }
+}
+
 /** 找一套方案：内置 / 自定义。'app' 不在表里，返回 null 由调用方走 CSS 变量 */
 export function findScheme(id: string, customs: TermScheme[] = []): TermScheme | null {
   if (id === APP_SCHEME_ID) return null

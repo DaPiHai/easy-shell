@@ -1,5 +1,14 @@
-import { FileCode2, Lock, PanelLeftClose, PanelLeftOpen, SquareTerminal, Terminal } from 'lucide-react'
-import { MAX_FONT_SIZE, MIN_FONT_SIZE, useApp } from '@/lib/store'
+import {
+  Command,
+  FileCode2,
+  Lock,
+  PanelLeftClose,
+  PanelLeftOpen,
+  Search,
+  SquareTerminal,
+  Terminal,
+} from 'lucide-react'
+import { DEFAULT_FONT_SIZE, MAX_FONT_SIZE, MIN_FONT_SIZE, useApp } from '@/lib/store'
 import { SchemeMenu } from '@/features/settings/SchemeMenu'
 
 const isMac = navigator.platform.toLowerCase().includes('mac')
@@ -68,12 +77,17 @@ export function StatusBar() {
     activeTabId,
     lockVault,
     termFontSize,
+    setTermFontSize,
     bumpTermFontSize,
     sidebarCollapsed,
     toggleSidebar,
+    findTabId,
   } = useApp()
   // 写死"未连接"是纯假信息 —— 至少把当前这个标签是什么说清楚
   const active = tabs.find((t) => t.id === activeTabId)
+  // 有终端可搜的标签（远程 / 本地），查找按钮才亮
+  const findable = !!active && (active.kind === 'terminal' || active.kind === 'local')
+  const findOpen = !!active && findTabId === active.id
   const kindLabel = !active
     ? null
     : active.kind === 'local'
@@ -96,6 +110,19 @@ export function StatusBar() {
       </div>
       <div className="flex items-center gap-3">
         {/*
+          命令面板的常驻入口。以前只有空状态里有按钮，一开标签就只剩 Ctrl+K ——
+          而命令面板恰恰是"不知道有什么功能时用的东西"，它自己最不该依赖记忆。
+          放状态栏而不是侧栏头：侧栏一收起侧栏头整个不渲染，这里才是常驻的把手。
+        */}
+        <button
+          onClick={() => useApp.getState().setPaletteOpen(true)}
+          className="flex items-center gap-1 transition-colors hover:text-ink"
+          title="命令面板（Ctrl+K）"
+        >
+          <Command size={11} />
+          命令
+        </button>
+        {/*
           侧栏收起后这里就是唯一的常驻入口 —— 快捷键和命令面板都是"知道才用得上"的，
           侧栏一没就再没有看得见的把手了。图标方向跟着当前状态走：现在开着就是往左收。
         */}
@@ -107,6 +134,25 @@ export function StatusBar() {
           {sidebarCollapsed ? <PanelLeftOpen size={11} /> : <PanelLeftClose size={11} />}
           侧栏
         </button>
+        {/*
+          终端内查找：此前连快捷键都没有，等于没有入口。非终端标签置灰 ——
+          编辑器有自己的 Ctrl+F，SFTP 还没有，别给假按钮。
+        */}
+        <button
+          onClick={() => useApp.getState().toggleFind()}
+          disabled={!findable}
+          className={`flex items-center gap-1 transition-colors hover:text-ink disabled:opacity-40 disabled:hover:text-ink-subtle ${
+            findOpen ? 'text-ink' : ''
+          }`}
+          title={
+            findable
+              ? '在当前终端里查找（Ctrl+Shift+F）'
+              : '查找只对终端标签有效（编辑器用 Ctrl+F）'
+          }
+        >
+          <Search size={11} />
+          查找
+        </button>
         {/* 字号以前只有 Ctrl+= / Ctrl+- / Ctrl+0 三个快捷键，界面上没有任何入口 */}
         <div className="flex items-center gap-1" title={`终端字号 ${termFontSize}px`}>
           <button
@@ -117,7 +163,14 @@ export function StatusBar() {
           >
             A-
           </button>
-          <span className="w-8 text-center text-ink-tertiary">{termFontSize}px</span>
+          {/* 当前值本身可点复位：以前只有 Ctrl+0 和命令面板能回到默认字号 */}
+          <button
+            onClick={() => setTermFontSize(DEFAULT_FONT_SIZE)}
+            className="w-8 text-center text-ink-tertiary transition-colors hover:text-ink"
+            title={`复位终端字号（Ctrl+0）· 默认 ${DEFAULT_FONT_SIZE}px`}
+          >
+            {termFontSize}px
+          </button>
           <button
             onClick={() => bumpTermFontSize(1)}
             disabled={termFontSize >= MAX_FONT_SIZE}

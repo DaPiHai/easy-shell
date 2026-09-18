@@ -11,6 +11,7 @@ import {
   Plus,
   RotateCcw,
   ScrollText,
+  Search,
   Settings,
   SunMoon,
   TerminalSquare,
@@ -18,7 +19,7 @@ import {
   ZoomIn,
   ZoomOut,
 } from 'lucide-react'
-import { useApp } from '@/lib/store'
+import { isSplittable, useApp, DEFAULT_FONT_SIZE } from '@/lib/store'
 import { listSchemeChoices } from '@/lib/termSchemes'
 import { Swatches } from '../settings/Swatches'
 
@@ -133,13 +134,30 @@ export function CommandPalette() {
               </Command.Item>
               <Command.Item
                 onSelect={() => {
-                  useApp.getState().setTermFontSize(13)
+                  useApp.getState().setTermFontSize(DEFAULT_FONT_SIZE)
                   close()
                 }}
               >
                 <RotateCcw size={14} />
                 复位终端字号
                 <span className="ml-auto text-[11px] text-ink-tertiary">Ctrl 0</span>
+              </Command.Item>
+              <Command.Item
+                // cmdk 只按条目文字过滤，只写「查找」的话搜「搜索」「关键词」都找不到它
+                keywords={['搜索', '查找', '关键词', 'search', 'find', '高亮']}
+                onSelect={() => {
+                  const s = useApp.getState()
+                  close()
+                  if (!s.findableTab()) {
+                    s.setError('当前标签没有终端可搜 —— 编辑器用 Ctrl+F；SFTP 的搜索还没做')
+                    return
+                  }
+                  s.toggleFind()
+                }}
+              >
+                <Search size={14} />
+                在终端中查找
+                <span className="ml-auto text-[11px] text-ink-tertiary">Ctrl Shift F</span>
               </Command.Item>
               <Command.Item
                 onSelect={() => {
@@ -200,8 +218,15 @@ export function CommandPalette() {
               <Command.Item
                 onSelect={() => {
                   const s = useApp.getState()
-                  if (s.activeTabId) s.toggleSplit(s.activeTabId)
                   close()
+                  const tab = s.tabs.find((t) => t.id === s.activeTabId)
+                  // 分屏只对远程终端有效。不提示的话，按下去什么都不发生，
+                  // 用户只会以为按键/菜单坏了
+                  if (!isSplittable(tab)) {
+                    s.setError('分屏只对远程终端标签有效 —— 本地 Shell 和文件面板没有第二条通道')
+                    return
+                  }
+                  s.toggleSplit(tab.id)
                 }}
               >
                 <Columns size={14} />

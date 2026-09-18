@@ -1,5 +1,5 @@
 import { Columns2, FileCode2, FolderOpen, FolderTree, RotateCw, Terminal, X } from 'lucide-react'
-import { useApp } from '@/lib/store'
+import { isSplittable, useApp } from '@/lib/store'
 
 export function TabBar() {
   const { tabs, activeTabId, setActiveTab, requestCloseTab, toggleSplit, deadTabs, reconnectSinks } =
@@ -23,7 +23,12 @@ export function TabBar() {
                 requestCloseTab(tab.id)
               }
             }}
-            className={`group relative flex h-9 cursor-pointer items-center gap-2 border-r border-hairline px-3 text-[13px] transition-colors ${
+            // min-w-0 两处都不能省：flex 子项的 min-width 默认是 min-content，
+            // 而标题是 nowrap 的（truncate），于是标签根本缩不动 —— 最小窗口宽度下
+            // 开到第 5 个标签起就被挤出可视区，还没有滚动条可以找回来。
+            // 标题 span 也要 min-w-0 才会真的让位给省略号
+            title={tab.title}
+            className={`group relative flex h-9 min-w-0 cursor-pointer items-center gap-2 border-r border-hairline px-3 text-[13px] transition-colors ${
               active ? 'bg-surface-1 text-ink' : 'text-ink-subtle hover:bg-surface-1'
             }`}
           >
@@ -34,7 +39,7 @@ export function TabBar() {
             ) : (
               <Terminal size={12} className="shrink-0 text-ink-tertiary" />
             )}
-            <span className="max-w-40 truncate">{tab.title}</span>
+            <span className="min-w-0 max-w-40 truncate">{tab.title}</span>
             {/* 断线且自动重连已放弃：给个 ↻。不给的话只能关标签重开，现场全没了 */}
             {deadTabs[tab.id] && (
               <span title="重新连接" className="flex shrink-0">
@@ -72,7 +77,7 @@ export function TabBar() {
               </span>
             )}
             {/* 分屏只对远程终端有意义：本地 shell 和文件面板没这个需求 */}
-            {tab.kind === 'terminal' && (
+            {isSplittable(tab) && (
               // title 挂 span 上：svg 元素的 title 属性不弹提示
               <span title={tab.split ? '合并分屏' : '左右分屏'} className="flex shrink-0">
                 <Columns2

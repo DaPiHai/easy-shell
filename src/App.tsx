@@ -12,7 +12,7 @@ import { SnippetsDialog } from '@/features/snippets/SnippetsDialog'
 import { EditorView } from '@/features/editor/EditorView'
 import { UnlockScreen } from '@/features/session/UnlockScreen'
 import { EmptyState, StatusBar } from '@/components/EmptyState'
-import { useApp } from '@/lib/store'
+import { useApp, DEFAULT_FONT_SIZE } from '@/lib/store'
 import { SplitPane } from '@/components/SplitPane'
 import { ErrorBoundary } from '@/components/ErrorBoundary'
 
@@ -47,6 +47,20 @@ export default function App() {
       if ((e.metaKey || e.ctrlKey) && e.shiftKey && !e.altKey && e.key.toLowerCase() === 'b') {
         e.preventDefault()
         useApp.getState().toggleSidebar()
+        return
+      }
+      /**
+       * Ctrl+Shift+F 在当前终端里查找。
+       *
+       * 用带 Shift 的那版是 Windows Terminal / gnome-terminal 的习惯：裸 Ctrl+F 是控制字符
+       * （readline 里是"前进一个字符"），抢了会得罪真在终端里干活的人。
+       * 其他标签一律放行不拦 —— 编辑器里 CodeMirror 自带 Ctrl+F，SFTP 的搜索还没做，
+       * 在这儿吃掉按键只会让人以为按键坏了。
+       */
+      if ((e.metaKey || e.ctrlKey) && e.shiftKey && !e.altKey && e.key.toLowerCase() === 'f') {
+        if (!useApp.getState().findableTab()) return
+        e.preventDefault()
+        useApp.getState().toggleFind()
         return
       }
       if (e.key === 'Escape') {
@@ -116,7 +130,7 @@ export default function App() {
           bumpTermFontSize(-1)
         } else if (e.key === '0') {
           e.preventDefault()
-          setTermFontSize(13)
+          setTermFontSize(DEFAULT_FONT_SIZE)
         }
       }
     }
