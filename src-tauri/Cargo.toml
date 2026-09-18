@@ -32,6 +32,14 @@ rand = "0.9.5"
 dirs = "7.0.0"
 russh-sftp = "3.0.0"
 portable-pty = "0.9.0"
+# 恢复密钥（`recovery.rs`）：把库密钥封给一把 SSH 公钥，忘主密码时用私钥开封。
+# Ed25519 → X25519 的 ECDH + HKDF + AES-GCM。这三个都是**russh 已有的传递依赖**
+# （都已在 Cargo.lock 里），提成直接依赖不用新增任何下载。
+# SSH 密钥的解析直接走 russh 的 re-export（`russh::keys::ssh_key`），不单独声明
+# ssh-key —— 那份被 russh 钉死在 `=0.7.0-rc.11`，自己写一个范围会解析出第二个副本。
+curve25519-dalek = "5"
+sha2 = "0.10"
+hkdf = "0.12"
 
 [dev-dependencies]
 # russh 0.63 依赖 rand 0.10，而主代码用的是 0.9，两边 semver 不兼容只能并存。

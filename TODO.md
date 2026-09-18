@@ -52,6 +52,13 @@
 
 - **P3-2 vault 导出 / 导入** —— 换机器只能手拷 `vault.db` 并记得原密码；snippets 与 hosts 混在同一个
   库里，也没法只导出主机列表。
+- **P3-6 恢复密钥支持 RSA / ECDSA 公钥** —— 现在只认 ed25519（RSA 要 RSA-OAEP、ECDSA 要
+  P-256 ECDH，是另两套构造，见 `recovery.rs` 顶部）。老环境里 `ssh-keygen -t rsa` 仍然常见，
+  他们现在会被明确拒绝（不是静默失败），但那条路还没有。加的时候记得 `ssh-key` 的 `rsa` feature
+  已经由 russh 打开，`rsa` crate 也在 Cargo.lock 里。
+- **P3-7 硬件令牌 / FIDO 密钥** —— `sk-ssh-ed25519@openssh.com` 这类密钥的私钥在设备里，
+  恢复密钥用它会非常合适（私钥根本不在磁盘上）。前提是先支持签名挑战式解锁：
+  现在封的是「用公钥加密」，而安全密钥只能签名，得换成「存一段挑战、解锁时验证签名」。
 - **P3-3 空闲自动锁定** —— 没有任何计时器；现在有了锁定入口（见 `PLAN.md`），配一个计时器很自然。
 - **P3-4 known_hosts 管理界面**（列表/查看/删除，现在只有「忘掉」）+ 格式与 OpenSSH 对齐：
   键是自造的 `host:port`，而 OpenSSH 对非 22 端口用 `[host]:port`，也不认 hashed hostname、

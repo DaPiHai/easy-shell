@@ -15,6 +15,7 @@ import {
   useApp,
   type CursorStyle,
 } from '@/lib/store'
+import { isDesktop, pickFile } from '@/lib/api'
 import { ModalActions, ModalShell, modalButton } from '@/components/ModalShell'
 import { NumberField, Row, Section, Segmented } from './controls'
 import { TermSchemeSection } from './TermSchemeSection'
@@ -55,7 +56,13 @@ function SettingsBody({ onClose }: { onClose: () => void }) {
     setTransferResumeDefault,
     resetSettings,
     vaultNoPassword,
+    vaultRecoveryFp,
+    vaultByRecovery,
+    setRecoveryKey,
+    clearRecoveryKey,
     setChangePasswordOpen,
+    setConfirmPrompt,
+    setError,
   } = useApp()
 
   const [fontDraft, setFontDraft] = useState(termFontFamily)
@@ -68,6 +75,73 @@ function SettingsBody({ onClose }: { onClose: () => void }) {
   const openChangePassword = () => {
     onClose()
     setChangePasswordOpen(true)
+  }
+
+  /**
+   * 恢复密钥那一行有四种形态：
+   * - `import`：还没配 → 「导入公钥…」
+   * - `replace`：配过了 → 显示指纹，能换能移除
+   * - `remove`：配过但已经无意义（库改成不设密码了，忘密码这件事不存在了）→ 只能移除
+   * - `hidden`：用不上（没设主密码）或这轮不许改（用恢复密钥解锁进来的）
+   *
+   * 「用不上」和「不许改」都**不摆按钮**：给一个点下去必然报错的按钮，
+   * 比没有按钮更让人困惑。
+   */
+  const recoveryAction: 'import' | 'replace' | 'remove' | 'hidden' = vaultByRecovery
+    ? 'hidden'
+    : vaultRecoveryFp
+      ? vaultNoPassword
+        ? 'remove'
+        : 'replace'
+      : vaultNoPassword
+        ? 'hidden'
+        : 'import'
+
+  const recoveryHint = vaultByRecovery
+    ? '这一轮是用恢复密钥解锁的，要改恢复密钥请先用主密码解锁'
+    : vaultNoPassword
+      ? vaultRecoveryFp
+        ? '库已经没有主密码了，恢复密钥用不上（凭据本来就只做混淆），可以移除'
+        : '没有主密码就用不上恢复密钥 —— 先设一个主密码，忘密码才有意义'
+      : vaultRecoveryFp
+        ? `忘主密码时用对应的私钥解锁。配的是 ${vaultRecoveryFp}`
+        : '配一把 SSH 公钥：忘主密码时用对应的私钥把库拿回来，数据不丢。' +
+          '注意它只等于那把私钥的保管强度 —— 私钥要是没口令又摆在同一个用户目录里，等于没设'
+
+  const importRecovery = async () => {
+    const picked = await pickFile('选择作为恢复密钥的 SSH 公钥', [
+      { name: 'SSH 公钥', extensions: ['pub'] },
+      { name: '所有文件', extensions: ['*'] },
+    ])
+    if (!picked) {
+      // 预览里没有原生文件框。按钮做成禁用的话预览就成了一张不能点的假界面，
+      // 所以这里保持可点、点了给一句实话
+      if (!isDesktop()) {
+        setError('浏览器预览里没有原生文件框 —— 桌面版里这里会弹出「选择公钥」的对话框')
+      }
+      return
+    }
+    try {
+      const fingerprint = await setRecoveryKey(picked)
+      setError(`恢复密钥已设置：${fingerprint}`)
+    } catch (e) {
+      setError(`设置恢复密钥失败：${String(e)}`)
+    }
+  }
+
+  const removeRecovery = () => {
+    setConfirmPrompt({
+      kind: 'confirm',
+      danger: true,
+      title: '移除恢复密钥？',
+      message:
+        '移掉之后，忘掉主密码就只能清空密钥库重来（主机、分组、命令片段一起没）。' +
+        '锁屏上的「忘记主密码」入口也会重新出现。',
+      confirmLabel: '仍然移除',
+      onConfirm: () => {
+        void clearRecoveryKey().catch((e) => setError(`移除恢复密钥失败：${String(e)}`))
+      },
+    })
   }
 
   return (
@@ -216,6 +290,30 @@ function SettingsBody({ onClose }: { onClose: () => void }) {
           <button onClick={openChangePassword} className={modalButton}>
             {vaultNoPassword ? '设置主密码…' : '修改…'}
           </button>
+        </Row>
+        <Row label="恢复密钥" hint={recoveryHint}>
+          {recoveryAction === 'hidden' ? null : (
+            <div className="flex items-center gap-1.5">
+              {/* 移除只在配过了之后才有意义 */}
+              {(recoveryAction === 'replace' || recoveryAction === 'remove') && (
+                <button
+                  onClick={removeRecovery}
+                  className="h-8 rounded-md border border-danger/40 bg-danger/10 px-3 text-[13px] font-medium text-danger transition-colors hover:bg-danger/20"
+                >
+                  移除
+                </button>
+              )}
+              {(recoveryAction === 'import' || recoveryAction === 'replace') && (
+                <button
+                  onClick={() => void importRecovery()}
+                  title="选一把 SSH 公钥（.pub）。预览模式下打不开原生文件框"
+                  className={modalButton}
+                >
+                  {recoveryAction === 'replace' ? '更换公钥…' : '导入公钥…'}
+                </button>
+              )}
+            </div>
+          )}
         </Row>
       </Section>
 

@@ -146,6 +146,17 @@ const LOCK_KEY = 'mockVaultLocked'
 const readLocked = () => localStorage.getItem(LOCK_KEY) === 'true'
 const setLocked = (v: boolean) => localStorage.setItem(LOCK_KEY, String(v))
 
+/**
+ * 预览里的恢复密钥 / 「这一轮是恢复解锁的」。
+ *
+ * 指纹是假的常量（真指纹要读公钥文件算 SHA256，mock 不做密码学）：界面只是拿它显示
+ * 和比对，预览里看得出「配了 / 没配」「是不是恢复解锁」就够了。
+ */
+const RECOVERY_KEY = 'mockVaultRecoveryFp'
+const BY_RECOVERY_KEY = 'mockVaultByRecovery'
+const readRecoveryFp = () => localStorage.getItem(RECOVERY_KEY)
+const readByRecovery = () => localStorage.getItem(BY_RECOVERY_KEY) === 'true'
+
 /** 塞给 xterm 的假输出：带颜色、中文、emoji，顺便测宽字符对齐 */
 const BANNER = [
   '\x1b[1;38;2;94;106;210m  easy-shell\x1b[0m \x1b[90m· mock 会话（浏览器预览）\x1b[0m\r\n',
@@ -205,26 +216,48 @@ export async function invoke<T>(cmd: string, args: Record<string, unknown> = {})
         initialized,
         unlocked: initialized && !readLocked(),
         noPassword: readNoPassword(),
+        recoveryFingerprint: readRecoveryFp(),
+        unlockedByRecovery: readByRecovery(),
       } as T)
     }
     case 'vault_setup':
       setInitialized(true)
       setNoPassword((args.password as string) === '')
       setLocked(false)
+      localStorage.removeItem(RECOVERY_KEY)
+      localStorage.removeItem(BY_RECOVERY_KEY)
       return later(undefined as T)
     case 'vault_reset':
       setInitialized(false)
       setNoPassword(false)
       setLocked(false)
+      localStorage.removeItem(RECOVERY_KEY)
+      localStorage.removeItem(BY_RECOVERY_KEY)
       return later(undefined as T)
     case 'vault_unlock':
       setLocked(false)
+      localStorage.setItem(BY_RECOVERY_KEY, 'false')
       return later(undefined as T)
     case 'vault_lock':
       setLocked(true)
+      localStorage.setItem(BY_RECOVERY_KEY, 'false')
       return later(undefined as T)
     case 'vault_change_password':
       setNoPassword((args.newPassword as string) === '')
+      localStorage.setItem(BY_RECOVERY_KEY, 'false')
+      return later(undefined as T)
+    case 'vault_recovery_set': {
+      // 真指纹由后端从公钥算；预览里给一个固定的假指纹，够界面显示用
+      const fp = 'SHA256:mockRecoveryKeyFingerprintPlaceholder00'
+      localStorage.setItem(RECOVERY_KEY, fp)
+      return later(fp as unknown as T)
+    }
+    case 'vault_recovery_clear':
+      localStorage.removeItem(RECOVERY_KEY)
+      return later(undefined as T)
+    case 'vault_unlock_with_key':
+      setLocked(false)
+      localStorage.setItem(BY_RECOVERY_KEY, 'true')
       return later(undefined as T)
 
     case 'hosts_list':

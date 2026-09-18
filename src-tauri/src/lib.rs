@@ -4,6 +4,8 @@ mod batcher;
 /// decode 对外可见，tests/local_pty.rs 要用 ShellDecoder 验证真实 PTY 输出
 pub mod decode;
 mod known_hosts;
+/// 恢复密钥：把库密钥封给一把 SSH 公钥。单独成模块是为了能单测那套 ECDH 组合
+mod recovery;
 mod local;
 /// sftp 模块对外可见，tests/ 里的端到端测试要用 list_dir
 pub mod sftp;
@@ -45,6 +47,10 @@ pub fn run() {
             store::vault_unlock,
             // 改主密码（传空串 = 改成不设密码），所有凭据用新密钥重新加密
             store::vault_change_password,
+            // 恢复密钥：把主密钥封给一把 SSH 公钥；忘密码时用对应私钥解锁
+            store::vault_recovery_set,
+            store::vault_recovery_clear,
+            store::vault_unlock_with_key,
             store::vault_lock,
             // 清空密钥库（忘记主密码时的唯一出路），不可撤销
             store::vault_reset,

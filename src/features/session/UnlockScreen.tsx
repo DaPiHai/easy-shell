@@ -1,12 +1,22 @@
 import { useState } from 'react'
-import { LockKeyhole } from 'lucide-react'
+import { FolderOpen, KeyRound, LockKeyhole } from 'lucide-react'
+import { pickFile } from '@/lib/api'
 import { useApp } from '@/lib/store'
 
 const inputClass =
   'h-9 w-full rounded-md border border-hairline bg-surface-3 px-3 text-[13px] text-ink outline-none placeholder:text-ink-tertiary focus:border-accent'
 
 export function UnlockScreen() {
-  const { phase, vaultError, setupVault, unlockVault, resetVault, vaultNoPassword } = useApp()
+  const {
+    phase,
+    vaultError,
+    setupVault,
+    unlockVault,
+    unlockWithKey,
+    resetVault,
+    vaultNoPassword,
+    vaultRecoveryFp,
+  } = useApp()
   const isSetup = phase === 'setup'
 
   const [password, setPassword] = useState('')
@@ -19,6 +29,15 @@ export function UnlockScreen() {
    * 库已经建好的不能在这里取消密码（那要走设置里的「修改主密码」）。
    */
   const [noPass, setNoPass] = useState(false)
+  /**
+   * 走「用 SSH 私钥解锁」那一条路。
+   *
+   * 展开式而不是另开一页：忘密码的人需要的是**看见两条路**，
+   * 而不是点了才知道还有第二种解锁方式。
+   */
+  const [keyMode, setKeyMode] = useState(false)
+  const [keyPath, setKeyPath] = useState('')
+  const [keyPass, setKeyPass] = useState('')
   const [busy, setBusy] = useState(false)
   const [localError, setLocalError] = useState<string | null>(null)
   /**
@@ -76,6 +95,28 @@ export function UnlockScreen() {
     } finally {
       setBusy(false)
     }
+  }
+
+  /** 用恢复密钥解锁：读一把私钥，把主密钥取回来 */
+  const submitKey = async () => {
+    if (!keyPath.trim()) {
+      setLocalError('请选择恢复用的私钥文件')
+      return
+    }
+    setBusy(true)
+    setLocalError(null)
+    try {
+      await unlockWithKey(keyPath.trim(), keyPass || undefined)
+    } catch {
+      // 错误信息已写入 store
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const browseKey = async () => {
+    const picked = await pickFile('选择恢复密钥用的 SSH 私钥')
+    if (picked) setKeyPath(picked)
   }
 
   const error = localError ?? vaultError
@@ -170,10 +211,99 @@ export function UnlockScreen() {
           {busy ? '处理中…' : isSetup ? (noPass ? '不设密码并进入' : '创建并解锁') : '解锁'}
         </button>
 
+        {/*
+          恢复密钥这条后路。只有配过的库才出现 —— 没配的库摆一个「用私钥解锁」
+          等于给用户一个必然失败的按钮；无密码库也不需要它（那里点一下就进）。
+        */}
+        {!isSetup && vaultRecoveryFp && !passless && !keyMode && (
+          <button
+            onClick={() => {
+              setKeyMode(true)
+              setLocalError(null)
+            }}
+            className="mt-3 flex w-full items-center justify-center gap-1.5 text-[12px] text-ink-subtle transition-colors hover:text-ink"
+          >
+            <KeyRound size={12} />
+            用 SSH 私钥解锁
+          </button>
+        )}
+
+        {!isSetup && vaultRecoveryFp && !passless && keyMode && (
+          <div className="mt-3 rounded-md border border-hairline bg-surface-2 p-3">
+            <div className="mb-2 flex items-center gap-1.5 text-[12px] text-ink-muted">
+              <KeyRound size={12} className="shrink-0" />
+              用恢复密钥解锁
+            </div>
+            <p className="mb-2.5 text-[11px] leading-relaxed text-ink-tertiary">
+              库里配的是 <span className="font-mono">{vaultRecoveryFp}</span>
+              。选那把对应的私钥即可 —— 私钥只被读一次，不会存进库里。
+            </p>
+            <div className="mb-2 flex gap-1.5">
+              <input
+                className={inputClass}
+                value={keyPath}
+                onChange={(e) => setKeyPath(e.target.value)}
+                placeholder={'私钥文件，例如 C:\\Users\\你\\.ssh\\id_ed25519'}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') void submitKey()
+                }}
+              />
+              <button
+                onClick={() => void browseKey()}
+                title="选择私钥文件"
+                className="grid h-9 w-9 shrink-0 place-items-center rounded-md border border-hairline bg-surface-3 text-ink-subtle transition-colors hover:bg-surface-4 hover:text-ink"
+              >
+                <FolderOpen size={14} />
+              </button>
+            </div>
+            <input
+              className={`${inputClass} mb-2.5`}
+              type="password"
+              value={keyPass}
+              onChange={(e) => setKeyPass(e.target.value)}
+              placeholder="私钥口令（没有就留空）"
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') void submitKey()
+              }}
+            />
+            <div className="flex justify-end gap-2">
+              <button
+                onClick={() => {
+                  setKeyMode(false)
+                  setLocalError(null)
+                }}
+                disabled={busy}
+                className="h-7 rounded-md border border-hairline bg-surface-2 px-2.5 text-[12px] text-ink-muted transition-colors hover:bg-surface-3 hover:text-ink"
+              >
+                取消
+              </button>
+              <button
+                onClick={() => void submitKey()}
+                disabled={busy}
+                className="h-7 rounded-md bg-accent px-2.5 text-[12px] font-medium text-on-accent transition-colors hover:bg-accent-hover disabled:opacity-50"
+              >
+                {busy ? '解锁中…' : '用私钥解锁'}
+              </button>
+            </div>
+          </div>
+        )}
+
         {/* 新建密钥库时没什么可重置的，所以只在解锁这一侧给入口 */}
         {!isSetup && (
           <div className="mt-4 border-t border-hairline pt-3">
-            {resetArmed ? (
+            {/*
+              配了恢复密钥时，这一块整段收起来：有正经后路（那把私钥）之后，
+              「清空重来」就只对想搞破坏的人有用了 —— 谁都能删 %APPDATA% 里的 vault.db，
+              所以省掉的只是「方便」，但那是「顺手毁掉别人数据」的方便。
+              没配恢复密钥时它是唯一出路，只能留着。这里补一句说明，
+              否则用户会以为「忘记主密码」这个功能没了。
+            */}
+            {vaultRecoveryFp ? (
+              <p className="text-[11px] leading-relaxed text-ink-tertiary">
+                主密码忘了就用下面的私钥解锁，没法清空重来 —— 配了恢复密钥的库
+                不再提供「清空」入口，免得有人顺手把你的主机列表抹掉。
+              </p>
+            ) : resetArmed ? (
               <div className="text-[12px] leading-relaxed">
                 <p className="text-danger">
                   确认清空？已保存的主机、分组、命令片段都会删掉，密钥库要重新初始化。

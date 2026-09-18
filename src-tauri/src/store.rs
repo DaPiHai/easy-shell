@@ -12,6 +12,8 @@ use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use tauri::State;
 
+use crate::recovery;
+
 const NONCE_LEN: usize = 12;
 
 /**
@@ -29,6 +31,30 @@ const NONCE_LEN: usize = 12;
  * 拿到 vault.db 的人就能读出凭据。界面里必须如实告诉用户。
  */
 const NOPASS_KEY: &str = "nopass";
+
+/**
+ * 恢复密钥相关的三行 meta。
+ *
+ * - `RECOVERY_BLOB`：把主密钥封给某把 SSH 公钥之后的密文（base64），见 `recovery.rs`
+ * - `RECOVERY_PUB`：那把公钥的规范化文本。**不是秘密**，存着是为了让用户能对账
+ *   （「我库里配的是哪把」），也让「换成另一把」时能拿旧的显示出来
+ * - `RECOVERY_FP`：公钥指纹，界面和错误信息里用它认人 —— 私钥选错时，
+ *   「指纹 A ≠ 指纹 B」比「解不开」有用得多
+ */
+const RECOVERY_BLOB: &str = "recovery";
+const RECOVERY_PUB: &str = "recovery_pub";
+const RECOVERY_FP: &str = "recovery_fp";
+
+/**
+ * 「手里这把钥匙对不对」的哨兵：一段用主密钥加密的固定明文。
+ *
+ * 主密码解锁时用不着它（校验串已经证明了密码，密码对钥匙就对）。它防的是**恢复密钥**：
+ * 恢复密文里封的可能是一把**过期**的钥匙（表被旧库覆盖、或历史上某次改密码漏了重封），
+ * 那时解锁会「成功」，但读任何一条凭据都失败 —— 那种假解锁比直接报错难查十倍。
+ * 趁每次手里握着（自认为）正确的钥匙时刷新它，恢复路径上拿它比对一次。
+ */
+const KEYCHECK: &str = "keycheck";
+const KEYCHECK_PLAINTEXT: &[u8] = b"easy-shell vault key check";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
@@ -71,12 +97,20 @@ pub struct VaultStatus {
     pub unlocked: bool,
     /// 库里没设主密码（空密码）。前端据此在启动时直接解锁，锁屏也只剩一个按钮
     pub no_password: bool,
+    /// 设没设恢复密钥（一把 SSH 公钥）。设了的话锁屏上就有「用私钥解锁」这条路，
+    /// 也就不该再摆一个「忘记主密码 → 清空重来」的按钮（见 `UnlockScreen`）
+    pub recovery_fingerprint: Option<String>,
+    /// 这一轮解锁是不是用恢复密钥进来的。前端据此把改密码对话框切成
+    /// 「不用填旧密码」的形态（忘密码的人正是靠这条路把库拿回来的）
+    pub unlocked_by_recovery: bool,
 }
 
 pub struct Vault {
     db: StdMutex<Connection>,
     /// 解锁后驻留内存的主密钥；锁定或重启即失效
     key: StdMutex<Option<[u8; 32]>>,
+    /// 这次解锁是不是用恢复密钥完成的。锁定即清零
+    recovery_open: StdMutex<bool>,
 }
 
 impl Vault {
@@ -96,6 +130,7 @@ impl Vault {
         Ok(Self {
             db: StdMutex::new(conn),
             key: StdMutex::new(None),
+            recovery_open: StdMutex::new(false),
         })
     }
 
@@ -116,15 +151,22 @@ impl Vault {
         let db = self.db.lock().map_err(|_| "数据库锁异常".to_string())?;
         let initialized = meta_get(&db, "verifier")?.is_some();
         let no_password = is_nopass(&db)?;
+        let recovery_fingerprint = meta_get(&db, RECOVERY_FP)?;
         let unlocked = self
             .key
             .lock()
             .map_err(|_| "密钥库状态异常".to_string())?
             .is_some();
+        let unlocked_by_recovery = *self
+            .recovery_open
+            .lock()
+            .map_err(|_| "密钥库状态异常".to_string())?;
         Ok(VaultStatus {
             initialized,
             unlocked,
             no_password,
+            recovery_fingerprint,
+            unlocked_by_recovery,
         })
     }
 
@@ -149,13 +191,18 @@ impl Vault {
             .map_err(|e| format!("生成校验串失败: {e}"))?
             .to_string();
 
+        let key = derive_key(password, &salt_bytes)?;
         meta_set(&db, "salt", &B64.encode(salt_bytes))?;
         meta_set(&db, "verifier", &verifier)?;
         set_nopass(&db, password.is_empty())?;
+        write_key_check(&db, &key)?;
 
-        let key = derive_key(password, &salt_bytes)?;
         drop(db);
         *self.key.lock().map_err(|_| "密钥库状态异常".to_string())? = Some(key);
+        *self
+            .recovery_open
+            .lock()
+            .map_err(|_| "密钥库状态异常".to_string())? = false;
 
         Ok(())
     }
@@ -174,14 +221,108 @@ impl Vault {
             .map_err(|_| "主密码错误".to_string())?;
 
         let key = derive_key(password, &salt_bytes)?;
+        // 老库还没有哨兵，趁这次握着正确的钥匙补上；写失败不影响解锁
+        let _ = write_key_check(&db, &key);
+
         drop(db);
         *self.key.lock().map_err(|_| "密钥库状态异常".to_string())? = Some(key);
+        *self
+            .recovery_open
+            .lock()
+            .map_err(|_| "密钥库状态异常".to_string())? = false;
 
+        Ok(())
+    }
+
+    /**
+     * 用恢复密钥（一把 SSH 私钥）解锁。
+     *
+     * 库里存的是一份「把主密钥封给某把公钥」的密文（见 `recovery.rs`），这里用
+     * 私钥把它取回来。两道额外检查：
+     * 1. 指纹要和库里记的对得上 —— 「你拿错钥匙了」和「密钥库坏了」是两回事，
+     *    含糊的报错会让人去查错方向。
+     * 2. 拿回来的钥匙要和 `keycheck` 哨兵对得上 —— 防的是「恢复密钥是旧的」
+     *    那种情况（比如用一份旧 vault.db 覆盖回来），否则会进到一个读不出任何数据
+     *    的假解锁状态，比直接报错更难查。
+     */
+    pub fn unlock_with_key(&self, path: &str, passphrase: Option<&str>) -> Result<(), String> {
+        let db = self.db.lock().map_err(|_| "数据库锁异常".to_string())?;
+        if meta_get(&db, "verifier")?.is_none() {
+            return Err("尚未设置主密码".to_string());
+        }
+        let blob_b64 = meta_get(&db, RECOVERY_BLOB)?
+            .ok_or_else(|| "这个密钥库没有设置恢复密钥".to_string())?;
+        let blob = B64
+            .decode(blob_b64)
+            .map_err(|e| format!("恢复密钥数据解析失败: {e}"))?;
+
+        // 库里记着的指纹一并交给它：私钥选错时要在做密码学之前报出来（见 recovery.rs）
+        let expected = meta_get(&db, RECOVERY_FP)?;
+        let key = recovery::open_with_private_key(
+            path,
+            passphrase,
+            expected.as_deref(),
+            &blob,
+        )?;
+        check_vault_key(&db, &key)?;
+
+        drop(db);
+        *self.key.lock().map_err(|_| "密钥库状态异常".to_string())? = Some(key);
+        *self
+            .recovery_open
+            .lock()
+            .map_err(|_| "密钥库状态异常".to_string())? = true;
+        Ok(())
+    }
+
+    /**
+     * 设/换恢复公钥：把当前这把握在手里的主密钥封给一把 SSH 公钥。
+     *
+     * **要求已解锁**，而且必须是「用密码解锁的」这一轮 —— 否则就成了
+     * 「用恢复密钥进来的人可以再换一把恢复密钥」，等于把唯一的另一条路也交出去
+     * （虽然那时他本来就能读全部数据，但没必要把状态搞得更乱）。
+     *
+     * 只认公钥：私钥不进来、不落盘，用户手里的那把仍然只有他自己有。
+     */
+    pub fn set_recovery_key(&self, text_or_path: &str) -> Result<String, String> {
+        if *self
+            .recovery_open
+            .lock()
+            .map_err(|_| "密钥库状态异常".to_string())?
+        {
+            return Err("这一轮是用恢复密钥解锁的，改恢复密钥请先用主密码解锁".to_string());
+        }
+        let key = self.key_or_err()?;
+        let public = recovery::read_public_key(text_or_path)?;
+        let blob = recovery::seal(&public, &key)?;
+
+        let db = self.db.lock().map_err(|_| "数据库锁异常".to_string())?;
+        // 封之前先确认手里这把钥匙是对的 —— 封进去一把旧钥匙，等用户真忘密码时才发现，太晚了
+        check_vault_key(&db, &key)?;
+        meta_set(&db, RECOVERY_BLOB, &B64.encode(&blob))?;
+        meta_set(&db, RECOVERY_PUB, &public.line)?;
+        meta_set(&db, RECOVERY_FP, &public.fingerprint)?;
+        Ok(public.fingerprint)
+    }
+
+    /** 移除恢复密钥。**同样是「少一条后路」的动作**，界面上要说清楚 */
+    pub fn clear_recovery_key(&self) -> Result<(), String> {
+        // 技术上不需要钥匙，但跟其他写操作保持一致：锁着的库不接受任何写
+        let _key = self.key_or_err()?;
+        let db = self.db.lock().map_err(|_| "数据库锁异常".to_string())?;
+        for k in [RECOVERY_BLOB, RECOVERY_PUB, RECOVERY_FP] {
+            db.execute("DELETE FROM meta WHERE key = ?1", params![k])
+                .map_err(|e| format!("移除恢复密钥失败: {e}"))?;
+        }
         Ok(())
     }
 
     pub fn lock(&self) -> Result<(), String> {
         *self.key.lock().map_err(|_| "密钥库状态异常".to_string())? = None;
+        *self
+            .recovery_open
+            .lock()
+            .map_err(|_| "密钥库状态异常".to_string())? = false;
         Ok(())
     }
 
@@ -197,6 +338,9 @@ impl Vault {
      *   不然一个走开的工位上谁都能把库换个密码锁死。
      * - 旧密码要**当场再验一遍**，不认「反正已经解锁了」：解锁可能是几小时前，
      *   改密码是破坏性动作（改错了旧密码就再也解不开）。
+     *   例外是**用恢复密钥解锁的那一轮**（`recovery_open`）：那时旧密码正是他忘掉的东西，
+     *   而不验的代价是零 —— 能拿出那把私钥的人本来就能读全部数据。没有这条例外，
+     *   忘密码的人解锁完也设不了新密码，等于走进死胡同。
      *
      * 加密与元数据写在**同一个事务**里：中途失败必须整体回滚，否则会出现
      * 一半主机用新钥匙、一半用旧钥匙的库 —— 那种库谁也读不全。
@@ -204,16 +348,24 @@ impl Vault {
     pub fn change_password(&self, old_password: &str, new_password: &str) -> Result<(), String> {
         // 先拿钥匙再开库：`vault_setup` 也是这个顺序，保持一致免得将来加锁交叉
         let old_key = self.key_or_err()?;
-        if old_password == new_password {
+        let via_recovery = *self
+            .recovery_open
+            .lock()
+            .map_err(|_| "密钥库状态异常".to_string())?
+            && old_password.is_empty();
+        if !via_recovery && old_password == new_password {
             return Err("新密码和当前密码相同，没有需要改的".to_string());
         }
 
         let mut db = self.db.lock().map_err(|_| "数据库锁异常".to_string())?;
-        let verifier = meta_get(&db, "verifier")?.ok_or_else(|| "尚未设置主密码".to_string())?;
-        let parsed = PasswordHash::new(&verifier).map_err(|e| format!("校验串损坏: {e}"))?;
-        Argon2::default()
-            .verify_password(old_password.as_bytes(), &parsed)
-            .map_err(|_| "当前主密码不正确".to_string())?;
+        if !via_recovery {
+            let verifier =
+                meta_get(&db, "verifier")?.ok_or_else(|| "尚未设置主密码".to_string())?;
+            let parsed = PasswordHash::new(&verifier).map_err(|e| format!("校验串损坏: {e}"))?;
+            Argon2::default()
+                .verify_password(old_password.as_bytes(), &parsed)
+                .map_err(|_| "当前主密码不正确".to_string())?;
+        }
 
         let salt_bytes: [u8; 16] = rand::random();
         let salt = SaltString::encode_b64(&salt_bytes).map_err(|e| e.to_string())?;
@@ -222,6 +374,22 @@ impl Vault {
             .map_err(|e| format!("生成校验串失败: {e}"))?
             .to_string();
         let new_key = derive_key(new_password, &salt_bytes)?;
+
+        // 恢复密钥封的是这把钥匙本身，换了钥匙就得重封 —— 漏了这一步，恢复密钥会静默失效，
+        // 而用户只会在「真忘了密码」的那天发现（所以下面还有 keycheck 那道哨兵）
+        let resealed = match meta_get(&db, RECOVERY_PUB)? {
+            Some(line) => {
+                let public = recovery::parse_public_key(&line).map_err(|e| {
+                    // 走到这里说明库里那行公钥读不出来（手改过库）。直接报「这不是 SSH 公钥」
+                    // 会让人一头雾水 —— 用户要办的是改密码，得告诉他先处理哪一头
+                    format!(
+                        "库里记的恢复公钥读不出来（{e}）—— 先在「设置 → 密钥库」里重新导入或移除恢复密钥，再改主密码"
+                    )
+                })?;
+                Some(B64.encode(&recovery::seal(&public, &new_key)?))
+            }
+            None => None,
+        };
 
         let tx = db.transaction().map_err(|e| format!("开启事务失败: {e}"))?;
 
@@ -258,10 +426,19 @@ impl Vault {
         meta_set(&tx, "salt", &B64.encode(salt_bytes))?;
         meta_set(&tx, "verifier", &new_verifier)?;
         set_nopass(&tx, new_password.is_empty())?;
+        write_key_check(&tx, &new_key)?;
+        if let Some(blob) = resealed {
+            meta_set(&tx, RECOVERY_BLOB, &blob)?;
+        }
         tx.commit().map_err(|e| format!("保存新密码失败: {e}"))?;
         drop(db);
 
         *self.key.lock().map_err(|_| "密钥库状态异常".to_string())? = Some(new_key);
+        // 钥匙已经换过，这一轮不再算「用恢复密钥进来的」
+        *self
+            .recovery_open
+            .lock()
+            .map_err(|_| "密钥库状态异常".to_string())? = false;
         Ok(())
     }
 
@@ -366,6 +543,12 @@ impl Vault {
             .map_err(|e| format!("清空密钥库失败: {e}"))?;
         }
         *self.key.lock().map_err(|_| "密钥库状态异常".to_string())? = None;
+        // 「用恢复密钥进来的」这个状态也得跟着清：库已经空了，留着它会让下一次解锁的
+        // 语义变成「没验过旧密码」——而那是给恢复密钥持有者的特权
+        *self
+            .recovery_open
+            .lock()
+            .map_err(|_| "密钥库状态异常".to_string())? = false;
         Ok(())
     }
 }
@@ -474,6 +657,24 @@ fn set_nopass(conn: &Connection, nopass: bool) -> Result<(), String> {
     }
 }
 
+/** 刷新钥匙哨兵。手里这把钥匙是（自认为）正确的时候才该调 */
+fn write_key_check(conn: &Connection, key: &[u8; 32]) -> Result<(), String> {
+    let blob = encrypt_secret(key, KEYCHECK_PLAINTEXT)?;
+    meta_set(conn, KEYCHECK, &B64.encode(blob))
+}
+
+/** 拿哨兵验一把钥匙。**没有哨兵时不拦**（老库还没写过），交给上层别的检查 */
+fn check_vault_key(conn: &Connection, key: &[u8; 32]) -> Result<(), String> {
+    let Some(stored) = meta_get(conn, KEYCHECK)? else {
+        return Ok(());
+    };
+    let blob = B64.decode(stored).map_err(|e| format!("钥匙哨兵解析失败: {e}"))?;
+    decrypt_secret(key, &blob).map_err(|_| {
+        "这把钥匙和密钥库对不上（恢复密钥可能是改密码之前的旧版本，重新生成一次即可）".to_string()
+    })?;
+    Ok(())
+}
+
 fn derive_key(password: &str, salt: &[u8]) -> Result<[u8; 32], String> {
     let mut out = [0u8; 32];
     Argon2::default()
@@ -532,6 +733,7 @@ pub fn vault_lock(state: State<'_, Vault>) -> Result<(), String> {
  * 修改主密码（`newPassword` 传空串 = 改成不设密码）。
  *
  * 所有凭据都会用新密码重新加密，已经在跑的连接不受影响 —— 它们早就握着认证结果了。
+ * 若库里配过恢复密钥，这一把也会**重新封装**（封的是钥匙本身，换了钥匙就得重封）。
  */
 #[tauri::command]
 pub fn vault_change_password(
@@ -540,6 +742,38 @@ pub fn vault_change_password(
     new_password: String,
 ) -> Result<(), String> {
     state.change_password(&old_password, &new_password)
+}
+
+/**
+ * 设/换恢复公钥：把主密钥封给一把 SSH 公钥，忘主密码时用对应私钥解锁。
+ *
+ * `key` 既可以是公钥文本（`ssh-ed25519 AAAA…`），也可以是公钥文件的路径。
+ * 返回指纹，界面拿它给用户回执（「配的是哪把」）。
+ */
+#[tauri::command]
+pub fn vault_recovery_set(state: State<'_, Vault>, key: String) -> Result<String, String> {
+    state.set_recovery_key(&key)
+}
+
+/** 移除恢复密钥。少一条后路，界面必须让用户明确确认 */
+#[tauri::command]
+pub fn vault_recovery_clear(state: State<'_, Vault>) -> Result<(), String> {
+    state.clear_recovery_key()
+}
+
+/**
+ * 用恢复密钥解锁：给一条私钥文件路径（可选口令），把主密钥取回来。
+ *
+ * 取回来之后 `vault_status.unlockedByRecovery` 为真，前端的改密码对话框会切成
+ * 「不用填旧密码」的形态 —— 忘密码的人正是靠这条路把库拿回去的。
+ */
+#[tauri::command]
+pub fn vault_unlock_with_key(
+    state: State<'_, Vault>,
+    private_key_path: String,
+    passphrase: Option<String>,
+) -> Result<(), String> {
+    state.unlock_with_key(&private_key_path, passphrase.as_deref())
 }
 
 /**
@@ -923,8 +1157,7 @@ mod tests {
 
     /// 两种状态之间来回改，标记与可解锁性必须跟着翻（无密码 ↔ 有密码）
     #[test]
-    fn 有密码与无密码之间可以来回改() {
-        let (vault, path) = temp_vault();
+    fn 有密码与无密码之间可以来回改() {        let (vault, path) = temp_vault();
         vault.set_password("真密码").unwrap();
         vault.save_host(sample_host("h1")).unwrap();
 
@@ -943,5 +1176,180 @@ mod tests {
 
         drop(vault);
         let _ = fs::remove_file(&path);
+    }
+
+    // ---- 恢复密钥（SSH 公钥封库密钥）-----------------------------------------
+
+    /// 生成一对临时 ed25519 密钥，返回（私钥文件路径，公钥文本）
+    fn temp_ssh_key(tag: &str) -> (PathBuf, String) {
+        use russh::keys::ssh_key::{Algorithm, LineEnding, PrivateKey};
+        let dir = std::env::temp_dir().join(format!("easy-shell-rkey-{tag}-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        // rand10 是 dev-dependencies 里那份 rand 0.10 —— ssh-key 要的是 rand_core 0.10 的 trait
+        let key = PrivateKey::random(&mut rand10::rng(), Algorithm::Ed25519).unwrap();
+        let path = dir.join("id_ed25519");
+        std::fs::write(&path, key.to_openssh(LineEnding::LF).unwrap().as_bytes()).unwrap();
+        (path, key.public_key().to_openssh().unwrap())
+    }
+
+    /**
+     * 正题：忘了主密码，用私钥把库拿回来，数据一条不少。
+     *
+     * 这条链路存在的全部意义就是「忘密码 != 丢数据」，所以这里连主机内容一起验，
+     * 而不是只看 unlock 返回 Ok。
+     */
+    #[test]
+    fn 用恢复密钥能把库和凭据一起拿回来() {
+        let (vault, path) = temp_vault();
+        let (key_path, public) = temp_ssh_key("roundtrip");
+        vault.set_password("会忘掉的主密码").unwrap();
+        vault.save_host(sample_host("h1")).unwrap();
+        let fingerprint = vault.set_recovery_key(&public).unwrap();
+        assert!(fingerprint.starts_with("SHA256:"), "指纹不对：{fingerprint}");
+        assert_eq!(
+            vault.status().unwrap().recovery_fingerprint.as_deref(),
+            Some(fingerprint.as_str()),
+            "状态里读不到恢复密钥指纹，锁屏就没法提示「可以用私钥解锁」"
+        );
+
+        vault.lock().unwrap();
+        assert!(!vault.status().unwrap().unlocked_by_recovery);
+        vault
+            .unlock_with_key(key_path.to_str().unwrap(), None)
+            .unwrap();
+
+        let status = vault.status().unwrap();
+        assert!(status.unlocked && status.unlocked_by_recovery);
+        assert_eq!(read_secret(&vault, "h1"), "s3cret-口令", "拿回来的钥匙读不出凭据");
+
+        drop(vault);
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_dir_all(key_path.parent().unwrap());
+    }
+
+    /**
+     * 改主密码之后，恢复密钥必须重新封装。
+     *
+     * 漏了重封的话，恢复密文里封的是**旧**钥匙：忘密码那天用它解锁，
+     * 表面成功、读什么都失败 —— 所以哨兵（keycheck）会让它当场报错，
+     * 这条测试就钉在这一点上。
+     */
+    #[test]
+    fn 改主密码后恢复密钥跟着重封() {
+        let (vault, path) = temp_vault();
+        let (key_path, public) = temp_ssh_key("resea");
+        vault.set_password("旧密码").unwrap();
+        vault.save_host(sample_host("h1")).unwrap();
+        vault.set_recovery_key(&public).unwrap();
+
+        vault.change_password("旧密码", "新密码").unwrap();
+        vault.lock().unwrap();
+        vault
+            .unlock_with_key(key_path.to_str().unwrap(), None)
+            .unwrap();
+        assert_eq!(read_secret(&vault, "h1"), "s3cret-口令");
+
+        drop(vault);
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_dir_all(key_path.parent().unwrap());
+    }
+
+    /// 用恢复密钥进来的人可以不带旧密码重设密码（他本来就忘了），之后新密码生效
+    #[test]
+    fn 恢复密钥进来的一轮可以不带旧密码改密码() {
+        let (vault, path) = temp_vault();
+        let (key_path, public) = temp_ssh_key("reset-pw");
+        vault.set_password("忘了的密码").unwrap();
+        vault.set_recovery_key(&public).unwrap();
+
+        vault.lock().unwrap();
+        vault
+            .unlock_with_key(key_path.to_str().unwrap(), None)
+            .unwrap();
+        vault.change_password("", "新的主密码").unwrap();
+
+        vault.lock().unwrap();
+        assert!(
+            vault.unlock_with("忘了的密码").is_err(),
+            "改完之后旧密码还能解锁"
+        );
+        assert!(vault.unlock_with("新的主密码").is_ok());
+
+        drop(vault);
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_dir_all(key_path.parent().unwrap());
+    }
+
+    /// 但**用密码解锁的那一轮**不行：不带旧密码改密码必须是恢复密钥那条路独有的
+    #[test]
+    fn 用密码解锁的会话仍要验旧密码() {
+        let (vault, path) = temp_vault();
+        vault.set_password("真密码").unwrap();
+        vault.unlock_with("真密码").unwrap();
+        let err = vault.change_password("", "换个密码").unwrap_err();
+        assert!(err.contains("不正确"), "{err}");
+
+        drop(vault);
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn 移除恢复密钥之后就解不开了() {
+        let (vault, path) = temp_vault();
+        let (key_path, public) = temp_ssh_key("clear");
+        vault.set_password("真密码").unwrap();
+        vault.set_recovery_key(&public).unwrap();
+        vault.clear_recovery_key().unwrap();
+        assert!(vault.status().unwrap().recovery_fingerprint.is_none());
+
+        vault.lock().unwrap();
+        let err = vault
+            .unlock_with_key(key_path.to_str().unwrap(), None)
+            .unwrap_err();
+        assert!(err.contains("没有设置恢复密钥"), "{err}");
+
+        drop(vault);
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_dir_all(key_path.parent().unwrap());
+    }
+
+    /// 拿错私钥时要指名道姓（指纹对不上），不能只说「解不开」
+    #[test]
+    fn 拿错私钥会报出两边的指纹() {
+        let (vault, path) = temp_vault();
+        let (_, public) = temp_ssh_key("right");
+        let (wrong_path, _) = temp_ssh_key("wrong");
+        vault.set_password("真密码").unwrap();
+        vault.set_recovery_key(&public).unwrap();
+
+        vault.lock().unwrap();
+        let err = vault
+            .unlock_with_key(wrong_path.to_str().unwrap(), None)
+            .unwrap_err();
+        assert!(err.contains("不是当初设的那把") && err.contains("SHA256:"), "{err}");
+
+        drop(vault);
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_dir_all(wrong_path.parent().unwrap());
+    }
+
+    /// 用恢复密钥进来的那一轮不能再换恢复密钥 —— 否则等于把另一条后路也交出去
+    #[test]
+    fn 用恢复密钥解锁时不能改恢复密钥() {
+        let (vault, path) = temp_vault();
+        let (key_path, public) = temp_ssh_key("no-swap");
+        vault.set_password("真密码").unwrap();
+        vault.set_recovery_key(&public).unwrap();
+
+        vault.lock().unwrap();
+        vault
+            .unlock_with_key(key_path.to_str().unwrap(), None)
+            .unwrap();
+        let err = vault.set_recovery_key(&public).unwrap_err();
+        assert!(err.contains("先用主密码解锁"), "{err}");
+
+        drop(vault);
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_dir_all(key_path.parent().unwrap());
     }
 }

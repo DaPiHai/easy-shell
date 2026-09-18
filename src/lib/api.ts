@@ -172,6 +172,16 @@ export interface VaultStatus {
   unlocked: boolean
   /** 库里没设主密码。启动时据此跳过锁屏直接解锁 */
   noPassword: boolean
+  /**
+   * 配了恢复密钥（一把 SSH 公钥）的话，这里是它的指纹（`SHA256:…`）。
+   * 锁屏据此给出「用 SSH 私钥解锁」这条路。
+   */
+  recoveryFingerprint: string | null
+  /**
+   * 这一轮是用恢复密钥解锁的。改密码时不用填旧密码（忘密码的人正靠这条路把库拿回来），
+   * 除此之外与正常解锁没有区别。
+   */
+  unlockedByRecovery: boolean
 }
 
 export function vaultStatus(): Promise<VaultStatus> {
@@ -188,6 +198,34 @@ export function vaultSetup(password: string): Promise<void> {
 
 export function vaultUnlock(password: string): Promise<void> {
   return invoke<void>('vault_unlock', { password })
+}
+
+/**
+ * 用**恢复密钥**解锁：`privateKeyPath` 是私钥文件路径，`passphrase` 是那个文件自己的
+ * 口令（不是主密码）。
+ *
+ * 后端用私钥把「封在库里的主密钥」解出来，等于换一条路拿到同一把钥匙 ——
+ * 数据不会丢，改密码后再用它解锁拿到的也是新钥匙。
+ */
+export function vaultUnlockWithKey(
+  privateKeyPath: string,
+  passphrase?: string,
+): Promise<void> {
+  return invoke<void>('vault_unlock_with_key', { privateKeyPath, passphrase })
+}
+
+/**
+ * 设/换恢复公钥。`key` 既可以是公钥文本，也可以是公钥文件的路径；返回指纹。
+ *
+ * 公钥不敏感，私钥**永远不会**交给后端 —— 只有用它解锁时才会被读一次。
+ */
+export function vaultRecoverySet(key: string): Promise<string> {
+  return invoke<string>('vault_recovery_set', { key })
+}
+
+/** 移除恢复密钥。少一条后路，调用前必须让用户明确确认 */
+export function vaultRecoveryClear(): Promise<void> {
+  return invoke<void>('vault_recovery_clear')
 }
 
 /**

@@ -17,10 +17,13 @@ import {
   syncWindowTheme,
   vaultChangePassword,
   vaultLock,
+  vaultRecoveryClear,
+  vaultRecoverySet,
   vaultReset,
   vaultSetup,
   vaultStatus,
   vaultUnlock,
+  vaultUnlockWithKey,
   type GroupRecord,
   type HostRecord,
 } from './api'
@@ -265,6 +268,15 @@ interface AppState {
    * 来源永远是后端 `vault_status`，别在本地猜。
    */
   vaultNoPassword: boolean
+  /**
+   * 恢复密钥（一把 SSH 公钥）的指纹；没配的话是 null。
+   *
+   * 有它锁屏才给「用 SSH 私钥解锁」这条路，**并且**会收掉「忘记主密码 → 清空重来」
+   * 那个按钮 —— 有正经后路时，不该再摆一个人人点两下就能毁库的入口。
+   */
+  vaultRecoveryFp: string | null
+  /** 这一轮是不是用恢复密钥解锁的（改密码时不用填旧密码，见 `changeMasterPassword`） */
+  vaultByRecovery: boolean
 
   /** 「修改主密码」对话框开着没 */
   changePasswordOpen: boolean
@@ -277,6 +289,17 @@ interface AppState {
   initVault: () => Promise<void>
   setupVault: (password: string) => Promise<void>
   unlockVault: (password: string) => Promise<void>
+  /** 用恢复密钥（SSH 私钥文件）解锁。错误原样抛出，锁屏就地显示 */
+  unlockWithKey: (privateKeyPath: string, passphrase?: string) => Promise<void>
+  /**
+   * 设/换恢复公钥（公钥文本或文件路径都行），返回指纹。
+   *
+   * 只有**用主密码解锁**的那一轮能调：否则「用恢复密钥进来的人又换一把恢复密钥」，
+   * 会把状态搞得没边。后端也会拦，两边都拦是有意的。
+   */
+  setRecoveryKey: (key: string) => Promise<string>
+  /** 移除恢复密钥。少一条后路，调用前必须让用户明确确认 */
+  clearRecoveryKey: () => Promise<void>
   /**
    * 锁定密钥库：收掉所有连接、清空标签。
    * `force` 是"确认过了"的重入标志 —— 有没保存的编辑器时它会先弹一次确认，
@@ -499,6 +522,8 @@ export const useApp = create<AppState>((set, get) => ({
   phase: 'loading',
   vaultError: null,
   vaultNoPassword: false,
+  vaultRecoveryFp: null,
+  vaultByRecovery: false,
 
   changePasswordOpen: false,
   setChangePasswordOpen: (open) => set({ changePasswordOpen: open }),
@@ -514,7 +539,12 @@ export const useApp = create<AppState>((set, get) => ({
   initVault: async () => {
     try {
       const status = await vaultStatus()
-      set({ vaultNoPassword: status.noPassword })
+      // 恢复密钥指纹 / 「这一轮是恢复解锁的」都是后端说了算，本地不猜
+      set({
+        vaultNoPassword: status.noPassword,
+        vaultRecoveryFp: status.recoveryFingerprint,
+        vaultByRecovery: status.unlockedByRecovery,
+      })
       if (!status.initialized) {
         set({ phase: 'setup', vaultError: null })
         return
@@ -553,8 +583,9 @@ export const useApp = create<AppState>((set, get) => ({
     set({ vaultError: null })
     try {
       await vaultSetup(password)
-      // 空串 = 用户在上一步明确选了「不设密码」，标记要跟着走
-      set({ vaultNoPassword: password === '' })
+      // 空串 = 用户在上一步明确选了「不设密码」，标记要跟着走。
+      // 新库还没有恢复密钥，那两项也一并归零（重置过的库里可能留着旧的指纹）
+      set({ vaultNoPassword: password === '', vaultRecoveryFp: null, vaultByRecovery: false })
       await get().refreshHosts()
       set({ phase: 'ready' })
     } catch (e) {
@@ -568,18 +599,47 @@ export const useApp = create<AppState>((set, get) => ({
     try {
       await vaultUnlock(password)
       await get().refreshHosts()
-      set({ phase: 'ready' })
+      set({ phase: 'ready', vaultByRecovery: false })
     } catch (e) {
       set({ vaultError: String(e) })
       throw e
     }
   },
 
+  /**
+   * 用恢复密钥（SSH 私钥）解锁。
+   *
+   * 和密码那条路的区别只有一个：进去之后改密码不用填旧密码（`vaultByRecovery`），
+   * 因为忘密码的人正是靠这条路把库拿回来的。数据、标签、连接的行为完全一样。
+   */
+  unlockWithKey: async (privateKeyPath, passphrase) => {
+    set({ vaultError: null })
+    try {
+      await vaultUnlockWithKey(privateKeyPath, passphrase)
+      await get().refreshHosts()
+      set({ phase: 'ready', vaultByRecovery: true })
+    } catch (e) {
+      set({ vaultError: String(e) })
+      throw e
+    }
+  },
+
+  setRecoveryKey: async (key) => {
+    const fingerprint = await vaultRecoverySet(key)
+    set({ vaultRecoveryFp: fingerprint })
+    return fingerprint
+  },
+
+  clearRecoveryKey: async () => {
+    await vaultRecoveryClear()
+    set({ vaultRecoveryFp: null })
+  },
+
   changeMasterPassword: async (oldPassword, newPassword) => {
     await vaultChangePassword(oldPassword, newPassword)
     // 后端已经把内存里的钥匙换成新的了；hosts 存的是明文凭据，不用重读。
-    // 只翻这一个标记：它决定锁屏上还有没有密码框
-    set({ vaultNoPassword: newPassword === '' })
+    // 翻掉这两个标记：改完密码就不再是「用恢复密钥进来的那一轮」了
+    set({ vaultNoPassword: newPassword === '', vaultByRecovery: false })
   },
 
   /**
@@ -623,7 +683,16 @@ export const useApp = create<AppState>((set, get) => ({
       ),
     ]
     await vaultLock()
-    set({ phase: 'locked', hosts: [], groups: [], tabs: [], activeTabId: null, findTabId: null })
+    set({
+      phase: 'locked',
+      hosts: [],
+      groups: [],
+      tabs: [],
+      activeTabId: null,
+      findTabId: null,
+      // 「这一轮是用恢复密钥进来的」是**会话**状态，锁了就没了
+      vaultByRecovery: false,
+    })
     for (const id of sessionIds) void sshClose(id)
   },
 
@@ -638,8 +707,10 @@ export const useApp = create<AppState>((set, get) => ({
     set({
       phase: 'setup',
       vaultError: null,
-      // 回到「首次使用」：无密码标记随库一起清了，新版由用户重新选
+      // 回到「首次使用」：无密码标记与恢复密钥都随库一起清了，由用户重新选
       vaultNoPassword: false,
+      vaultRecoveryFp: null,
+      vaultByRecovery: false,
       hosts: [],
       groups: [],
       tabs: [],

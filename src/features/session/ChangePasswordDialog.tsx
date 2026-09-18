@@ -31,7 +31,7 @@ export function ChangePasswordDialog() {
 }
 
 function Body({ onClose }: { onClose: () => void }) {
-  const { vaultNoPassword, changeMasterPassword } = useApp()
+  const { vaultNoPassword, vaultByRecovery, changeMasterPassword } = useApp()
 
   const [current, setCurrent] = useState('')
   const [next, setNext] = useState('')
@@ -41,6 +41,15 @@ function Body({ onClose }: { onClose: () => void }) {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [done, setDone] = useState(false)
+
+  /**
+   * 这一轮是用恢复密钥（SSH 私钥）进来的 —— 也就是「忘了主密码」的那个人。
+   *
+   * 那时旧密码正是他忘掉的东西，后端也会跳过校验（见 `Vault::change_password`），
+   * 所以这里不能再摆一个必填的「当前主密码」，否则忘密码的人解锁完也设不了新密码。
+   */
+  const viaRecovery = vaultByRecovery
+  const needCurrent = !vaultNoPassword && !viaRecovery
 
   const submit = async () => {
     if (busy) return
@@ -53,7 +62,7 @@ function Body({ onClose }: { onClose: () => void }) {
         setError('两次输入不一致')
         return
       }
-      if (!vaultNoPassword && next === current) {
+      if (needCurrent && next === current) {
         setError('新主密码和当前的一样，没有需要改的')
         return
       }
@@ -61,8 +70,8 @@ function Body({ onClose }: { onClose: () => void }) {
     setBusy(true)
     setError(null)
     try {
-      // 当前没密码时旧密码就是空串，那栏本来也没显示
-      await changeMasterPassword(vaultNoPassword ? '' : current, noPass ? '' : next)
+      // 当前没密码 / 这轮是恢复密钥进来的，旧密码都交空串
+      await changeMasterPassword(needCurrent ? current : '', noPass ? '' : next)
       setDone(true)
     } catch (e) {
       setError(String(e))
@@ -99,7 +108,7 @@ function Body({ onClose }: { onClose: () => void }) {
   }
 
   const canSubmit =
-    !busy && (vaultNoPassword || !!current) && (noPass || (!!next && !!confirm))
+    !busy && (!needCurrent || !!current) && (noPass || (!!next && !!confirm))
 
   return (
     <ModalShell
@@ -115,7 +124,13 @@ function Body({ onClose }: { onClose: () => void }) {
         </div>
       )}
 
-      {!vaultNoPassword && (
+      {viaRecovery && (
+        <div className="mb-3 rounded-md border border-accent/40 bg-accent/10 px-2.5 py-1.5 text-[12px] leading-relaxed text-ink-muted">
+          这一轮是用恢复密钥解锁的，不用填旧主密码 —— 直接设一个新的即可。
+        </div>
+      )}
+
+      {needCurrent && (
         <div className="mb-3">
           <label className="mb-1.5 block text-[11px] font-medium tracking-[0.4px] text-ink-subtle">
             当前主密码
