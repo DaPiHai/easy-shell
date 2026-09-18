@@ -40,6 +40,8 @@ export function SessionTree() {
     toggleGroup,
     sidebarCollapsed,
     toggleSidebar,
+    tabs,
+    deadTabs,
     setConnectOpen,
     setSnippetsOpen,
     setTunnelOpen,
@@ -158,6 +160,19 @@ export function SessionTree() {
   // 收起时整块不渲染：一块 0 宽的壳留着也没意义，回来有状态栏那个按钮
   if (sidebarCollapsed) return null
 
+  /**
+   * 哪几台主机「连着」：有标签挂着它的 sessionId，且那条连接还没断。
+   *
+   * 跟 openSftp 挑"能复用的连接"是同一条规则 —— 点亮就等于告诉用户
+   * 点「打开 SFTP」不会再拨一次、不会再认证一次。
+   * 快速连接（没有 hostId）的标签不点亮任何主机；反过来，只剩 SFTP 标签时
+   * 断了也没人标 deadTabs（那是终端在管的），那一格要等下次交互才发现已经死了。
+   */
+  const connectedHosts = new Set<string>()
+  for (const t of tabs) {
+    if (t.hostId && t.sessionId && !deadTabs[t.id]) connectedHosts.add(t.hostId)
+  }
+
   const renderHost = (host: HostRecord) => (
     <div
       key={host.id}
@@ -173,7 +188,16 @@ export function SessionTree() {
         className="flex min-w-0 flex-1 cursor-pointer items-center gap-2"
         title="点击连接"
       >
-        <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-ink-tertiary" />
+        {/*
+          这台主机有没有活着的连接。以前这里写死 bg-ink-tertiary，
+          等于一个永远灰的点 —— 有连接和没连接长得一模一样
+        */}
+        <span
+          className={`h-1.5 w-1.5 shrink-0 rounded-full ${
+            connectedHosts.has(host.id) ? 'bg-success' : 'bg-ink-tertiary'
+          }`}
+          title={connectedHosts.has(host.id) ? '已连接' : '未连接'}
+        />
         <span className="truncate text-[13px]">{host.name}</span>
         <span className="ml-auto truncate text-[11px] text-ink-tertiary">{host.address}</span>
       </div>
