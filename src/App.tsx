@@ -164,10 +164,6 @@ export default function App() {
   const tabs = useApp((s) => s.tabs)
   const activeTabId = useApp((s) => s.activeTabId)
   const error = useApp((s) => s.error)
-  const splitRatio = useApp((s) => s.splitRatio)
-  const setSplitRatio = useApp((s) => s.setSplitRatio)
-  const splitRatioY = useApp((s) => s.splitRatioY)
-  const setSplitRatioY = useApp((s) => s.setSplitRatioY)
 
   if (phase === 'loading') {
     return (
@@ -203,12 +199,8 @@ export default function App() {
                     tabId={tab.id}
                     panes={panesOf(tab)}
                     layout={layoutOf(tab)}
-                    colRatio={splitRatio}
-                    rowRatio={splitRatioY}
-                    onColRatioChange={setSplitRatio}
-                    onRowRatioChange={setSplitRatioY}
                     // 每格各包一层 ErrorBoundary：一格炸了（xterm 渲染器那类问题）
-                    // 不该把同一个标签里其它三格一起带走
+                    // 不该把同一个标签里其它几格一起带走
                     renderPane={(pane) => (
                       <ErrorBoundary label={`「${tab.title}」的这一格出错了`}>
                         <TerminalView

@@ -1,0 +1,89 @@
+import { useLayoutEffect, useRef, useState } from 'react'
+import { LAYOUT_ORDER, PANE_LAYOUTS, type PaneLayout } from '@/lib/store'
+import { LayoutIcon } from './LayoutIcon'
+import { useDismiss } from './useDismiss'
+
+interface Props {
+  /** 锚点（clientX/clientY）：菜单从按钮底下展开 */
+  x: number
+  y: number
+  /** 当前生效的形状（打勾） */
+  current: PaneLayout
+  onPick: (layout: PaneLayout) => void
+  onClose: () => void
+}
+
+/** 离窗口边缘至少留这么多，贴边时往里收 */
+const EDGE = 8
+
+/** 按格数分组，组名就是菜单里的小标题 */
+const GROUP_LABEL: Record<number, string> = { 1: '1 格', 2: '2 格', 3: '3 格', 4: '4 格' }
+
+/**
+ * 分屏布局的缩略图弹层。
+ *
+ * 十六种形状平铺成一列太高（窗口矮时底部的项够不着），所以按格数分成四组、
+ * 组内用小示意图排成网格：挑形状是"看图选"的事，名字反而次要。
+ * 关闭时机（点外 / Esc / 滚轮 / 失焦 / resize）与右键菜单共用一套（useDismiss）。
+ */
+export function LayoutMenu({ x, y, current, onPick, onClose }: Props) {
+  const ref = useRef<HTMLDivElement>(null)
+  const [pos, setPos] = useState({ left: x, top: y, ready: false })
+
+  useLayoutEffect(() => {
+    const el = ref.current
+    if (!el) return
+    const { width, height } = el.getBoundingClientRect()
+    setPos({
+      left: Math.max(EDGE, Math.min(x, window.innerWidth - width - EDGE)),
+      top: Math.max(EDGE, Math.min(y, window.innerHeight - height - EDGE)),
+      ready: true,
+    })
+  }, [x, y])
+
+  useDismiss(onClose)
+
+  const groups: Array<[number, PaneLayout[]]> = [1, 2, 3, 4].map((count) => [
+    count,
+    LAYOUT_ORDER.filter((key) => PANE_LAYOUTS[key].cells.length === count),
+  ])
+
+  return (
+    <div
+      ref={ref}
+      role="menu"
+      style={{ left: pos.left, top: pos.top, visibility: pos.ready ? 'visible' : 'hidden' }}
+      className="fixed z-40 w-[340px] rounded-md border border-hairline bg-surface-1 p-2 text-[12px]"
+    >
+      {groups.map(([count, keys]) => (
+        <div key={count} className="mb-1 last:mb-0">
+          <div className="px-1 pb-1 text-[10px] text-ink-tertiary">{GROUP_LABEL[count]}</div>
+          <div className="flex flex-wrap gap-1">
+            {keys.map((key) => {
+              const active = key === current
+              return (
+                <button
+                  key={key}
+                  role="menuitem"
+                  title={PANE_LAYOUTS[key].label}
+                  onClick={() => {
+                    onClose()
+                    onPick(key)
+                  }}
+                  className={`flex w-[76px] flex-col items-center gap-1 rounded-md border px-1 py-1.5 transition-colors ${
+                    active
+                      ? 'border-accent/60 bg-accent/10 text-ink'
+                      : 'border-transparent text-ink-muted hover:bg-surface-2 hover:text-ink'
+                  }`}
+                >
+                  <LayoutIcon layout={key} size={22} className={active ? 'text-accent' : ''} />
+                  <span className="text-[11px] leading-none">{PANE_LAYOUTS[key].label}</span>
+                </button>
+              )
+            })}
+          </div>
+        </div>
+      ))}
+    </div>
+  )
+}

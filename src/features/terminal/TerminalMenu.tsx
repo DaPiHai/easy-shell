@@ -1,5 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
 import { Check } from 'lucide-react'
+import { useDismiss } from '@/components/useDismiss'
 
 export interface TerminalMenuItem {
   label: string
@@ -62,31 +63,11 @@ export function TerminalMenu({ x, y, items, onClose }: Props) {
   }, [])
 
   /**
-   * 关闭时机。菜单挂着不动很烦：它盖在终端上，还挡着下一次点击。
+   * 关闭时机（监听在 useDismiss 里，右键菜单 / 布局菜单共用同一套）。
    *
    * 打开它的那次右键不会误关 —— `mousedown` 早于 `contextmenu`，那时监听还没挂上。
    */
-  useEffect(() => {
-    const onPointerDown = (e: MouseEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) onClose()
-    }
-    const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose()
-    }
-    window.addEventListener('mousedown', onPointerDown, true)
-    // 滚轮：终端内容要跟着滚，菜单留在原地会跟内容错位
-    window.addEventListener('wheel', onClose, { passive: true })
-    window.addEventListener('keydown', onKeyDown, true)
-    window.addEventListener('blur', onClose)
-    window.addEventListener('resize', onClose)
-    return () => {
-      window.removeEventListener('mousedown', onPointerDown, true)
-      window.removeEventListener('wheel', onClose)
-      window.removeEventListener('keydown', onKeyDown, true)
-      window.removeEventListener('blur', onClose)
-      window.removeEventListener('resize', onClose)
-    }
-  }, [onClose])
+  useDismiss(onClose, ref)
 
   /** ↑/↓ 在可用的项之间循环（Enter 交给按钮自己的 click） */
   const move = (delta: number) => {

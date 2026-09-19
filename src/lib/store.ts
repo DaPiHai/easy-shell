@@ -93,10 +93,55 @@ function readRatio(key: string): number {
   }
 }
 
-function writeRatio(key: string, ratio: number): number {
-  const clamped = Math.min(MAX_SPLIT_RATIO, Math.max(MIN_SPLIT_RATIO, ratio))
-  writeLocal(key, String(clamped))
-  return clamped
+/**
+ * 每个带分多宽？没拖过（或存的数据不对）就等分。
+ *
+ * 存的数据是用户可能手改的 localStorage JSON，逐条校验：长度对得上带数、
+ * 每带 > 1%、总和 ≈ 1 —— 半套数据画出来的分屏比没有更糟。
+ */
+export function bandWidths(record: Record<number, number[]>, bands: number): number[] {
+  const stored = record[bands]
+  const usable =
+    Array.isArray(stored) &&
+    stored.length === bands &&
+    stored.every((w) => Number.isFinite(w) && w > 0.01) &&
+    Math.abs(stored.reduce((a, b) => a + b, 0) - 1) < 0.02
+  if (usable) return stored as number[]
+  return Array.from({ length: bands }, () => 1 / bands)
+}
+
+/** 从 localStorage 读带宽度记录。key 是带数，只认 2–4，其余丢掉 */
+function readBands(key: string): Record<number, number[]> {
+  try {
+    const raw = localStorage.getItem(key)
+    if (!raw) return {}
+    const parsed: unknown = JSON.parse(raw)
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {}
+    const out: Record<number, number[]> = {}
+    for (const [k, v] of Object.entries(parsed as Record<string, unknown>)) {
+      const bands = Number(k)
+      const widths = v as unknown
+      if (
+        !Number.isInteger(bands) ||
+        bands < 2 ||
+        bands > 4 ||
+        !Array.isArray(widths) ||
+        widths.length !== bands ||
+        !widths.every((w) => Number.isFinite(w) && w > 0.01) ||
+        Math.abs(widths.reduce((a, b) => a + b, 0) - 1) >= 0.02
+      ) {
+        continue
+      }
+      out[bands] = widths
+    }
+    return out
+  } catch {
+    return {}
+  }
+}
+
+function writeBands(key: string, record: Record<number, number[]>) {
+  writeLocal(key, JSON.stringify(record))
 }
 
 /** 用户自定义配色方案的 key */
@@ -292,10 +337,16 @@ export type PaneLayout =
   | 'rows2'
   | 'cols3'
   | 'rows3'
+  | 'cols4'
+  | 'rows4'
   | 'left1Right2'
   | 'left2Right1'
+  | 'left1Right3'
+  | 'left3Right1'
   | 'top1Bottom2'
   | 'top2Bottom1'
+  | 'top1Bottom3'
+  | 'top3Bottom1'
   | 'grid4'
 
 export const PANE_LAYOUTS: Record<PaneLayout, LayoutSpec> = {
@@ -336,6 +387,72 @@ export const PANE_LAYOUTS: Record<PaneLayout, LayoutSpec> = {
       { c: 1, r: 1 },
       { c: 1, r: 2 },
       { c: 1, r: 3 },
+    ],
+  },
+  cols4: {
+    label: '四列',
+    cols: 4,
+    rows: 1,
+    cells: [
+      { c: 1, r: 1 },
+      { c: 2, r: 1 },
+      { c: 3, r: 1 },
+      { c: 4, r: 1 },
+    ],
+  },
+  rows4: {
+    label: '四行',
+    cols: 1,
+    rows: 4,
+    cells: [
+      { c: 1, r: 1 },
+      { c: 1, r: 2 },
+      { c: 1, r: 3 },
+      { c: 1, r: 4 },
+    ],
+  },
+  left1Right3: {
+    label: '左一右三',
+    cols: 2,
+    rows: 3,
+    cells: [
+      { c: 1, r: 1, rs: 3 },
+      { c: 2, r: 1 },
+      { c: 2, r: 2 },
+      { c: 2, r: 3 },
+    ],
+  },
+  left3Right1: {
+    label: '左三右一',
+    cols: 2,
+    rows: 3,
+    cells: [
+      { c: 1, r: 1 },
+      { c: 1, r: 2 },
+      { c: 1, r: 3 },
+      { c: 2, r: 1, rs: 3 },
+    ],
+  },
+  top1Bottom3: {
+    label: '上一下三',
+    cols: 3,
+    rows: 2,
+    cells: [
+      { c: 1, r: 1, cs: 3 },
+      { c: 1, r: 2 },
+      { c: 2, r: 2 },
+      { c: 3, r: 2 },
+    ],
+  },
+  top3Bottom1: {
+    label: '上三下一',
+    cols: 3,
+    rows: 2,
+    cells: [
+      { c: 1, r: 1 },
+      { c: 2, r: 1 },
+      { c: 3, r: 1 },
+      { c: 1, r: 2, cs: 3 },
     ],
   },
   left1Right2: {
@@ -398,12 +515,52 @@ export const LAYOUT_ORDER: PaneLayout[] = [
   'rows2',
   'cols3',
   'rows3',
+  'cols4',
+  'rows4',
   'left1Right2',
   'left2Right1',
+  'left1Right3',
+  'left3Right1',
   'top1Bottom2',
   'top2Bottom1',
+  'top1Bottom3',
+  'top3Bottom1',
   'grid4',
 ]
+
+/**
+ * 「成长」表：往一个窗口里并进一个标签时，形状该长成哪一档。
+ *
+ * 并标签会 +1 格，形状的格子数得跟着变 —— 若一律回落到"该格数的默认"，
+ * 用户摆好的左一右二并进来一个就突然变四宫格。按家族成长：左一右二长成左一右三，
+ * 新终端正好落在你指的那一格，其余格子顺移。
+ */
+const GROWN_LAYOUT: Record<PaneLayout, PaneLayout | null> = {
+  single: 'cols2',
+  cols2: 'cols3',
+  rows2: 'rows3',
+  cols3: 'cols4',
+  rows3: 'rows4',
+  left1Right2: 'left1Right3',
+  left2Right1: 'left3Right1',
+  top1Bottom2: 'top1Bottom3',
+  top2Bottom1: 'top3Bottom1',
+  // 以下已经到顶（四格是上限，这几种也没有"再长一档"的形状）
+  cols4: null,
+  rows4: null,
+  left1Right3: null,
+  left3Right1: null,
+  top1Bottom3: null,
+  top3Bottom1: null,
+  grid4: null,
+}
+
+/** 按当前形状与新格数挑成长后的形状；家族接不上（一次并好几个）才回落默认 */
+function grownLayout(current: PaneLayout, newCount: number): PaneLayout {
+  const grown = GROWN_LAYOUT[current]
+  if (grown && PANE_LAYOUTS[grown].cells.length === newCount) return grown
+  return layoutForCount(newCount, current)
+}
 
 /**
  * 每种格数回落到哪个形状：关掉一格、并进一个标签之后格数会变，
@@ -731,8 +888,17 @@ interface AppState {
    * 已经不存在的会话上（`ssh_open_shell` 是**网络往返之后**才登记通道的，
    * 关通道那侧却不用等网络，这个赛跑几乎必输）。
    * 等新通道起来了再收源标签，会话两侧交接得上。
+   *
+   * `insertAt` 是落点格的下标：新格子**插到那个位置**（其余顺移），形状按"成长规则"
+   * 选（cols2 长成 cols3、左一右二长成左一右三…，见 `GROWN_LAYOUT`）——
+   * 新终端就出现在你指的那一格附近，而不是永远追加到末尾再整屏重排。
    */
-  mergeTabIntoPane: (targetTabId: string, sourceTabId: string) => void
+  mergeTabIntoPane: (
+    targetTabId: string,
+    sourceTabId: string,
+    insertAt?: number,
+    layoutHint?: PaneLayout,
+  ) => void
   /**
    * 正在被拖的标签（标签栏拖起来时写，放下或 Esc 取消时清）。
    * 跨组件用：PaneGrid 靠它区分"拖着标签来找地方拼"和"拖格子换位"这两件事。
@@ -748,6 +914,11 @@ interface AppState {
   livePanes: Record<string, true>
   setPaneLive: (paneId: string, live: boolean) => void
   /** 两个格子互换位置（拖标题条）。格子整体搬走，终端现场不丢 */
+  /**
+   * 把一格**挪到**另一格的位置（拖标题条）。插入语义：被拖的格子插到目标格的位置上，
+   * 中间的格子顺移 —— 跟标签栏排序一个手感（互换是旧语义，三格以上会显得跳）。
+   * 格子整体搬走，终端现场不丢。
+   */
   movePane: (tabId: string, fromPaneId: string, toPaneId: string) => void
   /** 给某一格换主机（先连上再把会话写进来，见 `PaneHostDialog`） */
   setPaneConnection: (
@@ -779,12 +950,18 @@ interface AppState {
   registerEditorGuard: (tabId: string, guard: EditorGuard) => void
   unregisterEditorGuard: (tabId: string) => void
 
-  /** 左右分屏的比例（左半 / 总宽），拖过分隔条就改这里，localStorage 持久化 */
-  splitRatio: number
-  setSplitRatio: (ratio: number) => void
-  /** 四宫格里横线的位置（上半 / 总高），和列比例一样持久化 */
-  splitRatioY: number
-  setSplitRatioY: (ratio: number) => void
+  /**
+   * 分屏的列宽 / 行高，**按带数各存一份**（和恒为 1）。
+   *
+   * 光有两个标量撑不起三等分、四等分：三列有两条线、四列有三条。
+   * key 是带数（2 = 一条线，3 = 两条，4 = 三条），没拖过的带数不写、用时给等分。
+   * 两列 / 三列 / 四列共用一份列宽（手感一致），「左一右三」这类混合形状也是 ——
+   * 它的列就是两带，右侧三格的行高跟「三行」共用一份。
+   */
+  splitColBands: Record<number, number[]>
+  splitRowBands: Record<number, number[]>
+  setSplitColBands: (bands: number, widths: number[]) => void
+  setSplitRowBands: (bands: number, widths: number[]) => void
 
   /**
    * 终端字号。13px 在 1080p 上刚好，高分屏上就偏小了 ——
@@ -1356,14 +1533,15 @@ export const useApp = create<AppState>((set, get) => ({
     set((s) => {
       const tab = s.tabs.find((t) => t.id === tabId)
       if (!tab) return {}
-      const panes = [...panesOf(tab)]
-      const a = panes.findIndex((p) => p.id === fromPaneId)
-      const b = panes.findIndex((p) => p.id === toPaneId)
-      if (a < 0 || b < 0 || a === b) return {}
-      // 换的是**位置上的两个格子**，不是格子里的内容：格子带着自己的终端实例、
-      // 通道和滚动历史整个搬走（React key 用 pane.id，组件实例不重建）
-      ;[panes[a], panes[b]] = [panes[b], panes[a]]
-      return { tabs: s.tabs.map((t) => (t.id === tabId ? { ...t, panes } : t)) }
+      const panes = panesOf(tab)
+      const from = panes.findIndex((p) => p.id === fromPaneId)
+      const to = panes.findIndex((p) => p.id === toPaneId)
+      if (from < 0 || to < 0 || from === to) return {}
+      // 插入语义：抽出来、插到目标位置，中间顺移（不是互换 —— 三格以上互换会显得跳）
+      const next = [...panes]
+      const [moved] = next.splice(from, 1)
+      next.splice(to, 0, moved)
+      return { tabs: s.tabs.map((t) => (t.id === tabId ? { ...t, panes: next } : t)) }
     }),
 
   setPaneConnection: (tabId, paneId, conn) =>
@@ -1405,7 +1583,7 @@ export const useApp = create<AppState>((set, get) => ({
       return { livePanes: next }
     }),
 
-  mergeTabIntoPane: (targetTabId, sourceTabId) => {
+  mergeTabIntoPane: (targetTabId, sourceTabId, insertAt, layoutHint) => {
     const s = get()
     const target = s.tabs.find((t) => t.id === targetTabId)
     const source = s.tabs.find((t) => t.id === sourceTabId)
@@ -1432,18 +1610,26 @@ export const useApp = create<AppState>((set, get) => ({
     }
 
     // 阶段一：按同样的连接在目标标签里开新格子。这时候源标签的通道还开着，
-    // 会话不会因为"最后一条通道关了"被回收
+    // 会话不会因为"最后一条通道关了"被回收。
+    // 落到哪一格就插到哪个下标（其余顺移）——"拖到哪、新终端就在哪"；
+    // 没给落点（理论上来不到这儿）才退回追加末尾
     const clones = moving.map((p) =>
       makePane({ kind: p.kind, sessionId: p.sessionId, hostId: p.hostId, title: p.title }),
     )
+    const at = Math.max(0, Math.min(panesOf(target).length, insertAt ?? panesOf(target).length))
     set((st) => ({
       tabs: st.tabs.map((t) =>
         t.id === target.id
           ? {
               ...t,
-              panes: [...panesOf(t), ...clones],
-              // 格数变了：原来那个形状的格子数已经对不上，按新格数回落一个默认形状
-              layout: layoutForCount(panesOf(t).length + clones.length, t.layout),
+              panes: [
+                ...panesOf(t).slice(0, at),
+                ...clones,
+                ...panesOf(t).slice(at),
+              ],
+              // 格数变了：形状按"成长规则"长一档（cols2→cols3、左一右二→左一右三…），
+              // 家族接不上才按新格数回落默认
+              layout: layoutHint ?? grownLayout(layoutOf(t), panesOf(t).length + clones.length),
             }
           : t,
       ),
@@ -1535,12 +1721,26 @@ export const useApp = create<AppState>((set, get) => ({
     })
   },
 
-  // 从 localStorage 读上次拖出来的位置，找不到或者解析失败就 0.5。
-  // 列（左右两格 / 四宫格的竖线）沿用改造前就有的 splitRatio 键，老用户的位置不丢
-  splitRatio: readRatio('splitRatio'),
-  setSplitRatio: (ratio) => set({ splitRatio: writeRatio('splitRatio', ratio) }),
-  splitRatioY: readRatio('splitRatioY'),
-  setSplitRatioY: (ratio) => set({ splitRatioY: writeRatio('splitRatioY', ratio) }),
+  // 带宽度：老用户左右分割线的位置从旧 splitRatio / splitRatioY 键迁过来，不丢
+  splitColBands: (() => {
+    const stored = readBands('splitColBands')
+    return stored[2] ? stored : { ...stored, 2: [readRatio('splitRatio')] }
+  })(),
+  splitRowBands: (() => {
+    const stored = readBands('splitRowBands')
+    return stored[2] ? stored : { ...stored, 2: [readRatio('splitRatioY')] }
+  })(),
+  setSplitColBands: (bands, widths) => {
+    const next = { ...get().splitColBands, [bands]: widths }
+    writeBands('splitColBands', next)
+    set({ splitColBands: next })
+  },
+  setSplitRowBands: (bands, widths) => {
+    const next = { ...get().splitRowBands, [bands]: widths }
+    writeBands('splitRowBands', next)
+    set({ splitRowBands: next })
+  },
+
 
   termFontSize: (() => {
     try {

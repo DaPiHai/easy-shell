@@ -2,7 +2,6 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { FileCode2, FolderOpen, FolderTree, RotateCw, Terminal, X } from 'lucide-react'
 import {
   isSplittable,
-  LAYOUT_ORDER,
   layoutOf,
   PANE_LAYOUTS,
   panesOf,
@@ -11,7 +10,7 @@ import {
   type Tab,
 } from '@/lib/store'
 import { LayoutIcon } from '@/components/LayoutIcon'
-import { TerminalMenu } from './TerminalMenu'
+import { LayoutMenu } from '@/components/LayoutMenu'
 
 /** 拖拽判定阈值：手抖点一下不该被当成拖动 */
 const DRAG_THRESHOLD = 5
@@ -311,28 +310,20 @@ export function TabBar() {
       )}
 
       {/*
-        分屏布局菜单。十种形状平铺一列：每一行左边是形状示意图、右边是格数，
-        当前那种打勾。挑格数变小的形状会收掉末尾几格（那些终端的 shell 会结束），
-        所以格数写在每一行上 —— 选之前就该看见。
+        分屏布局菜单：十六种形状按格数分组、缩略图网格。
+        选格数变小的形状会收掉末尾几格（那些终端的 shell 会结束），
+        所以格数写在每一项底下 —— 选之前就该看见
       */}
       {layoutMenu && (
-        <TerminalMenu
+        <LayoutMenu
           x={layoutMenu.x}
           y={layoutMenu.y}
-          onClose={() => setLayoutMenu(null)}
-          items={LAYOUT_ORDER.map((key) => {
+          current={(() => {
             const target = tabs.find((t) => t.id === layoutMenu.tabId)
-            const cells = PANE_LAYOUTS[key].cells.length
-            return {
-              label: PANE_LAYOUTS[key].label,
-              hint: `${cells} 格`,
-              icon: <LayoutIcon layout={key} size={14} />,
-              checked: !!target && layoutOf(target) === key,
-              // 只对还没连上的标签禁用（比如那个标签刚被关掉）
-              disabled: !target || !isSplittable(target),
-              onSelect: () => setPaneLayout(layoutMenu.tabId, key),
-            }
-          })}
+            return layoutOf(target)
+          })()}
+          onPick={(key) => setPaneLayout(layoutMenu.tabId, key)}
+          onClose={() => setLayoutMenu(null)}
         />
       )}
     </div>

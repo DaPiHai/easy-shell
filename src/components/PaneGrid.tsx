@@ -1,6 +1,15 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { ChevronDown, FolderOpen, RotateCw, Terminal, X } from 'lucide-react'
-import { acceptsPanes, MAX_PANES, PANE_LAYOUTS, panesOf, useApp, type Pane, type PaneLayout } from '@/lib/store'
+import {
+  acceptsPanes,
+  bandWidths,
+  MAX_PANES,
+  PANE_LAYOUTS,
+  panesOf,
+  useApp,
+  type Pane,
+  type PaneLayout,
+} from '@/lib/store'
 
 /** 拖拽判定阈值：手抖点一下不该被当成拖动 */
 const DRAG_THRESHOLD = 5
@@ -8,66 +17,91 @@ const DRAG_THRESHOLD = 5
 const MIN_PANE = 120
 
 /**
- * 一条可拖的分割线：位置和跨度都用容器的比例（0–1）表示。
- * `at` 是它压在哪个比例上（列线看 colRatio，行线看 rowRatio），
- * from / to 是它在**另一条轴**上从哪儿画到哪儿 —— 三格的几种排法里，
- * 那条短线只该画在它真正分界的那一段上（比如「左一右二」的横线只在右列里）。
+ * 一条可拖的分割线。
+ *
+ * `at` 是它在轴上的位置（前若干带宽度之和），`from` / `to` 是它在**另一条轴**上的跨度 ——
+ * 三格、四格的混合排法里，短线只画在真正分界的那一段（「左一右二」的横线只在右列里）。
+ * `band` 记着它分开的是哪两带：拖动时改的就是这两带的宽度。
  */
 interface Divider {
   axis: 'col' | 'row'
   at: number
   from: number
   to: number
+  band: number
 }
 
-/** 这一形状有哪些可拖的分割线。等分的三列 / 三行没有（固定 1fr，不值得为它加两个比例） */
-function dividersOf(layout: PaneLayout, col: number, row: number): Divider[] {
+/** 第 i 条边界在轴上的位置 = 前 i+1 带宽度之和 */
+function edgeAt(widths: number[], band: number): number {
+  return widths.slice(0, band + 1).reduce((a, b) => a + b, 0)
+}
+
+/** 这一形状有哪些可拖的分割线。落点由带宽度算出，跨度按形状给 */
+function dividersOf(layout: PaneLayout, colW: number[], rowW: number[]): Divider[] {
+  const colEdge = (band: number, from: number, to: number): Divider => ({
+    axis: 'col',
+    at: edgeAt(colW, band),
+    band,
+    from,
+    to,
+  })
+  const rowEdge = (band: number, from: number, to: number): Divider => ({
+    axis: 'row',
+    at: edgeAt(rowW, band),
+    band,
+    from,
+    to,
+  })
+  const full = { from: 0, to: 1 }
+
   switch (layout) {
     case 'cols2':
-      return [{ axis: 'col', at: col, from: 0, to: 1 }]
+      return [colEdge(0, full.from, full.to)]
     case 'rows2':
-      return [{ axis: 'row', at: row, from: 0, to: 1 }]
+      return [rowEdge(0, full.from, full.to)]
+    case 'cols3':
+      return [colEdge(0, 0, 1), colEdge(1, 0, 1)]
+    case 'rows3':
+      return [rowEdge(0, 0, 1), rowEdge(1, 0, 1)]
+    case 'cols4':
+      return [colEdge(0, 0, 1), colEdge(1, 0, 1), colEdge(2, 0, 1)]
+    case 'rows4':
+      return [rowEdge(0, 0, 1), rowEdge(1, 0, 1), rowEdge(2, 0, 1)]
     case 'grid4':
-      return [
-        { axis: 'col', at: col, from: 0, to: 1 },
-        { axis: 'row', at: row, from: 0, to: 1 },
-      ]
+      return [colEdge(0, 0, 1), rowEdge(0, 0, 1)]
     case 'left1Right2':
-      return [
-        { axis: 'col', at: col, from: 0, to: 1 },
-        { axis: 'row', at: row, from: col, to: 1 },
-      ]
+      return [colEdge(0, 0, 1), rowEdge(0, colW[0], 1)]
     case 'left2Right1':
-      return [
-        { axis: 'col', at: col, from: 0, to: 1 },
-        { axis: 'row', at: row, from: 0, to: col },
-      ]
+      return [colEdge(0, 0, 1), rowEdge(0, 0, colW[0])]
+    case 'left1Right3':
+      return [colEdge(0, 0, 1), rowEdge(0, colW[0], 1), rowEdge(1, colW[0], 1)]
+    case 'left3Right1':
+      return [colEdge(0, 0, 1), rowEdge(0, 0, colW[0]), rowEdge(1, 0, colW[0])]
     case 'top1Bottom2':
-      return [
-        { axis: 'row', at: row, from: 0, to: 1 },
-        { axis: 'col', at: col, from: row, to: 1 },
-      ]
+      return [rowEdge(0, 0, 1), colEdge(0, rowW[0], 1)]
     case 'top2Bottom1':
-      return [
-        { axis: 'row', at: row, from: 0, to: 1 },
-        { axis: 'col', at: col, from: 0, to: row },
-      ]
+      return [rowEdge(0, 0, 1), colEdge(0, 0, rowW[0])]
+    case 'top1Bottom3':
+      return [rowEdge(0, 0, 1), colEdge(0, rowW[0], 1), colEdge(1, rowW[0], 1)]
+    case 'top3Bottom1':
+      return [rowEdge(0, 0, 1), colEdge(0, 0, rowW[0]), colEdge(1, 0, rowW[0])]
     default:
       return []
   }
 }
 
-/** 拖标签落到本窗口时的几种结果：能并 / 拖到了自己身上 / 满了 / 放不下 / 有一边不是终端 */
+/** 拖标签落到本窗口时的结果：能并 / 拖到了自己身上 / 满了 / 放不下 / 有一边不是终端 */
 type TabDropState = 'ok' | 'self' | 'full' | 'tight' | 'notTerminal'
 
-/** 每种状态给用户看的一句话 */
+/** 拒绝时的浮签文案（能并的时候文案跟着落点走，见 onMove） */
 const TAB_DROP_TEXT: Record<TabDropState, string> = {
-  ok: '松手：把这个标签并进这里（那一格会重开一个 shell）',
+  ok: '',
   self: '这是它自己的窗口 —— 拖到别的终端窗口里才能并',
   full: `并不下来：这个窗口已经 ${MAX_PANES} 格了`,
   tight: '并不下来：这个窗口剩下的格子放不下它',
   notTerminal: '并不下来：文件面板和编辑器里没有格子',
 }
+
 
 
 interface Props {
@@ -76,10 +110,6 @@ interface Props {
   panes: Pane[]
   /** 这一屏摆成什么形状（见 store 的 `PANE_LAYOUTS`） */
   layout: PaneLayout
-  colRatio: number
-  rowRatio: number
-  onColRatioChange: (ratio: number) => void
-  onRowRatioChange: (ratio: number) => void
   /** 渲染某一格的终端。PaneGrid 只管摆位，不关心里面是什么 */
   renderPane: (pane: Pane) => React.ReactNode
 }
@@ -101,21 +131,14 @@ interface Props {
  *    wry 装的 IDropTarget 会让内部 HTML5 拖拽在 Windows 上整体失效 —— 同一套
  *    手法在 SftpPanel 的双栏拖拽上已经跑通，这里照搬。
  */
-export function PaneGrid({
-  tabId,
-  panes,
-  layout,
-  colRatio,
-  rowRatio,
-  onColRatioChange,
-  onRowRatioChange,
-  renderPane,
-}: Props) {
+export function PaneGrid({ tabId, panes, layout, renderPane }: Props) {
   const containerRef = useRef<HTMLDivElement>(null)
   /** 每一格的 DOM，拖拽换位时做命中测试用 */
   const cellsRef = useRef(new Map<string, HTMLDivElement>())
 
   const focusedPaneId = useApp((s) => s.focusedPane[tabId])
+  const splitColBands = useApp((s) => s.splitColBands)
+  const splitRowBands = useApp((s) => s.splitRowBands)
 
   const spec = PANE_LAYOUTS[layout]
   const count = panes.length
@@ -123,24 +146,28 @@ export function PaneGrid({
   const showTitle = count > 1
   const activeId = focusedPaneId && panes.some((p) => p.id === focusedPaneId) ? focusedPaneId : panes[0]?.id
 
-  /**
-   * 网格的列宽 / 行高。两列时用拖出来的比例，三列 / 三行是等分（不给它们各配一个比例，
-   * 那得再加两个持久化字段，而三格等分本来也没什么可调的）。
-   */
-  const gridColumns =
-    spec.cols === 1 ? '1fr' : spec.cols === 2 ? `${colRatio}fr ${1 - colRatio}fr` : '1fr 1fr 1fr'
-  const gridRows =
-    spec.rows === 1 ? '1fr' : spec.rows === 2 ? `${rowRatio}fr ${1 - rowRatio}fr` : '1fr 1fr 1fr'
-  const dividers = dividersOf(layout, colRatio, rowRatio)
+  /** 这一形状的列宽 / 行高（各带数一份，没拖过就等分） */
+  const colWidths = bandWidths(splitColBands, spec.cols)
+  const rowWidths = bandWidths(splitRowBands, spec.rows)
+  const gridColumns = colWidths.map((w) => `${w}fr`).join(' ')
+  const gridRows = rowWidths.map((w) => `${w}fr`).join(' ')
+  const dividers = dividersOf(layout, colWidths, rowWidths)
 
   /* ---------------- 分隔条 ---------------- */
 
-  const dragAxis = useRef<'col' | 'row' | null>(null)
+  /** 拖的是哪条轴的哪条边界（band = 边界左边那带的下标） */
+  const dragBand = useRef<{ axis: 'col' | 'row'; band: number } | null>(null)
+
+  const stopAxisDrag = useCallback(() => {
+    dragBand.current = null
+    document.body.style.cursor = ''
+    document.body.style.userSelect = ''
+  }, [])
 
   const onPointerMove = useCallback(
     (e: PointerEvent) => {
-      const axis = dragAxis.current
-      if (!axis) return
+      const drag = dragBand.current
+      if (!drag) return
       // 松手发生在窗口外面时 webview 收不到 pointerup，靠"当前没按键"判回来
       if (e.buttons === 0) {
         stopAxisDrag()
@@ -148,26 +175,35 @@ export function PaneGrid({
       }
       const rect = containerRef.current?.getBoundingClientRect()
       if (!rect) return
-      if (axis === 'col') {
-        if (rect.width <= 0) return
-        const lo = Math.min(0.45, MIN_PANE / rect.width)
-        const ratio = (e.clientX - rect.left) / rect.width
-        onColRatioChange(Math.min(1 - lo, Math.max(lo, ratio)))
-      } else {
-        if (rect.height <= 0) return
-        const lo = Math.min(0.45, MIN_PANE / rect.height)
-        const ratio = (e.clientY - rect.top) / rect.height
-        onRowRatioChange(Math.min(1 - lo, Math.max(lo, ratio)))
-      }
+      const isCol = drag.axis === 'col'
+      const size = isCol ? rect.width : rect.height
+      const pos = isCol ? (e.clientX - rect.left) / rect.width : (e.clientY - rect.top) / rect.height
+      if (size <= 0) return
+      // 拖第 band 条边界 = 在带 band 和 band+1 之间挪宽度，各自夹住最小格
+      const bands = isCol ? spec.cols : spec.rows
+      const widths = bandWidths(
+        isCol ? useApp.getState().splitColBands : useApp.getState().splitRowBands,
+        bands,
+      )
+      const minFrac = MIN_PANE / size
+      const offset = widths.slice(0, drag.band).reduce((a, b) => a + b, 0)
+      const pairTotal = widths[drag.band] + widths[drag.band + 1]
+      const na = Math.min(pairTotal - minFrac, Math.max(minFrac, pos - offset))
+      const next = [...widths]
+      next[drag.band] = na
+      next[drag.band + 1] = pairTotal - na
+      if (isCol) useApp.getState().setSplitColBands(bands, next)
+      else useApp.getState().setSplitRowBands(bands, next)
     },
-    [onColRatioChange, onRowRatioChange],
+    [spec.cols, spec.rows, stopAxisDrag],
   )
 
-  const stopAxisDrag = useCallback(() => {
-    dragAxis.current = null
-    document.body.style.cursor = ''
-    document.body.style.userSelect = ''
-  }, [])
+  const startAxisDrag = (axis: 'col' | 'row', band: number) => (e: React.PointerEvent) => {
+    e.preventDefault()
+    dragBand.current = { axis, band }
+    document.body.style.cursor = axis === 'col' ? 'col-resize' : 'row-resize'
+    document.body.style.userSelect = 'none'
+  }
 
   useEffect(() => {
     window.addEventListener('pointermove', onPointerMove)
@@ -177,13 +213,6 @@ export function PaneGrid({
       window.removeEventListener('pointerup', stopAxisDrag)
     }
   }, [onPointerMove, stopAxisDrag])
-
-  const startAxisDrag = (axis: 'col' | 'row') => (e: React.PointerEvent) => {
-    e.preventDefault()
-    dragAxis.current = axis
-    document.body.style.cursor = axis === 'col' ? 'col-resize' : 'row-resize'
-    document.body.style.userSelect = 'none'
-  }
 
   /* ---------------- 拖标题条换位 ---------------- */
 
@@ -199,15 +228,21 @@ export function PaneGrid({
    * `draggingTabId`（两个监听器都挂在 window 上，谁先跑不保证）。
    */
   const tabDragOverRef = useRef<string | null>(null)
-  /** 落点在本窗口时给用户看的高亮；state 决定它说的话（见下面的遮罩） */
-  const [tabDrop, setTabDrop] = useState<TabDropState | null>(null)
+  /** 落点格：新标签并进来时插到这一格的位置。只有真放得下才有值 */
+  const tabDropPlanRef = useRef<{ insertAt: number; layoutHint?: PaneLayout } | null>(null)
+  /** 落点格 + 结果（ok 时高亮那一格，其余只给浮签） */
+  const [tabDrop, setTabDrop] = useState<{ state: TabDropState; paneId: string | null } | null>(null)
+  /** 跟着光标的浮签（SftpPanel 那套 ghost）：动作或拒绝原因 */
+  const [ghost, setGhost] = useState<{ x: number; y: number; text: string } | null>(null)
 
   // 拖拽取消（Esc）或标签被放下时不会再有 mousemove，高亮得跟着灭
   const draggingTabId = useApp((s) => s.draggingTabId)
   useEffect(() => {
     if (!draggingTabId) {
       tabDragOverRef.current = null
+      tabDropPlanRef.current = null
       setTabDrop((cur) => (cur ? null : cur))
+      setGhost((cur) => (cur ? null : cur))
     }
   }, [draggingTabId])
 
@@ -227,7 +262,7 @@ export function PaneGrid({
   }, [])
 
   /**
-   * 作废这一轮"拖标签"：清掉落点、高亮，以及 store 里的拖拽标记。
+   * 作废这一轮"拖标签"：清掉落点、高亮、浮签，以及 store 里的拖拽标记。
    *
    * 三种情况都要走这里 —— 鼠标松在窗口外面（webview 收不到 mouseup）、
    * 源标签在拖的过程中没了、指针离开窗口。少了它屏幕上会留一块死高亮，
@@ -235,7 +270,9 @@ export function PaneGrid({
    */
   const cancelTabDrop = useCallback(() => {
     tabDragOverRef.current = null
+    tabDropPlanRef.current = null
     setTabDrop((cur) => (cur ? null : cur))
+    setGhost((cur) => (cur ? null : cur))
     useApp.getState().setDraggingTabId(null)
   }, [])
 
@@ -260,27 +297,67 @@ export function PaneGrid({
           cancelTabDrop()
           return
         }
-        const inside = insideMe(e.clientX, e.clientY)
-        tabDragOverRef.current = inside ? dragTabId : null
-        if (inside) {
-          // 一律读**实时** store：这个 effect 只注册一次，闭包里的 panes 是旧的
-          const now = useApp.getState()
-          const target = now.tabs.find((t) => t.id === tabId)
-          const targetCount = panesOf(target).length
-          const state: TabDropState =
-            dragTabId === tabId
-              ? 'self'
-              : panesOf(src).length === 0 || !acceptsPanes(target)
-                ? 'notTerminal'
-                : targetCount >= MAX_PANES
-                  ? 'full'
-                  : panesOf(src).length <= MAX_PANES - targetCount
-                    ? 'ok'
-                    : 'tight'
-          setTabDrop((cur) => (cur && cur === state ? cur : state))
-        } else {
+        if (!insideMe(e.clientX, e.clientY)) {
+          tabDragOverRef.current = null
+          tabDropPlanRef.current = null
           setTabDrop((cur) => (cur ? null : cur))
+          setGhost((cur) => (cur ? null : cur))
+          return
         }
+
+        // 一律读**实时** store：这个 effect 只注册一次，闭包里的 panes 是旧的
+        const now = useApp.getState()
+        const target = now.tabs.find((t) => t.id === tabId)
+        const targetPanes = panesOf(target)
+        const hit = cellAt(e.clientX, e.clientY)
+        const state: TabDropState =
+          dragTabId === tabId
+            ? 'self'
+            : panesOf(src).length === 0 || !acceptsPanes(target)
+              ? 'notTerminal'
+              : targetPanes.length >= MAX_PANES
+                ? 'full'
+                : panesOf(src).length <= MAX_PANES - targetPanes.length
+                  ? 'ok'
+                  : 'tight'
+
+        if (state !== 'ok') {
+          tabDragOverRef.current = null
+          tabDropPlanRef.current = null
+          setTabDrop({ state, paneId: null })
+          setGhost({ x: e.clientX, y: e.clientY, text: TAB_DROP_TEXT[state] })
+          return
+        }
+
+        // 落点格的下标 = 新格子插进去的位置。单格窗口特殊：落点半边决定横竖
+        const hitIndex = targetPanes.findIndex((p) => p.id === hit)
+        let insertAt = hitIndex >= 0 ? hitIndex : targetPanes.length
+        let layoutHint: PaneLayout | undefined
+        let text = '松手：并到这一格（那一格会重开一个 shell）'
+        if (targetPanes.length === 1 && panesOf(src).length === 1) {
+          const r = (hit ? cellsRef.current.get(hit) : null)?.getBoundingClientRect()
+          if (r) {
+            const onRight = e.clientX - r.left > r.width / 2
+            const below = e.clientY - r.top > r.height / 2
+            const horizontal = Math.abs(e.clientX - (r.left + r.width / 2)) >
+              Math.abs(e.clientY - (r.top + r.height / 2))
+            if (horizontal) {
+              layoutHint = 'cols2'
+              insertAt = onRight ? 1 : 0
+              text = `松手：并到${onRight ? '右侧' : '左侧'}（重开一个 shell）`
+            } else {
+              layoutHint = 'rows2'
+              insertAt = below ? 1 : 0
+              text = `松手：并到${below ? '下方' : '上方'}（重开一个 shell）`
+            }
+          }
+        }
+        tabDragOverRef.current = dragTabId
+        tabDropPlanRef.current = { insertAt, layoutHint }
+        setTabDrop({ state, paneId: hit })
+        setGhost((cur) =>
+          cur && cur.text === text ? cur : { x: e.clientX, y: e.clientY, text },
+        )
         return
       }
 
@@ -303,13 +380,16 @@ export function PaneGrid({
     }
 
     const onUp = (e: MouseEvent) => {
-      // 拖着标签松手：把这个标签并进本窗口
+      // 拖着标签松手：把这个标签并进本窗口（插到落点格的位置）
       const draggedTabId = tabDragOverRef.current
+      const plan = tabDropPlanRef.current
       if (draggedTabId) {
         tabDragOverRef.current = null
+        tabDropPlanRef.current = null
         setTabDrop(null)
-        if (insideMe(e.clientX, e.clientY)) {
-          useApp.getState().mergeTabIntoPane(tabId, draggedTabId)
+        setGhost(null)
+        if (plan && insideMe(e.clientX, e.clientY)) {
+          useApp.getState().mergeTabIntoPane(tabId, draggedTabId, plan.insertAt, plan.layoutHint)
         }
         return
       }
@@ -321,9 +401,9 @@ export function PaneGrid({
       // 没拖动就是「点了一下标题」：打开这一格的换主机对话框。
       // 刻意**不用** click 事件 —— 拖完（哪怕拖回原地）浏览器照样会补一次 click，
       // 那时候弹框就成了"拖一下就蹦出个对话框"。mouseup 只在这里判一次，干净。
-      const onOwnTitle = !!(e.target as HTMLElement | null)?.closest(
-        `[data-pane-title="${st.paneId}"]`,
-      )
+      // target 可能不是元素（事件直接派发到 window 上时是 window），closest 前先验
+      const upTarget = e.target instanceof HTMLElement ? e.target : null
+      const onOwnTitle = !!upTarget?.closest(`[data-pane-title="${st.paneId}"]`)
       endSwap()
       if (!moved) {
         if (onOwnTitle) useApp.getState().setPaneHostTarget({ tabId, paneId: st.paneId })
@@ -394,7 +474,8 @@ export function PaneGrid({
               showTitle={showTitle}
               focused={pane.id === activeId}
               dragging={swapSource === pane.id}
-              dropActive={swapTarget === pane.id}
+              // 两类拖拽共用这一格高亮：拖标题换位（swapTarget）、拖标签并进来（tabDrop）
+              dropActive={swapTarget === pane.id || tabDrop?.paneId === pane.id}
               closable={count > 1}
               registerCell={(el) => {
                 if (el) cellsRef.current.set(pane.id, el)
@@ -408,13 +489,13 @@ export function PaneGrid({
         })}
       </div>
 
-      {/* 分割线：按形状给位置和跨度，能拖的才画（等分三列 / 三行没有） */}
+      {/* 分割线：按形状给位置和跨度，能拖的才画（单格没有） */}
       {dividers.map((d) => (
         <div
-          key={`${d.axis}-${d.at}-${d.from}-${d.to}`}
+          key={`${d.axis}-${d.band}`}
           role="separator"
           aria-orientation={d.axis === 'col' ? 'vertical' : 'horizontal'}
-          onPointerDown={startAxisDrag(d.axis)}
+          onPointerDown={startAxisDrag(d.axis, d.band)}
           title={d.axis === 'col' ? '拖动调整左右比例' : '拖动调整上下比例'}
           className={`group absolute bg-hairline transition-colors hover:bg-accent/60 ${
             d.axis === 'col' ? 'w-px cursor-col-resize' : 'h-px cursor-row-resize'
@@ -443,19 +524,16 @@ export function PaneGrid({
       ))}
 
       {/*
-        标签栏里拖着某个标签落在本窗口上：整块高亮 + 一句说明，松手就拼进来。
-        接不下时（这个窗口已经四格、或者拖来的不是终端标签）换成警示色，
-        别让人以为松手能成
+        拖标签进来的浮签：跟着光标走，说明松手会发生什么（或为什么接不下）。
+        高亮画在具体那一格上（PaneFrame 的 dropActive），这里不再整窗罩一层 ——
+        "拖到哪、落在哪"要一眼能对上
       */}
-      {tabDrop && (
+      {ghost && (
         <div
-          className={`pointer-events-none absolute inset-0 z-10 grid place-items-center border-2 border-dashed ${
-            tabDrop === 'ok' ? 'border-accent bg-accent/10' : 'border-danger bg-danger/10'
-          }`}
+          className="pointer-events-none fixed z-50 rounded-md border border-hairline bg-surface-1/95 px-2.5 py-1 text-[11px] text-ink"
+          style={{ left: ghost.x + 14, top: ghost.y + 12 }}
         >
-          <span className="rounded-md border border-hairline bg-surface-1/95 px-3 py-1.5 text-[12px] text-ink">
-            {TAB_DROP_TEXT[tabDrop]}
-          </span>
+          {ghost.text}
         </div>
       )}
     </div>
