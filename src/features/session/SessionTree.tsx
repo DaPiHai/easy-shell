@@ -5,6 +5,7 @@ import {
   FileCode2,
   FolderOpen,
   FolderPlus,
+  ListChecks,
   PanelLeftClose,
   Pencil,
   Plus,
@@ -33,6 +34,7 @@ export function SessionTree() {
     setSettingsOpen,
     openLocalFileDialog,
     addTab,
+    openBatchTab,
     removeHost,
     setConfirmPrompt,
     promptNewGroup,
@@ -300,6 +302,14 @@ export function SessionTree() {
         >
           <SquareTerminal size={13} className="shrink-0" />
           本地 Shell
+        </button>
+        <button
+          onClick={() => openBatchTab()}
+          className="flex h-7 w-full items-center gap-2 rounded px-2 text-[12px] text-ink-subtle transition-colors hover:bg-surface-2 hover:text-ink"
+          title="勾几台主机跑同一条命令，把每台的输出收回来"
+        >
+          <ListChecks size={13} className="shrink-0" />
+          批量执行
         </button>
         <button
           onClick={() => setSnippetsOpen(true)}

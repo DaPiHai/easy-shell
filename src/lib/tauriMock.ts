@@ -305,6 +305,25 @@ export async function invoke<T>(cmd: string, args: Record<string, unknown> = {})
     case 'ssh_close_channel':
       return later(undefined as T)
 
+    /**
+     * 批量执行的假结果。预览里没有真服务器，但**必须返回结构对的东西**：
+     * 落到 default 的 console.warn 会拿到 undefined，面板拿着它继续跑，
+     * 看起来像"全都成功了"。命令里带 fail 就演一次非零退出，好把失败态也照出来。
+     */
+    case 'ssh_exec': {
+      const command = String(args.command ?? '')
+      const failing = /fail|error/i.test(command)
+      const out = failing
+        ? ''
+        : `mock-host: ${command || '(空命令)'}\n第二行输出\n`
+      return later({
+        exitCode: failing ? 1 : 0,
+        stdout: out,
+        stderr: failing ? `bash: ${command}: command failed\n` : '',
+        timedOut: false,
+      } as T)
+    }
+
     case 'known_hosts_forget':
       // 真后端会从 known_hosts 里删掉这一行。预览里没有文件可删，
       // 但**必须显式返回**，否则落到 default 的 console.warn，

@@ -1,6 +1,7 @@
 import {
   Command,
   FileCode2,
+  ListChecks,
   Lock,
   PanelLeftClose,
   PanelLeftOpen,
@@ -58,6 +59,10 @@ export function EmptyState() {
           >
             <SquareTerminal size={13} className="shrink-0" />
             <span>本地 Shell</span>
+          </button>
+          <button onClick={() => useApp.getState().openBatchTab()} className={rowClass}>
+            <ListChecks size={13} className="shrink-0" />
+            <span>批量执行</span>
           </button>
           <button onClick={() => void openLocalFileDialog()} className={rowClass}>
             <FileCode2 size={13} className="shrink-0" />

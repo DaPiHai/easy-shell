@@ -96,6 +96,35 @@ impl server::Handler for TestServer {
         Ok(())
     }
 
+    /**
+     * 批量执行那条路：`exec` 请求。
+     *
+     * 回复顺序**刻意照真 sshd 来**：先输出、再退出码、然后**再补一段输出**、最后 eof。
+     * 退出码之后那一段是最容易被丢的（把退出码当结束信号的实现会丢它），
+     * 而且丢掉的往往正是报错那几行。
+     * 命令里带 `hang` 就不发 eof —— 用来验证超时标记真的会置上。
+     */
+    async fn exec_request(
+        &mut self,
+        channel: ChannelId,
+        data: &[u8],
+        session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        let cmd = String::from_utf8_lossy(data).to_string();
+        let cmd = cmd.trim().to_string();
+        session.data(channel, format!("OUT:{cmd}\n").into_bytes())?;
+        session.extended_data(channel, 1, b"ERR:warn\n".to_vec())?;
+        // 挂死的命令：只有输出、没有退出码也没有 eof —— 跟真机上一条还在跑的命令一样
+        if cmd.contains("hang") {
+            return Ok(())
+        }
+        let _ = session.exit_status_request(channel, 3);
+        session.data(channel, b"TAIL\n".to_vec())?;
+        session.eof(channel)?;
+        session.close(channel)?;
+        Ok(())
+    }
+
     /// 让端口转发测试有东西可连：把收到的字节原样塞回去。
     ///
     /// 目标端口 0 一律拒 —— 真 sshd 会去连这个 (host, port)，端口 0 谁也连不上。
@@ -302,6 +331,58 @@ async fn shell_通道能收发数据() {
 
     let echoed = read_until(&mut channel, b"ECHO:hello").await;
     assert!(echoed, "发出去的 hello 没被回显回来");
+}
+
+/**
+ * 批量执行：`exec` 一次、把输出收回来。
+ *
+ * 这条链路的三件事靠读协议推演不可靠 —— stderr 到底走不走 extended data、
+ * 退出码之后还会不会有数据、超时到底会不会被标记。假服务端按真 sshd 的顺序回，
+ * 于是这三件事都在这个用例里有断言。
+ */
+#[tokio::test]
+async fn exec_能收回输出与退出码() {
+    use easy_shell_lib::batch::collect_exec;
+
+    let port = spawn_server().await;
+    let handle = connect_and_auth(&config_for(port)).await.unwrap();
+
+    let mut channel = handle.channel_open_session().await.unwrap();
+    channel.exec(true, "ls -l").await.unwrap();
+
+    let result = collect_exec(&mut channel, Duration::from_secs(5)).await;
+    assert_eq!(result.exit_code, Some(3), "退出码没拿到");
+    assert!(result.stdout.contains("OUT:ls -l"), "stdout 不对: {:?}", result.stdout);
+    assert!(
+        result.stdout.contains("TAIL"),
+        "退出码之后的输出丢了 —— 那一段常常正是报错信息: {:?}",
+        result.stdout
+    );
+    assert!(
+        result.stderr.contains("ERR:warn"),
+        "stderr 没走 extended data: {:?}",
+        result.stderr
+    );
+    assert!(!result.timed_out, "命令正常结束却被标成了超时");
+}
+
+/// 挂死的命令必须能靠时限脱身，而且**要明确标成超时** ——
+/// 不标的话前端会拿那段截断的输出当完整结果，退出码又是 null，看着像成功
+#[tokio::test]
+async fn exec_挂死时按超时收场() {
+    use easy_shell_lib::batch::collect_exec;
+
+    let port = spawn_server().await;
+    let handle = connect_and_auth(&config_for(port)).await.unwrap();
+
+    let mut channel = handle.channel_open_session().await.unwrap();
+    channel.exec(true, "hang").await.unwrap();
+
+    let result = collect_exec(&mut channel, Duration::from_millis(300)).await;
+    assert!(result.timed_out, "服务端一直不结束，却没有被标成超时");
+    // 掐断之前收到的输出要留着 —— 知道它跑到哪一步比什么都看不到强
+    assert!(result.stdout.contains("OUT:hang"), "超时前的输出不该丢");
+    assert_eq!(result.exit_code, None, "超时了不该凭空编一个退出码出来");
 }
 
 #[tokio::test]

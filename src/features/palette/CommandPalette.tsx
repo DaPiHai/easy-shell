@@ -5,6 +5,7 @@ import {
   FolderOpen,
   FolderPlus,
   KeyRound,
+  ListChecks,
   Lock,
   PanelLeftClose,
   PanelLeftOpen,
@@ -193,6 +194,16 @@ export function CommandPalette() {
               >
                 <ScrollText size={14} />
                 命令片段
+              </Command.Item>
+              <Command.Item
+                onSelect={() => {
+                  useApp.getState().openBatchTab()
+                  close()
+                }}
+              >
+                <ListChecks size={14} />
+                批量执行
+                <span className="ml-auto text-[11px] text-ink-tertiary">多台主机跑同一条命令</span>
               </Command.Item>
               <Command.Item
                 onSelect={() => {

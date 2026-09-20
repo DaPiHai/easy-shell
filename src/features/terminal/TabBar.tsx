@@ -1,5 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { FileCode2, FolderOpen, FolderTree, RotateCw, Terminal, X } from 'lucide-react'
+import {
+  FileCode2,
+  FolderOpen,
+  FolderTree,
+  ListChecks,
+  RotateCw,
+  Terminal,
+  X,
+} from 'lucide-react'
 import {
   isSplittable,
   layoutOf,
@@ -201,6 +209,8 @@ export function TabBar() {
               <FolderTree size={12} className="shrink-0 text-ink-tertiary" />
             ) : tab.kind === 'editor' ? (
               <FileCode2 size={12} className="shrink-0 text-ink-tertiary" />
+            ) : tab.kind === 'batch' ? (
+              <ListChecks size={12} className="shrink-0 text-ink-tertiary" />
             ) : (
               <Terminal size={12} className="shrink-0 text-ink-tertiary" />
             )}

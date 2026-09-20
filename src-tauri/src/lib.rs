@@ -1,6 +1,10 @@
 use known_hosts::KnownHosts;
 
 mod batcher;
+/// 批量执行：在一条已认证的会话上开 exec 通道跑一条命令（只跑一条，
+/// 「跑哪几台 / 并发几个 / 重不重试」是前端的事）。单独成模块是因为
+/// 它跟终端那条长跑的 shell 通道是两种生命周期
+pub mod batch;
 /// decode 对外可见，tests/local_pty.rs 要用 ShellDecoder 验证真实 PTY 输出
 pub mod decode;
 mod known_hosts;
@@ -41,6 +45,8 @@ pub fn run() {
             // 用这个会把共用同一条 SSH 的兄弟标签一起带死
             ssh::ssh_close,
             ssh::ssh_close_channel,
+            // 在已有会话上跑一条命令并收回 stdout / stderr / 退出码（批量执行用）
+            batch::ssh_exec,
             known_hosts::known_hosts_forget,
             store::vault_status,
             store::vault_setup,

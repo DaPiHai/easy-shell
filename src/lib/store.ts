@@ -186,7 +186,8 @@ function writeCustomSchemes(list: TermScheme[]) {
 const initialCustomSchemes = readCustomSchemes()
 
 export type Theme = 'dark' | 'light'
-export type TabKind = 'terminal' | 'sftp' | 'local' | 'editor'
+/** batch = 批量执行：一屏勾多台主机跑同一条命令（见 `features/batch/BatchPanel`） */
+export type TabKind = 'terminal' | 'sftp' | 'local' | 'editor' | 'batch'
 
 /**
  * 切主题的三处落点必须一起改：`data-theme` 属性（驱动 CSS 变量）、localStorage（下次启动）、
@@ -299,6 +300,14 @@ export interface Tab {
   layout?: PaneLayout
   /** kind 为 editor 时的打开目标 */
   editorTarget?: EditorTarget
+  /**
+   * kind 为 batch 时「一开就替用户勾上」的主机 id。
+   *
+   * 只是**初始值**：选了哪几台是这一屏自己的状态，面板自己管。
+   * 存进 tab 而不是另外开一个 store 字段，是为了让「从会话树带几台主机进来」
+   * 跟标签一一对应 —— 开两个批量标签各跑各的，互不干扰。
+   */
+  batchTargets?: string[]
 }
 
 /** 一个标签最多几格。2×2 的极限，也是 sshd `MaxSessions` 底下留得住的数 */
@@ -848,6 +857,11 @@ interface AppState {
   activeTabId: string | null
   setActiveTab: (id: string) => void
   addTab: (tab: Omit<Tab, 'id'>) => string
+  /**
+   * 开一个「批量执行」标签。`hostIds` 是一开就替用户勾上的主机
+   * （会话树、命令面板两个入口共用，别各写一份 addTab）。
+   */
+  openBatchTab: (hostIds?: string[]) => string
   closeTab: (id: string) => void
   /**
    * 用户主动关标签都走这里：标签里有没保存的编辑器就先弹确认，
@@ -1424,6 +1438,9 @@ export const useApp = create<AppState>((set, get) => ({
         deadPanes: nextDead,
       }
     }),
+
+  openBatchTab: (hostIds) =>
+    get().addTab({ title: '批量执行', kind: 'batch', batchTargets: hostIds ?? [] }),
 
   requestCloseTab: (id) => {
     const s = get()

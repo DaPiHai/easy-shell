@@ -146,6 +146,31 @@ export function sshCloseChannel(channelId: number): Promise<void> {
   return invoke<void>('ssh_close_channel', { channelId })
 }
 
+/**
+ * 一条命令在一台机器上的结果。
+ *
+ * `exitCode` 为 null 表示**没拿到**退出码（命令被信号杀掉、连接中途断了、或者超时掐断），
+ * 别当成 0 —— 当成 0 会把"超时/断线"显示成"执行成功"。
+ */
+export interface ExecResult {
+  exitCode: number | null
+  stdout: string
+  stderr: string
+  /** 到了时限还没跑完：输出是截断的 */
+  timedOut: boolean
+}
+
+/**
+ * 在一条**已连着**的会话上跑一条命令并收回结果（不走终端的 shell 通道，
+ * 所以没有提示符回显，也拿得到退出码）。
+ *
+ * 连不连、并发几台是调用方（批量执行面板）的事：哪台主机已经有连接只有前端知道。
+ * `timeoutSecs` 不传就是 30 秒；0 同样按 30 秒算（后端夹过了）。
+ */
+export function sshExec(sessionId: string, command: string, timeoutSecs?: number): Promise<ExecResult> {
+  return invoke<ExecResult>('ssh_exec', { sessionId, command, timeoutSecs })
+}
+
 export type AuthRecord =
   | { type: 'password'; password: string }
   | { type: 'key'; privateKeyPath: string; passphrase?: string | null }

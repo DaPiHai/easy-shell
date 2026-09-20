@@ -13,6 +13,7 @@ import { SettingsDialog } from '@/features/settings/SettingsDialog'
 import { TunnelDialog } from '@/features/tunnel/TunnelDialog'
 import { SnippetsDialog } from '@/features/snippets/SnippetsDialog'
 import { EditorView } from '@/features/editor/EditorView'
+import { BatchPanel } from '@/features/batch/BatchPanel'
 import { UnlockScreen } from '@/features/session/UnlockScreen'
 import { EmptyState, StatusBar } from '@/components/EmptyState'
 import { useApp, DEFAULT_FONT_SIZE, layoutOf, panesOf } from '@/lib/store'
@@ -191,6 +192,8 @@ export default function App() {
                 <ErrorBoundary label={`「${tab.title}」这个标签出错了`}>
                 {tab.kind === 'editor' && tab.editorTarget ? (
                   <EditorView target={tab.editorTarget} tabId={tab.id} />
+                ) : tab.kind === 'batch' ? (
+                  <BatchPanel initialHostIds={tab.batchTargets} />
                 ) : tab.kind === 'sftp' && tab.sessionId ? (
                   <SftpPanel sessionId={tab.sessionId} />
                 ) : (tab.kind === 'terminal' || tab.kind === 'local') &&
