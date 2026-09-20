@@ -30,25 +30,21 @@ cd "$(dirname "$0")/.."
 # 打包是交付前的最后一道门，死命令（注册了没人调 / 调了没注册）不该跟着安装包出去
 npm run check:commands
 
-# vite 配了 emptyOutDir:false，所以这里手动把旧产物挪走，避免历史文件混进安装包。
-# 备份固定叫 dist.bak 且只留上一版 —— 早先按时间戳命名，打几次包就堆一地目录。
+# 构建前 dist 必须**不存在**：vite 配了 `emptyOutDir: false`（它整目录 rm 会被环境的
+# 批量删除保护拦下），而 vite.config.ts 里那个 clean-old-assets 插件是逐个删
+# dist/assets —— 同样会撞上保护，然后以一个看不出因果的 `npm run build failed` 收场。
 #
-# 这一小段踩过两个坑，改之前先读完：
-# 1. 整目录 `rm -rf dist.bak` 会被环境的批量删除保护**静默拦下**（`|| true` 吞掉），
-#    于是 dist.bak 还在；
-# 2. 而 `mv dist dist.bak` 在目标已存在时是把 dist **挪进** dist.bak 里面 ——
-#    dist 原地不动。紧接着 vite 的 clean-old-assets 插件去逐个删 dist/assets，
-#    又撞上同一道保护，构建以一个看不出因果的异常收场（`npm run build` failed）。
-# 所以：先把旧备份**改名让位**，再挪 dist，挪完还要验一眼。
-if [ -d dist.bak ]; then
-  mv dist.bak dist.bak.old 2>/dev/null || true
-fi
+# 所以这里用"挪走"代替"删除"，并且**挪到系统临时目录**：早先挪进项目里的 dist.bak，
+# 踩了两个坑 ——
+#   1. `rm -rf dist.bak` 被静默拦下（不报错、也没删）；
+#   2. 于是下一轮 `mv dist dist.bak` 成了"把 dist 挪进 dist.bak 里面"，dist 原地不动，
+#      而再往后为了腾位置做的改名让位又会一层层嵌套（dist.bak.old/dist.bak/dist…）。
+# 单向往外挪就都没有了：目标永远是新路径，失败也直接看得见。
 if [ -d dist ]; then
-  mv dist dist.bak || true
-fi
-if [ -d dist ]; then
-  echo "错误：dist 没能挪走，vite 清理旧 assets 会被批量删除保护拦下。先手动处理 dist 再打包。" >&2
-  exit 1
+  mv dist "${TMPDIR:-/tmp}/easy-shell-dist-$(date +%s)" || {
+    echo "错误：dist 挪不走（多半被占用）—— 关掉 dev server / 预览窗口再打包。" >&2
+    exit 1
+  }
 fi
 
 npm run tauri build
