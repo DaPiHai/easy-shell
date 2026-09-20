@@ -366,7 +366,7 @@ export function SessionTree() {
           if (filtering && members.length === 0) return null
           const isCollapsed = collapsed[group.id]
           return (
-            <div key={group.id} className="mb-1">
+            <div key={group.id} className="mb-1" data-group-id={group.id}>
               <div
                 className="group flex h-7 items-center gap-1 rounded px-1 text-ink-subtle transition-colors hover:bg-surface-2"
                 onDragOver={(e) => {
@@ -413,6 +413,8 @@ export function SessionTree() {
         {(ungrouped.length > 0 || !filtering) && (
           <div
             className="mb-1"
+            // 未分组这一块没有 id，用空串占位 —— 探针按 data-group-id 数每个组里有几行
+            data-group-id=""
             onDragOver={(e) => {
               if (e.dataTransfer.types.includes('application/x-easy-shell-host')) {
                 e.preventDefault()

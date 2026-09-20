@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { X } from 'lucide-react'
+import { InfoHint } from '@/components/InfoHint'
 import { terminalTab, useApp } from '@/lib/store'
 import { isDesktop, parseConnectError, pickFile, sshConnect } from '@/lib/api'
 import { hostLabel, parseTags, tagTone, tagsToInput } from '@/lib/hosts'
@@ -10,9 +11,27 @@ const inputClass =
 const labelClass = 'mb-1.5 block text-[11px] font-medium tracking-[0.4px] text-ink-subtle'
 
 /**
+ * 字段说明。全部挂在问号上（hover 才显示），对话框里只留字段本身。
+ *
+ * 提成常量而不是散在 JSX 里，是因为同一句要出现在好几处（label 的 title、
+ * 校验失败时的提示语），散着写迟早有两份不一样的。
+ */
+const HINTS = {
+  compat:
+    '额外接受 dh-group1/14-sha1、aes-cbc 这类已废弃算法。这是安全降级，只在确认对面是老交换机、路由器时才勾。',
+  name: '给这台机器起个顺口的名字（「生产 Web 机」比 10.0.1.11 好认）。留空就用「用户名@主机」。',
+  group:
+    '分组是归属，一台机器只属于一个 —— 会话树里那棵树就是它的样子。新建分组在左侧会话树的「新建分组」按钮里。',
+  tags: '逗号或空格分隔。标签是横着切的一类机器（prod、某个客户、某个机房），跟分组不同：一台机器可以挂好几个标签，侧栏靠它筛选。',
+  vault: '密码以主密码加密后存进本机密钥库。不勾就只在这次连接里用，重启后要重填。',
+  editScope:
+    '改完只更新主机列表，不影响已经打开的连接；下次连接（或重连）才用新的。',
+} as const
+
+/**
  * 新建会话 / 编辑主机，同一个表单。
  *
- * 两种用途放一起是刻意的：字段完全一样（名称、标签、地址、端口、用户名、认证），
+ * 两种用途放一起是刻意的：字段完全一样（名称、标签、分组、地址、端口、用户名、认证），
  * 分成两个对话框迟早会漂移 —— 加一个字段只有一边有，或者校验规则两边不一样。
  * 靠 `editingHostId` 切形态：**编辑时只保存、不连接**，因为用户来这儿是改配置的，
  * 不是要重开一条连接（已经开着的那些连接也不受影响）。
@@ -20,6 +39,7 @@ const labelClass = 'mb-1.5 block text-[11px] font-medium tracking-[0.4px] text-i
 export function ConnectDialog() {
   const { connectOpen, setConnectOpen, addTab, saveHost, setError: showError, setConfirmPrompt } =
     useApp()
+  const groups = useApp((s) => s.groups)
   /**
    * 从某一格的「换主机 → 快速连接」进来时非空：连上后会话写进那一格，不开新标签。
    * 读的是 store 里的即时值（不是进对话框时快照），因为确认框重试会绕回来再走一遍这里。
@@ -35,6 +55,8 @@ export function ConnectDialog() {
   const [username, setUsername] = useState('')
   /** 用户起的名字，留空 = 没起名（标题回退成 `用户名@地址`） */
   const [name, setName] = useState('')
+  /** 归属分组；空串 = 未分组 */
+  const [groupId, setGroupId] = useState('')
   /** 标签的原始输入，逗号/空格分隔。存下去的是 `parseTags` 解析后的结果 */
   const [tagInput, setTagInput] = useState('')
   const [password, setPassword] = useState('')
@@ -63,6 +85,7 @@ export function ConnectDialog() {
     setPort(String(rec.port))
     setUsername(rec.username)
     setName(rec.name)
+    setGroupId(rec.groupId ?? '')
     setTagInput(tagsToInput(rec.tags))
     setAuthMode(rec.auth.type)
     if (rec.auth.type === 'password') {
@@ -125,6 +148,7 @@ export function ConnectDialog() {
         address: host.trim(),
         port: Number(port) || 22,
         username: username.trim(),
+        groupId: groupId || null,
         tags,
         auth:
           authMode === 'key'
@@ -184,7 +208,7 @@ export function ConnectDialog() {
           address: host.trim(),
           port: Number(port) || 22,
           username: username.trim(),
-          groupId: null,
+          groupId: groupId || null,
           tags,
           auth:
             authMode === 'key'
@@ -230,10 +254,12 @@ export function ConnectDialog() {
   return (
     <div className="fixed inset-0 z-50">
       <div className="absolute inset-0 bg-black/60" onClick={close} />
-      <div className="absolute left-1/2 top-[10%] w-[420px] -translate-x-1/2 rounded-xl border border-hairline-tertiary bg-surface-1">
+      <div className="absolute left-1/2 top-[12%] w-[420px] -translate-x-1/2 rounded-xl border border-hairline-tertiary bg-surface-1">
         <div className="flex h-11 items-center justify-between border-b border-hairline px-4">
           <span className="text-[13px] font-medium text-ink">
             {isEdit ? '编辑主机' : connectPaneTarget ? '连接这一格' : '新建会话'}
+            {/* 「改完对已开连接有没有影响」是编辑态最常被问的一句，挂在标题的问号上 */}
+            {isEdit && <InfoHint text={HINTS.editScope} />}
           </span>
           <button
             onClick={close}
@@ -292,7 +318,7 @@ export function ConnectDialog() {
           </div>
 
           {authMode === 'password' ? (
-            <div className="mb-4">
+            <div className="mb-3">
               <label className={labelClass}>密码</label>
               <input
                 className={inputClass}
@@ -326,7 +352,7 @@ export function ConnectDialog() {
                   </button>
                 </div>
               </div>
-              <div className="mb-4">
+              <div className="mb-3">
                 <label className={labelClass}>私钥密码（没有就留空）</label>
                 <input
                   className={inputClass}
@@ -341,7 +367,7 @@ export function ConnectDialog() {
             </>
           )}
 
-          <label className="flex cursor-pointer items-center gap-2 text-[12px] text-ink-subtle">
+          <label className="mb-3 flex cursor-pointer items-center gap-2 text-[12px] text-ink-subtle">
             <input
               type="checkbox"
               checked={compat}
@@ -349,59 +375,75 @@ export function ConnectDialog() {
               className="h-3.5 w-3.5 accent-accent"
             />
             兼容模式（老设备）
+            <InfoHint text={HINTS.compat} />
           </label>
-          <p className="mb-3 mt-1 text-[11px] leading-relaxed text-ink-tertiary">
-            额外接受 dh-group1/14-sha1、aes-cbc 这类已废弃算法。这是安全降级，
-            只在确认对面是老交换机、路由器时才勾。
-          </p>
 
           {/*
-            名称与标签跟上面那半截不是一回事：上面决定"连到哪儿、怎么认证"，
-            这里只决定"这台机器在界面上叫什么"。用一道分隔线说清这条界限，
+            从这里往下跟上面那半截不是一回事：上面决定"连到哪儿、怎么认证"，
+            这里只决定"这台机器在界面上叫什么、归哪儿"。用一道分隔线说清这条界限，
             省得有人以为改名字会影响连接
           */}
-          <div className="mb-3 border-t border-hairline pt-3">
-            <label className={labelClass}>名称（可选）</label>
-            <input
-              className={inputClass}
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter') void (isEdit ? save() : submit())
-              }}
-              placeholder={`${username.trim() || '用户名'}@${host.trim() || '主机'}`}
-            />
-            <p className="mt-1 text-[11px] leading-relaxed text-ink-tertiary">
-              给这台机器起个顺口的名字（「生产 Web 机」比 `10.0.1.11` 好认）。
-              留空就用上面那个 `用户名@主机`。
-            </p>
-          </div>
+          <div className="border-t border-hairline pt-3">
+            <div className="mb-3">
+              <label className={labelClass}>
+                名称（可选）
+                <InfoHint text={HINTS.name} />
+              </label>
+              <input
+                className={inputClass}
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') void (isEdit ? save() : submit())
+                }}
+                placeholder={`${username.trim() || '用户名'}@${host.trim() || '主机'}`}
+              />
+            </div>
 
-          <div className="mb-3">
-            <label className={labelClass}>标签（可选）</label>
-            <input
-              className={inputClass}
-              value={tagInput}
-              onChange={(e) => setTagInput(e.target.value)}
-              placeholder="prod, 客户A, 机房2"
-            />
-            {/* 即时把解析结果摊出来：逗号还是空格分隔、有没有被去重、会不会被截断，一眼看见 */}
-            {tags.length > 0 && (
-              <div className="mt-1.5 flex flex-wrap gap-1">
-                {tags.map((t) => (
-                  <span
-                    key={t}
-                    className={`rounded-sm px-1.5 py-0.5 text-[10px] leading-4 ${tagTone(t)}`}
-                  >
-                    {t}
-                  </span>
+            <div className="mb-3">
+              <label className={labelClass}>
+                分组
+                <InfoHint text={HINTS.group} />
+              </label>
+              <select
+                className={inputClass}
+                value={groupId}
+                onChange={(e) => setGroupId(e.target.value)}
+              >
+                <option value="">未分组</option>
+                {groups.map((g) => (
+                  <option key={g.id} value={g.id}>
+                    {g.name}
+                  </option>
                 ))}
-              </div>
-            )}
-            <p className="mt-1 text-[11px] leading-relaxed text-ink-tertiary">
-              逗号或空格分隔。标签是横着切的一类机器（`prod`、某个客户、某个机房），
-              跟左边的分组不同 —— 一台机器可以挂好几个标签，侧栏靠它筛选。
-            </p>
+              </select>
+            </div>
+
+            <div className="mb-3">
+              <label className={labelClass}>
+                标签（可选）
+                <InfoHint text={HINTS.tags} />
+              </label>
+              <input
+                className={inputClass}
+                value={tagInput}
+                onChange={(e) => setTagInput(e.target.value)}
+                placeholder="prod, 客户A, 机房2"
+              />
+              {/* 即时把解析结果摊出来：逗号还是空格分隔、有没有被去重、会不会被截断，一眼看见 */}
+              {tags.length > 0 && (
+                <div className="mt-1.5 flex flex-wrap gap-1">
+                  {tags.map((t) => (
+                    <span
+                      key={t}
+                      className={`rounded-sm px-1.5 py-0.5 text-[10px] leading-4 ${tagTone(t)}`}
+                    >
+                      {t}
+                    </span>
+                  ))}
+                </div>
+              )}
+            </div>
           </div>
 
           {!isEdit && (
@@ -412,14 +454,9 @@ export function ConnectDialog() {
                 onChange={(e) => setSaveToVault(e.target.checked)}
                 className="h-3.5 w-3.5 accent-accent"
               />
-              保存到主机列表（密码以主密码加密存储）
+              保存到主机列表
+              <InfoHint text={HINTS.vault} />
             </label>
-          )}
-
-          {isEdit && (
-            <p className="mb-4 text-[11px] leading-relaxed text-ink-tertiary">
-              改完只更新主机列表，不影响已经打开的连接；下次连接（或重连）才用新的。
-            </p>
           )}
 
           {error && (

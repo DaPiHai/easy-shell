@@ -13,7 +13,7 @@
  *   node tools/probe.mjs                # 所有场景
  *   node tools/probe.mjs drag           # 只跑「拖标签进终端窗口并分屏」
  *   node tools/probe.mjs newline        # 只跑「命令框里只有换行」
- *   node tools/probe.mjs tags           # 只跑「标签筛选 / 关键词过滤 / 编辑主机」
+ *   node tools/probe.mjs tags           # 只跑「标签筛选 / 关键词过滤 / 编辑主机（含改分组）」
  *   node tools/probe.mjs rename         # 只跑「双击标签改名」
  *
  * 环境变量：EDGE_PATH / PROBE_PORT / PROBE_URL 可覆盖默认值。
@@ -23,7 +23,8 @@
  *   - 标签栏的标签：`div[title]` 且 class 含 `h-9` + `cursor-pointer`
  *   - 会话树主机行的可点区：`div[title="点击连接"]`
  *   - 会话树过滤框：`[data-host-filter]`；标签快捷条：`[data-tag-filter="<标签>"]`
- *   - 主机行里的标签 chip：`[data-tag-chip]`；主机行编辑按钮：`[data-host-edit]`
+ *   - 主机行里的标签 chip：`[data-tag-chip]`；主机行编辑按钮：`[data-host-edit="<hostId>"]`
+ *   - 分组块：`[data-group-id]`（未分组用空串），组里有几台 = 里面 `[data-host-edit]` 的个数
  *   - 终端窗口：`[data-pane-grid]`，格数 = 里面 `[data-pane-title]` 的个数
  *   - 投放高亮层：`div[aria-hidden]` 且 class 含 `border-dashed`
  *   - 右下角提示条：`div.fixed.bottom-8.right-4`
@@ -212,6 +213,19 @@ window.__probe = {
   /** 表单里所有输入框的当前值（编辑主机时用来看有没有预填） */
   inputValues() {
     return [...document.querySelectorAll('input')].map((el) => el.value)
+  },
+  /** 每个分组里有几行主机（按 data-group-id 数，空串那个是「未分组」） */
+  groupCounts() {
+    return [...document.querySelectorAll('[data-group-id]')].map((el) => ({
+      group: el.getAttribute('data-group-id'),
+      hosts: el.querySelectorAll('[data-host-edit]').length,
+    }))
+  },
+  /** 所有"问号"提示的文案（说明改挂在 hover 上了，正文里应该看不到） */
+  hints() {
+    return [...document.querySelectorAll('[aria-label][title]')]
+      .filter((el) => el.textContent.trim() === '')
+      .map((el) => el.getAttribute('title'))
   },
 }
 'injected'
@@ -468,27 +482,77 @@ async function scenarioTags(cdp) {
   await typeInto(cdp, '[data-host-filter]', '')
   await sleep(300)
 
-  // 点第一台的编辑按钮：对话框该切成编辑形态并预填
-  await clickSel(cdp, '[data-host-edit]')
+  // 点 web-01 的编辑按钮：对话框该切成编辑形态并预填
+  await clickSel(cdp, '[data-host-edit="h-1"]')
   await sleep(500)
   console.log(
-    '编辑对话框:', 
+    '编辑对话框:',
     JSON.stringify({
       hasEditTitle: await cdp.eval(`document.body.innerText.includes('编辑主机')`),
       hasSaveButton: await cdp.eval(
         `[...document.querySelectorAll('button')].some((b) => b.textContent.trim() === '保存')`,
       ),
       inputs: await cdp.eval('__probe.inputValues()'),
+      名称框的兜底提示: await cdp.eval(
+        `document.querySelector('input[placeholder*="@"]')?.placeholder ?? '(没有)'`,
+      ),
     }),
+  )
+
+  /**
+   * 说明文字改成 hover 才出现（挂在问号上）。
+   * 判据是**可见正文里不该再有那几段**，但 title 属性得在 —— 只删不挂等于把说明弄丢了。
+   */
+  console.log(
+    '字段说明:',
+    JSON.stringify({
+      问号个数: (await cdp.eval('__probe.hints()')).length,
+      正文里残留的长句: await cdp.eval(
+        `['额外接受 dh-group1', '给这台机器起个顺口', '逗号或空格分隔', '标签是横着切的一类机器', '改完只更新主机列表'].filter((s) => document.body.innerText.includes(s))`,
+      ),
+      挂在_tooltip_上的说明: (await cdp.eval('__probe.hints()')).map((t) => t.slice(0, 12)),
+    }),
+  )
+
+  // 分组下拉：默认应该就是这台主机现在所在的分组
+  console.log(
+    '分组下拉:',
+    JSON.stringify(
+      await cdp.eval(`(() => {
+        const el = document.querySelector('select')
+        if (!el) return null
+        return { 当前值: el.value, 选项: [...el.options].map((o) => o.textContent) }
+      })()`),
+    ),
   )
   await cdp.shot('probe-tags-4-edit.png')
 
-  // 改个名字存下去，再看会话树那行是不是跟着变了
-  const nameAt = await cdp.eval(`(() => {
-    const el = [...document.querySelectorAll('input')].find((i) => i.placeholder.includes('人或主机') || i.placeholder.includes('@'))
-    return el ? el.placeholder : 'no-name-input'
+  // 改分组：web-01 从「生产环境」挪到「内网」，存下去看会话树里的行数变化
+  console.log('改分组前各组行数:', JSON.stringify(await cdp.eval('__probe.groupCounts()')))
+  await cdp.eval(`(() => {
+    const el = document.querySelector('select')
+    const setter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value').set
+    setter.call(el, 'g-intra')
+    el.dispatchEvent(new Event('change', { bubbles: true }))
+    return el.value
   })()`)
-  console.log('名称框的 placeholder（没填名字时显示的兜底）:', nameAt)
+  await sleep(200)
+  const saveBtn = await cdp.eval(`(() => {
+    const el = [...document.querySelectorAll('button')].find((b) => b.textContent.trim() === '保存')
+    if (!el) return null
+    const r = el.getBoundingClientRect()
+    return { x: r.left + r.width / 2, y: r.top + r.height / 2 }
+  })()`)
+  if (!saveBtn) throw new Error('没找到保存按钮')
+  await cdp.mouse('mousePressed', saveBtn.x, saveBtn.y)
+  await cdp.mouse('mouseReleased', saveBtn.x, saveBtn.y)
+  await sleep(700)
+  console.log('改分组后各组行数:', JSON.stringify(await cdp.eval('__probe.groupCounts()')))
+  console.log(
+    '对话框关掉了吗:',
+    await cdp.eval(`!document.body.innerText.includes('编辑主机')`),
+  )
+  await cdp.shot('probe-tags-5-after-group-change.png')
 }
 
 /** 双击标签名就地改名 */
