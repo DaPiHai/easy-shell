@@ -1,3 +1,4 @@
+import { useMemo, useState } from 'react'
 import {
   ArrowRightLeft,
   ChevronDown,
@@ -13,10 +14,15 @@ import {
   Settings,
   SquareTerminal,
   Trash2,
+  X,
 } from 'lucide-react'
 import { useApp, panesOf, terminalTab } from '@/lib/store'
 import type { HostRecord } from '@/lib/api'
+import { hostEndpoint, hostLabel, matchesHost, tagTone } from '@/lib/hosts'
 import { connectHost } from './connectHost'
+
+/** 主机行下面那排标签最多摆几个。再多给个 `+N`，完整清单在 tooltip 里 */
+const MAX_ROW_TAGS = 4
 
 export function SessionTree() {
   const {
@@ -41,10 +47,33 @@ export function SessionTree() {
     promptRenameGroup,
   } = useApp()
 
+  /** 关键词：名称 / 地址 / 用户名 / 标签，任一命中就算 */
+  const [keyword, setKeyword] = useState('')
+  /** 点标签快捷条选中的那个标签，精确匹配。null = 不按标签筛 */
+  const [activeTag, setActiveTag] = useState<string | null>(null)
+
+  const filtering = keyword.trim().length > 0 || activeTag !== null
+
+  /**
+   * 所有出现过的标签，按大小写不敏感去重（两台机器一个写 `Prod` 一个写 `prod`
+   * 时，快捷条上不该出现两个看着一样的按钮）。排序固定，免得每次重渲染都跳位置。
+   */
+  const allTags = useMemo(() => {
+    const seen = new Map<string, string>()
+    for (const h of hosts) {
+      for (const t of h.tags ?? []) {
+        const key = t.toLowerCase()
+        if (!seen.has(key)) seen.set(key, t)
+      }
+    }
+    return [...seen.values()].sort((a, b) => a.localeCompare(b, 'zh'))
+  }, [hosts])
+
   /** 连上之后开一条标签。失败路径（密钥不符 / 算法不兼容）在 connectHost 里统一处理 */
   const connect = (host: HostRecord, kind: 'terminal' | 'sftp' = 'terminal') => {
     void connectHost(host, (sessionId) => {
-      const title = kind === 'sftp' ? `${host.name} · 文件` : `${host.username}@${host.address}`
+      const label = hostLabel(host)
+      const title = kind === 'sftp' ? `${label} · 文件` : label
       addTab(
         kind === 'sftp'
           ? { title, kind, sessionId, hostId: host.id }
@@ -68,7 +97,7 @@ export function SessionTree() {
       .find((p) => p.hostId === host.id && p.sessionId && !s.deadPanes[p.id])
     if (live?.sessionId) {
       s.addTab({
-        title: `${host.name} · 文件`,
+        title: `${hostLabel(host)} · 文件`,
         kind: 'sftp',
         sessionId: live.sessionId,
         hostId: host.id,
@@ -101,12 +130,18 @@ export function SessionTree() {
     setConfirmPrompt({
       kind: 'confirm',
       danger: true,
-      title: `删除主机「${host.name}」？`,
+      title: `删除主机「${hostLabel(host)}」？`,
       message: '只从列表里移除这台主机，已保存的密码/私钥会一起删掉。',
-      detail: `${host.username}@${host.address}:${host.port}`,
+      detail: hostEndpoint(host),
       confirmLabel: '删除主机',
       onConfirm: () => void removeHost(host.id),
     })
+  }
+
+  /** 改名字、改标签、改地址都走这一个对话框（它同时是「新建会话」那个） */
+  const editHost = (host: HostRecord) => {
+    useApp.getState().setEditingHostId(host.id)
+    setConnectOpen(true)
   }
 
   /** 把主机拖到某个分组上 = 移入该分组 */
@@ -116,7 +151,12 @@ export function SessionTree() {
     void useApp.getState().saveHost({ ...host, groupId })
   }
 
-  const ungrouped = hosts.filter((h) => !h.groupId)
+  const pickTag = (tag: string) => setActiveTag((cur) => (cur === tag ? null : tag))
+
+  const visible = (list: HostRecord[]) => list.filter((h) => matchesHost(h, keyword, activeTag))
+
+  const ungrouped = visible(hosts.filter((h) => !h.groupId))
+  const matchedCount = visible(hosts).length
 
   // 收起时整块不渲染：一块 0 宽的壳留着也没意义，回来有状态栏那个按钮
   if (sidebarCollapsed) return null
@@ -135,51 +175,114 @@ export function SessionTree() {
     if (p.hostId && p.sessionId && !deadPanes[p.id]) connectedHosts.add(p.hostId)
   }
 
-  const renderHost = (host: HostRecord) => (
-    <div
-      key={host.id}
-      draggable
-      onDragStart={(e) => {
-        e.dataTransfer.setData('application/x-easy-shell-host', host.id)
-        e.dataTransfer.effectAllowed = 'move'
-      }}
-      className="group flex h-7 items-center rounded pl-5 pr-1 text-ink-muted transition-colors hover:bg-surface-2"
-    >
+  const renderHost = (host: HostRecord) => {
+    const tags = host.tags ?? []
+    const connected = connectedHosts.has(host.id)
+    /**
+     * 有标签的主机把**地址挪到第二行**。
+     *
+     * 不为整齐，是被宽度逼的：侧栏 240px，第一行要放下「点 + 名字 + 地址 + 三个按钮」，
+     * 实测名字只剩 50px，而 `db-primary` 要 71px —— 直接变成 `db-pri…`（真试过）。
+     * 地址跟着标签走之后第一行能空出 57px，长一点的名字也放得下。
+     * 没标签的主机维持原样（一行），不为少数情况把整棵树都撑高。
+     */
+    const addressBelow = tags.length > 0
+    return (
       <div
-        onClick={() => void connect(host)}
-        className="flex min-w-0 flex-1 cursor-pointer items-center gap-2"
-        title="点击连接"
+        key={host.id}
+        draggable
+        onDragStart={(e) => {
+          e.dataTransfer.setData('application/x-easy-shell-host', host.id)
+          e.dataTransfer.effectAllowed = 'move'
+        }}
+        className="group rounded pl-5 pr-1 text-ink-muted transition-colors hover:bg-surface-2"
       >
+        <div className="flex h-7 items-center">
+          <div
+            onClick={() => void connect(host)}
+            // 这个 title 是探针（tools/probe.mjs）找主机行用的锚点，改 UI 时别顺手去掉
+            title="点击连接"
+            className="flex min-w-0 flex-1 cursor-pointer items-center gap-1.5"
+          >
+            {/*
+              这台主机有没有活着的连接。以前这里写死 bg-ink-tertiary，
+              等于一个永远灰的点 —— 有连接和没连接长得一模一样
+            */}
+            <span
+              className={`h-1.5 w-1.5 shrink-0 rounded-full ${
+                connected ? 'bg-success' : 'bg-ink-tertiary'
+              }`}
+            />
+            <span className="min-w-0 truncate text-[13px]">{hostLabel(host)}</span>
+            {!addressBelow && (
+              <span className="ml-auto shrink-0 truncate pl-1 text-[11px] text-ink-tertiary">
+                {host.address}
+              </span>
+            )}
+          </div>
+          {/* 常驻 + 有 hover 反馈：只有 12px 的淡灰图标等于没有入口，用户根本不会去点 */}
+          <button
+            onClick={() => openSftp(host)}
+            className="ml-1 shrink-0 rounded p-1 text-ink-muted transition-colors hover:bg-surface-3 hover:text-accent"
+            title="打开 SFTP 文件管理器（复用已有的连接，不再拨一次）"
+          >
+            <FolderOpen size={13} />
+          </button>
+          <button
+            onClick={() => editHost(host)}
+            data-host-edit={host.id}
+            className="ml-1 shrink-0 rounded p-1 text-ink-muted transition-colors hover:bg-surface-3 hover:text-accent"
+            title="编辑名称、标签、地址与认证方式"
+          >
+            <Pencil size={13} />
+          </button>
+          <button
+            onClick={() => deleteHost(host)}
+            className="ml-1 shrink-0 rounded p-0.5 text-ink-tertiary transition-colors hover:bg-surface-3 hover:text-danger"
+            title="删除主机"
+          >
+            <Trash2 size={12} />
+          </button>
+        </div>
+
         {/*
-          这台主机有没有活着的连接。以前这里写死 bg-ink-tertiary，
-          等于一个永远灰的点 —— 有连接和没连接长得一模一样
+          标签行：标签在左、地址在右。chip 可点，一点就把筛选切到这个标签 ——
+          它在**可点区外面**，所以不必再拦冒泡。行内最多摆 4 个，多的给个 +N，
+          完整清单挂在 +N 上（"这台机器挂了哪些标签"是行里最容易丢的信息）
         */}
-        <span
-          className={`h-1.5 w-1.5 shrink-0 rounded-full ${
-            connectedHosts.has(host.id) ? 'bg-success' : 'bg-ink-tertiary'
-          }`}
-          title={connectedHosts.has(host.id) ? '已连接' : '未连接'}
-        />
-        <span className="truncate text-[13px]">{host.name}</span>
-        <span className="ml-auto truncate text-[11px] text-ink-tertiary">{host.address}</span>
+        {addressBelow && (
+          <div className="flex items-center gap-1 pb-1 pl-3">
+            {tags.slice(0, MAX_ROW_TAGS).map((t) => (
+              <span
+                key={t}
+                data-tag-chip={t}
+                onClick={() => pickTag(t)}
+                title={`只看带「${t}」的主机`}
+                className={`shrink-0 cursor-pointer rounded-sm px-1 text-[10px] leading-4 transition-opacity hover:opacity-80 ${
+                  activeTag?.toLowerCase() === t.toLowerCase()
+                    ? `${tagTone(t)} ring-1 ring-accent`
+                    : tagTone(t)
+                }`}
+              >
+                {t}
+              </span>
+            ))}
+            {tags.length > MAX_ROW_TAGS && (
+              <span
+                className="shrink-0 text-[10px] leading-4 text-ink-tertiary"
+                title={`标签：${tags.join('、')}`}
+              >
+                +{tags.length - MAX_ROW_TAGS}
+              </span>
+            )}
+            <span className="ml-auto shrink-0 truncate pl-1 text-[11px] text-ink-tertiary">
+              {host.address}
+            </span>
+          </div>
+        )}
       </div>
-      {/* 常驻 + 有 hover 反馈：只有 12px 的淡灰图标等于没有入口，用户根本不会去点 */}
-      <button
-        onClick={() => openSftp(host)}
-        className="ml-1 shrink-0 rounded p-1 text-ink-muted transition-colors hover:bg-surface-3 hover:text-accent"
-        title="打开 SFTP 文件管理器（复用已有的连接，不再拨一次）"
-      >
-        <FolderOpen size={13} />
-      </button>
-      <button
-        onClick={() => deleteHost(host)}
-        className="ml-1 shrink-0 rounded p-0.5 text-ink-tertiary transition-colors hover:bg-surface-3 hover:text-danger"
-        title="删除主机"
-      >
-        <Trash2 size={12} />
-      </button>
-    </div>
-  )
+    )
+  }
 
   return (
     <aside className="flex w-60 shrink-0 flex-col border-r border-hairline bg-surface-1">
@@ -211,9 +314,56 @@ export function SessionTree() {
         </div>
       </div>
 
-      <div className="min-h-0 flex-1 overflow-y-auto px-2 pb-2">
+      {/*
+        筛选区。主机一多，"找到那台"就比"看到所有"更重要 —— 分组是纵向归属，
+        标签是横向特征，两个方向各一个入口：左边点分组、这里按标签 + 关键词搜。
+      */}
+      <div className="shrink-0 border-b border-hairline px-2 pb-2">
+        <div className="relative">
+          <input
+            value={keyword}
+            onChange={(e) => setKeyword(e.target.value)}
+            placeholder="过滤名称 / 地址 / 用户名 / 标签"
+            data-host-filter
+            className="h-6 w-full rounded border border-hairline bg-surface-2 pl-2 pr-6 text-[12px] text-ink outline-none placeholder:text-ink-tertiary focus:border-accent"
+          />
+          {keyword && (
+            <button
+              onClick={() => setKeyword('')}
+              className="absolute right-1 top-1/2 grid h-4 w-4 -translate-y-1/2 place-items-center rounded text-ink-tertiary hover:bg-surface-3 hover:text-ink"
+              title="清空"
+            >
+              <X size={11} />
+            </button>
+          )}
+        </div>
+        {allTags.length > 0 && (
+          // 标签多了让它自己滚，别把主机列表顶下去
+          <div className="mt-1.5 flex max-h-16 flex-wrap gap-1 overflow-y-auto">
+            {allTags.map((t) => (
+              <button
+                key={t}
+                data-tag-filter={t}
+                onClick={() => pickTag(t)}
+                title={activeTag?.toLowerCase() === t.toLowerCase() ? '取消这个筛选' : `只看带「${t}」的主机`}
+                className={`rounded-sm px-1.5 py-0.5 text-[10px] leading-4 transition ${
+                  activeTag?.toLowerCase() === t.toLowerCase()
+                    ? `${tagTone(t)} ring-1 ring-accent`
+                    : `${tagTone(t)} opacity-60 hover:opacity-100`
+                }`}
+              >
+                {t}
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+
+      <div className="min-h-0 flex-1 overflow-y-auto px-2 pb-2 pt-1">
         {groups.map((group) => {
-          const members = hosts.filter((h) => h.groupId === group.id)
+          const members = visible(hosts.filter((h) => h.groupId === group.id))
+          // 筛选中时把空分组收起来：一列「0 个」的分组名只会把结果推走
+          if (filtering && members.length === 0) return null
           const isCollapsed = collapsed[group.id]
           return (
             <div key={group.id} className="mb-1">
@@ -260,32 +410,42 @@ export function SessionTree() {
           )
         })}
 
-        <div
-          className="mb-1"
-          onDragOver={(e) => {
-            if (e.dataTransfer.types.includes('application/x-easy-shell-host')) {
-              e.preventDefault()
-            }
-          }}
-          onDrop={(e) => {
-            const hostId = e.dataTransfer.getData('application/x-easy-shell-host')
-            if (hostId) {
-              e.preventDefault()
-              moveToGroup(hostId, null)
-            }
-          }}
-        >
-          <div className="flex h-7 items-center px-1 text-[12px] font-medium text-ink-subtle">
-            未分组
+        {(ungrouped.length > 0 || !filtering) && (
+          <div
+            className="mb-1"
+            onDragOver={(e) => {
+              if (e.dataTransfer.types.includes('application/x-easy-shell-host')) {
+                e.preventDefault()
+              }
+            }}
+            onDrop={(e) => {
+              const hostId = e.dataTransfer.getData('application/x-easy-shell-host')
+              if (hostId) {
+                e.preventDefault()
+                moveToGroup(hostId, null)
+              }
+            }}
+          >
+            <div className="flex h-7 items-center px-1 text-[12px] font-medium text-ink-subtle">
+              未分组
+            </div>
+            <div className="mt-0.5">{ungrouped.map(renderHost)}</div>
           </div>
-          <div className="mt-0.5">{ungrouped.map(renderHost)}</div>
-        </div>
+        )}
 
         {hosts.length === 0 && (
           <p className="px-2 py-6 text-center text-[12px] leading-relaxed text-ink-tertiary">
             还没有保存的主机
             <br />
             按 Ctrl+N 新建会话
+          </p>
+        )}
+
+        {hosts.length > 0 && filtering && matchedCount === 0 && (
+          <p className="px-2 py-6 text-center text-[12px] leading-relaxed text-ink-tertiary">
+            没有匹配的主机
+            <br />
+            换关键词，或点掉上面的标签
           </p>
         )}
       </div>

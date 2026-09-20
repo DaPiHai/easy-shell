@@ -72,11 +72,19 @@ pub enum AuthRecord {
 #[serde(rename_all = "camelCase")]
 pub struct HostRecord {
     pub id: String,
+    /// 用户起的名字。**可以是空串** —— 表示"没起名"，界面上回退成 `用户名@地址`。
+    /// 早先这里存的是 IP（等于没起名但看不出来），所以判断"有没有名字"只能看空串，
+    /// 不能看它等不等于 address。
     pub name: String,
     pub address: String,
     pub port: u16,
     pub username: String,
     pub group_id: Option<String>,
+    /// 横切分类用的标签（`prod` / `客户A` / `机房B`）。
+    /// 和 `group_id` 的分工：分组是**归属**（一台主机只属于一个组，树形），
+    /// 标签是**特征**（一台主机可以有好几个，用来筛）。后加的字段，所以要给默认值
+    #[serde(default)]
+    pub tags: Vec<String>,
     /// 兼容模式（连老设备用的废弃算法）。后加的字段，老库里没有，所以要给默认值
     #[serde(default)]
     pub compat: bool,
@@ -447,7 +455,10 @@ impl Vault {
         let db = self.db.lock().map_err(|_| "数据库锁异常".to_string())?;
 
         let mut stmt = db
-            .prepare("SELECT id, name, address, port, username, group_id, secret, compat FROM hosts")
+            .prepare(
+                "SELECT id, name, address, port, username, group_id, secret, compat, tags
+                 FROM hosts",
+            )
             .map_err(|e| e.to_string())?;
         let rows = stmt
             .query_map([], |row| {
@@ -460,13 +471,14 @@ impl Vault {
                     row.get::<_, Option<String>>(5)?,
                     row.get::<_, Vec<u8>>(6)?,
                     row.get::<_, bool>(7)?,
+                    row.get::<_, String>(8)?,
                 ))
             })
             .map_err(|e| e.to_string())?;
 
         let mut hosts = Vec::new();
         for row in rows {
-            let (id, name, address, port, username, group_id, secret, compat) =
+            let (id, name, address, port, username, group_id, secret, compat, tags) =
                 row.map_err(|e| e.to_string())?;
             let plaintext = decrypt_secret(&key, &secret)?;
             let auth: AuthRecord =
@@ -478,6 +490,7 @@ impl Vault {
                 port,
                 username,
                 group_id,
+                tags: parse_tags(&tags),
                 compat,
                 auth,
             });
@@ -492,10 +505,11 @@ impl Vault {
         let plaintext =
             serde_json::to_vec(&host.auth).map_err(|e| format!("凭据序列化失败: {e}"))?;
         let secret = encrypt_secret(&key, &plaintext)?;
+        let tags = tags_to_json(&host.tags);
 
         db.execute(
-            "INSERT INTO hosts (id, name, address, port, username, group_id, secret, compat)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+            "INSERT INTO hosts (id, name, address, port, username, group_id, secret, compat, tags)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
              ON CONFLICT(id) DO UPDATE SET
                 name = excluded.name,
                 address = excluded.address,
@@ -503,7 +517,8 @@ impl Vault {
                 username = excluded.username,
                 group_id = excluded.group_id,
                 secret = excluded.secret,
-                compat = excluded.compat",
+                compat = excluded.compat,
+                tags = excluded.tags",
             params![
                 host.id,
                 host.name,
@@ -513,6 +528,7 @@ impl Vault {
                 host.group_id,
                 secret,
                 host.compat,
+                tags,
             ],
         )
         .map_err(|e| format!("保存主机失败: {e}"))?;
@@ -575,7 +591,8 @@ fn init_schema(conn: &Connection) -> Result<(), String> {
             port INTEGER NOT NULL,
             username TEXT NOT NULL,
             group_id TEXT,
-            secret BLOB NOT NULL
+            secret BLOB NOT NULL,
+            tags TEXT NOT NULL DEFAULT '[]'
         );
         CREATE TABLE IF NOT EXISTS snippets (
             id TEXT PRIMARY KEY,
@@ -596,7 +613,55 @@ fn init_schema(conn: &Connection) -> Result<(), String> {
         .map_err(|e| format!("升级 hosts 表失败: {e}"))?;
     }
 
+    // tags 同理（JSON 数组文本）。默认给 '[]' 而不是 NULL：
+    // 读的时候就不用再分"没有这一列"和"这一列是空的"两种情况
+    if !column_exists(conn, "hosts", "tags")? {
+        conn.execute(
+            "ALTER TABLE hosts ADD COLUMN tags TEXT NOT NULL DEFAULT '[]'",
+            [],
+        )
+        .map_err(|e| format!("升级 hosts 表失败: {e}"))?;
+    }
+
     Ok(())
+}
+
+/** 一个主机最多挂几个标签。超过就丢尾巴 —— 侧栏只有 240px，标签再多也读不过来 */
+const MAX_TAGS_PER_HOST: usize = 20;
+/** 单个标签最长几个字符（按字符数不是字节数，中文标签不该被腰斩） */
+const MAX_TAG_CHARS: usize = 32;
+
+/**
+ * 把用户填的标签规整成干净的一份：去空白、丢空串、去重、截断。
+ *
+ * 放在后端而不是只在前端做，是因为这一列要拿去筛选和比对 —— 库里存着
+ * `"prod"` 和 `"prod "` 两条，用户点第一个筛不出第二个，这种账很难查。
+ */
+pub fn normalize_tags(tags: Vec<String>) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for raw in tags {
+        let t: String = raw.trim().chars().take(MAX_TAG_CHARS).collect();
+        let t = t.trim().to_string();
+        if t.is_empty() || out.iter().any(|x| x == &t) {
+            continue;
+        }
+        out.push(t);
+        if out.len() >= MAX_TAGS_PER_HOST {
+            break;
+        }
+    }
+    out
+}
+
+/** 库里的标签文本（JSON 数组）-> 标签表。解析不动就当没有，不让一条脏数据把整个列表带崩 */
+fn parse_tags(raw: &str) -> Vec<String> {
+    let parsed: Vec<String> = serde_json::from_str(raw).unwrap_or_default();
+    normalize_tags(parsed)
+}
+
+/** 标签表 -> 库里的文本。走 JSON 而不是逗号分隔：标签里出现逗号、引号都不用另想一套转义 */
+fn tags_to_json(tags: &[String]) -> String {
+    serde_json::to_string(&normalize_tags(tags.to_vec())).unwrap_or_else(|_| "[]".to_string())
 }
 
 /** 表里有没有这一列。用来给老库补字段，避免 ALTER 到一个已存在的列上报错 */
@@ -913,12 +978,17 @@ pub fn snippets_delete(state: State<'_, Vault>, id: String) -> Result<(), String
 mod tests {
     use super::*;
 
-    /// 开一个临时库。**绝不走 `db_path()`** —— 那会动到用户真实的密钥库
-    fn temp_vault() -> (Vault, PathBuf) {
-        let path = std::env::temp_dir().join(format!(
+    /// 一个临时库文件路径。单独抽出来是因为有个用例要**先**造一个"老库"再交给 Vault 打开
+    fn temp_path() -> PathBuf {
+        std::env::temp_dir().join(format!(
             "easy-shell-vault-test-{}.db",
             uuid::Uuid::new_v4()
-        ));
+        ))
+    }
+
+    /// 开一个临时库。**绝不走 `db_path()`** —— 那会动到用户真实的密钥库
+    fn temp_vault() -> (Vault, PathBuf) {
+        let path = temp_path();
         (Vault::open(&path).expect("开临时库失败"), path)
     }
 
@@ -983,6 +1053,7 @@ mod tests {
             port: 22,
             username: "deploy".to_string(),
             group_id: None,
+            tags: vec![],
             compat: false,
             auth: AuthRecord::Password {
                 password: "s3cret-口令".to_string(),
@@ -1351,5 +1422,140 @@ mod tests {
         drop(vault);
         let _ = fs::remove_file(&path);
         let _ = fs::remove_dir_all(key_path.parent().unwrap());
+    }
+
+    // ---- 主机标签 ------------------------------------------------------------
+
+    /**
+     * 标签要能原样存回来，且存之前会把脏东西清掉。
+     *
+     * 这一列是拿来**筛选**的：库里同时存着 `"prod"` 和 `"prod "` 的话，
+     * 用户点第一个标签筛不出第二台机器，而这种账从界面上根本看不出来。
+     */
+    #[test]
+    fn 主机标签能存能取并且会被规整() {
+        let (vault, path) = temp_vault();
+        vault.set_password("pw").unwrap();
+
+        let mut host = sample_host("h1");
+        host.tags = vec![
+            " prod ".to_string(),
+            "prod".to_string(),
+            String::new(),
+            "   ".to_string(),
+            "客户A".to_string(),
+        ];
+        vault.save_host(host).unwrap();
+
+        let back = vault.list_hosts().unwrap();
+        assert_eq!(
+            back[0].tags,
+            vec!["prod".to_string(), "客户A".to_string()],
+            "空白没去掉 / 重复没合并 / 空串没丢掉"
+        );
+
+        // 再存一次走的是 upsert 分支：标签不能被漏掉（漏了就是"改个名字标签全没了"）
+        let mut again = back[0].clone();
+        again.name = "改过名".to_string();
+        vault.save_host(again).unwrap();
+
+        let back = vault.list_hosts().unwrap();
+        assert_eq!(back[0].name, "改过名");
+        assert_eq!(
+            back[0].tags,
+            vec!["prod".to_string(), "客户A".to_string()],
+            "upsert 把标签弄丢了"
+        );
+
+        drop(vault);
+        let _ = fs::remove_file(&path);
+    }
+
+    /// 没标签的主机读出来就是空表，不是 None / 不是报错
+    #[test]
+    fn 没有标签的主机读出来是空表() {
+        let (vault, path) = temp_vault();
+        vault.set_password("pw").unwrap();
+        vault.save_host(sample_host("h1")).unwrap();
+
+        let back = vault.list_hosts().unwrap();
+        assert!(back[0].tags.is_empty());
+
+        drop(vault);
+        let _ = fs::remove_file(&path);
+    }
+
+    /**
+     * 老库（建表时还没有 tags 这一列）打开后要自动补列，并且能正常读写。
+     *
+     * 走的是 `CREATE TABLE IF NOT EXISTS` 对已存在的表什么都不做的那个空子，
+     * 所以只能靠 ALTER 补 —— 这个用例就是钉住"补列真的发生了"，
+     * 否则老用户一升级就会发现保存主机全部失败。
+     */
+    #[test]
+    fn 老库缺标签列时会自动补上() {
+        let path = temp_path();
+        {
+            // 手工造一个"老"库：hosts 表里没有 tags
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE hosts (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    address TEXT NOT NULL,
+                    port INTEGER NOT NULL,
+                    username TEXT NOT NULL,
+                    group_id TEXT,
+                    secret BLOB NOT NULL,
+                    compat INTEGER NOT NULL DEFAULT 0
+                );",
+            )
+            .unwrap();
+        }
+
+        let vault = Vault::open(&path).expect("打开老库失败");
+        vault.set_password("pw").unwrap();
+        assert!(vault.list_hosts().unwrap().is_empty());
+
+        let mut host = sample_host("h1");
+        host.tags = vec!["prod".to_string()];
+        vault.save_host(host).expect("老库补列之后应该能存主机");
+
+        assert_eq!(vault.list_hosts().unwrap()[0].tags, vec!["prod".to_string()]);
+
+        drop(vault);
+        let _ = fs::remove_file(&path);
+    }
+
+    /// 标签列里是脏数据（手改过库、或将来格式变了）时当成没标签，别让整个列表读不出来
+    #[test]
+    fn 标签列里是坏数据只会丢标签不会丢主机() {
+        let (vault, path) = temp_vault();
+        vault.set_password("pw").unwrap();
+        vault.save_host(sample_host("h1")).unwrap();
+
+        {
+            let db = vault.db.lock().unwrap();
+            db.execute("UPDATE hosts SET tags = '这不是 JSON'", [])
+                .unwrap();
+        }
+
+        let back = vault.list_hosts().unwrap();
+        assert_eq!(back.len(), 1, "一条脏标签把整台主机带没了");
+        assert!(back[0].tags.is_empty());
+
+        drop(vault);
+        let _ = fs::remove_file(&path);
+    }
+
+    /// 个数与单条长度都有上限 —— 侧栏只有 240px，也不能让人往库里灌无限长的字符串
+    #[test]
+    fn 标签个数与单条长度都有上限() {
+        let many: Vec<String> = (0..MAX_TAGS_PER_HOST + 10).map(|i| format!("t{i}")).collect();
+        assert_eq!(normalize_tags(many).len(), MAX_TAGS_PER_HOST);
+
+        let long = format!("{}尾", "字".repeat(MAX_TAG_CHARS + 20));
+        let got = normalize_tags(vec![long]);
+        assert_eq!(got[0].chars().count(), MAX_TAG_CHARS);
     }
 }

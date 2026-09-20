@@ -2,6 +2,7 @@ import { ArrowLeftRight, FolderTree, Plus } from 'lucide-react'
 import { ModalShell } from '@/components/ModalShell'
 import { panesOf, useApp } from '@/lib/store'
 import type { HostRecord } from '@/lib/api'
+import { hostEndpoint, hostLabel, tagTone } from '@/lib/hosts'
 import { connectHost } from './connectHost'
 
 /**
@@ -36,7 +37,7 @@ export function PaneHostDialog() {
         sessionId,
         hostId: host.id,
         // 跟标签标题同一套写法，分屏里一眼能看出哪格是哪台
-        title: `${host.username}@${host.address}`,
+        title: hostLabel(host),
       })
     })
   }
@@ -52,12 +53,13 @@ export function PaneHostDialog() {
 
   const renderHost = (host: HostRecord) => {
     const current = !!currentHostId && host.id === currentHostId
+    const tags = host.tags ?? []
     return (
       <button
         key={host.id}
         // 已经是这一格在用的主机：点它就是关掉框，别白白重连一次
         onClick={() => (current ? close() : pick(host))}
-        title={current ? '这一格现在用的就是这台' : `把这一格连到 ${host.name}`}
+        title={current ? '这一格现在用的就是这台' : `把这一格连到 ${hostLabel(host)}`}
         className={`flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-[12px] transition-colors hover:bg-surface-2 hover:text-ink ${
           current ? 'text-ink' : 'text-ink-muted'
         }`}
@@ -67,11 +69,17 @@ export function PaneHostDialog() {
             current ? 'bg-success' : 'bg-ink-tertiary'
           }`}
         />
-        <span className="min-w-0 flex-1 truncate">
-          {host.name}
-          <span className="ml-2 text-[11px] text-ink-tertiary">
-            {host.username}@{host.address}
-          </span>
+        <span className="flex min-w-0 flex-1 items-center gap-1.5">
+          <span className="min-w-0 truncate">{hostLabel(host)}</span>
+          {/* 起了名字才有第二段可显示 —— 没起名时 hostLabel 本身就是 `用户名@地址` */}
+          {host.name && (
+            <span className="shrink-0 text-[11px] text-ink-tertiary">{hostEndpoint(host)}</span>
+          )}
+          {tags.slice(0, 2).map((t) => (
+            <span key={t} className={`shrink-0 rounded-sm px-1 py-px text-[10px] ${tagTone(t)}`}>
+              {t}
+            </span>
+          ))}
         </span>
         {/* 四宫格常常四格四台机器，得一眼看出哪一行是这一格正在用的 */}
         {current && (

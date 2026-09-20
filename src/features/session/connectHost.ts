@@ -1,4 +1,5 @@
 import { parseConnectError, sshConnect, type HostRecord } from '@/lib/api'
+import { hostLabel } from '@/lib/hosts'
 import { useApp } from '@/lib/store'
 
 /**
@@ -65,6 +66,6 @@ export async function connectHost(
       })
       return
     }
-    s.setError(`连接 ${host.name} 失败：${failure.message}`)
+    s.setError(`连接 ${hostLabel(host)} 失败：${failure.message}`)
   }
 }

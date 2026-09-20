@@ -28,6 +28,7 @@ import {
   type HostRecord,
 } from './api'
 import { APP_SCHEME_ID, isKnownSchemeId, isValidScheme, type TermScheme } from './termSchemes'
+import { hostLabel } from './hosts'
 
 /** 终端字号可调范围。再小就看不清，再大一个屏幕放不下几行 */
 export const MIN_FONT_SIZE = 9
@@ -280,11 +281,20 @@ export interface Pane {
   hostId?: string
   /** 格子标题条上显示的名字 */
   title: string
+  /**
+   * 这个名字是**用户手改过的**。
+   *
+   * 有它才敢在主机改名之后自动跟着改 —— 否则会把用户起的名字冲掉。
+   * 换主机（`setPaneConnection`）时会被清掉：那是换了一台机器，旧名字不再有意义。
+   */
+  titlePinned?: boolean
 }
 
 export interface Tab {
   id: string
   title: string
+  /** 见 `Pane.titlePinned`：手改过的名字不再被自动更新覆盖 */
+  titlePinned?: boolean
   kind: TabKind
   /** SSH 会话 id。**只有 sftp / editor 标签用它**，终端标签的连接在 `panes` 里 */
   sessionId?: string
@@ -630,6 +640,41 @@ export function makePane(input: Omit<Pane, 'id'>): Pane {
 }
 
 /**
+ * 主机改名之后，把界面上那些**从主机名派生出来的标题**跟着改过来。
+ *
+ * 判据是「标题恰好等于旧名字」或「旧名字 · 文件」，而不是"属于这台主机就改" ——
+ * 后者会把用户手改过的名字、以及编辑器标签的文件名一起冲掉。
+ * 另外 `titlePinned` 的一律不动：手改的名字是用户自己的叫法，比主机名优先。
+ *
+ * 只在名字真的变了的时候调用（`saveHost` 里判过），所以移分组之类的保存不会白跑一趟。
+ */
+function syncHostTitles(before: HostRecord, after: HostRecord) {
+  const from = hostLabel(before)
+  const to = hostLabel(after)
+  if (from === to) return
+
+  const older = `${from} · 文件`
+  const newer = `${to} · 文件`
+  useApp.setState((s) => ({
+    tabs: s.tabs.map((t) => ({
+      ...t,
+      title: t.titlePinned
+        ? t.title
+        : t.title === from
+          ? to
+          : t.title === older
+            ? newer
+            : t.title,
+      panes: t.panes?.map((p) =>
+        p.hostId === after.id && !p.titlePinned && p.title === from
+          ? { ...p, title: to }
+          : p,
+      ),
+    })),
+  }))
+}
+
+/**
  * 造一条终端标签（连带它那唯一一格）。
  *
  * 终端标签**必须**有格子：没有格子的终端标签在界面上是一片空白。
@@ -714,6 +759,19 @@ interface AppState {
 
   connectOpen: boolean
   setConnectOpen: (open: boolean) => void
+
+  /**
+   * 「正在编辑哪台主机」。非 null 时 `ConnectDialog` 切成编辑形态（预填全部字段、
+   * 只保存不连接）。用 id 而不是把整条记录塞进来：记录会被 `refreshHosts` 换掉，
+   * 而对话框要显示的是**当前**那份。
+   */
+  editingHostId: string | null
+  setEditingHostId: (id: string | null) => void
+
+  /** 手动改标签页名字（置 `titlePinned`，之后不再被自动更新覆盖） */
+  renameTab: (tabId: string, title: string) => void
+  /** 手动改某一格的名字。同上 */
+  renamePane: (tabId: string, paneId: string, title: string) => void
 
   tunnelOpen: boolean
   setTunnelOpen: (open: boolean) => void
@@ -1100,6 +1158,29 @@ export const useApp = create<AppState>((set, get) => ({
   connectOpen: false,
   setConnectOpen: (open) => set({ connectOpen: open }),
 
+  editingHostId: null,
+  setEditingHostId: (id) => set({ editingHostId: id }),
+
+  renameTab: (tabId, title) =>
+    set((s) => ({
+      tabs: s.tabs.map((t) => (t.id === tabId ? { ...t, title, titlePinned: true } : t)),
+    })),
+
+  renamePane: (tabId, paneId, title) =>
+    set((s) => ({
+      tabs: s.tabs.map((t) =>
+        // 没有 panes 的标签（文件面板、编辑器）别凭空长出一个空数组
+        t.id === tabId && t.panes
+          ? {
+              ...t,
+              panes: t.panes.map((p) =>
+                p.id === paneId ? { ...p, title, titlePinned: true } : p,
+              ),
+            }
+          : t,
+      ),
+    })),
+
   tunnelOpen: false,
   setTunnelOpen: (open) => set({ tunnelOpen: open }),
 
@@ -1340,8 +1421,11 @@ export const useApp = create<AppState>((set, get) => ({
   },
 
   saveHost: async (host) => {
+    const before = get().hosts.find((h) => h.id === host.id)
     await hostsSave(host)
     await get().refreshHosts()
+    // 改过名字就把界面上那些"从主机名派生出来的标题"跟着改过来
+    if (before) syncHostTitles(before, host)
   },
 
   removeHost: async (id) => {
@@ -1569,7 +1653,14 @@ export const useApp = create<AppState>((set, get) => ({
       return {
         tabs: s.tabs.map((t) =>
           t.id === tabId
-            ? { ...t, panes: panesOf(t).map((p) => (p.id === paneId ? { ...p, ...conn } : p)) }
+            ? {
+                ...t,
+                panes: panesOf(t).map((p) =>
+                  // titlePinned 必须清掉：换了一台机器，上一台的名字（哪怕是用户手改的）
+                  // 留着只会误导，而且会让新主机的改名同步失效
+                  p.id === paneId ? { ...p, ...conn, titlePinned: false } : p,
+                ),
+              }
             : t,
         ),
         deadPanes: nextDead,

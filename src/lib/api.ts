@@ -177,11 +177,21 @@ export type AuthRecord =
 
 export interface HostRecord {
   id: string
+  /**
+   * 用户起的名字。**空串表示没起名**，界面上回退成 `用户名@地址`（见 `lib/hosts.ts`
+   * 的 `hostLabel`）。别拿它等不等于 `address` 判断有没有起名 —— 老库里存的是 IP。
+   */
   name: string
   address: string
   port: number
   username: string
   groupId: string | null
+  /**
+   * 横切分类用的标签（`prod` / `客户A` / `机房B`），用来筛选。
+   * 和 `groupId` 的分工：分组是归属（一台只属于一个组），标签是特征（可以有好几个）。
+   * 后端给了默认值，所以老数据读出来是空数组
+   */
+  tags: string[]
   /** 兼容模式（老设备）。老库里没有这个字段，所以是可选的 */
   compat?: boolean
   auth: AuthRecord

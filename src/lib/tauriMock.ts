@@ -19,7 +19,9 @@ const GROUPS = [
   { id: 'g-intra', name: '内网' },
 ]
 
-const HOSTS = [
+// 可变：`hosts_save` / `hosts_delete` 会就地改它。当初是 const + 增删都空转，
+// 于是预览里改完主机刷新一下又变回去 —— 看着像保存失败，其实是假后端没记。
+let HOSTS = [
   {
     id: 'h-1',
     name: 'web-01',
@@ -27,6 +29,8 @@ const HOSTS = [
     port: 22,
     username: 'deploy',
     groupId: 'g-prod',
+    // 标签挑成几种典型：跨分组的横切维度（prod）、中文、以及完全不重复的
+    tags: ['prod', '机房A'],
     auth: { type: 'password' as const, password: '' },
   },
   {
@@ -36,6 +40,7 @@ const HOSTS = [
     port: 22,
     username: 'root',
     groupId: 'g-prod',
+    tags: ['prod', '数据库'],
     auth: { type: 'key' as const, privateKeyPath: 'C:\\Users\\hhdlj\\.ssh\\id_ed25519' },
   },
   {
@@ -45,6 +50,8 @@ const HOSTS = [
     port: 2222,
     username: 'hhdlj',
     groupId: 'g-intra',
+    // 没起名的那一台：界面上应该回退成 hhdlj@10.255.0.9
+    tags: ['开发'],
     auth: { type: 'password' as const, password: '' },
   },
   {
@@ -54,6 +61,7 @@ const HOSTS = [
     port: 22,
     username: 'ops',
     groupId: null,
+    tags: ['公网'],
     auth: { type: 'key' as const, privateKeyPath: 'C:\\Users\\hhdlj\\.ssh\\ops.pem' },
   },
   {
@@ -63,6 +71,8 @@ const HOSTS = [
     port: 22,
     username: 'admin',
     groupId: 'g-intra',
+    // 一个标签都不挂：会话树里不该因此少一行
+    tags: [] as string[],
     auth: { type: 'password' as const, password: '' },
   },
 ]
@@ -264,8 +274,16 @@ export async function invoke<T>(cmd: string, args: Record<string, unknown> = {})
       return later(HOSTS as T)
     case 'groups_list':
       return later(GROUPS as T)
-    case 'hosts_save':
+    case 'hosts_save': {
+      const host = args.host as (typeof HOSTS)[number]
+      const at = HOSTS.findIndex((h) => h.id === host.id)
+      if (at >= 0) HOSTS[at] = host
+      else HOSTS.push(host)
+      return later(undefined as T)
+    }
     case 'hosts_delete':
+      HOSTS = HOSTS.filter((h) => h.id !== args.id)
+      return later(undefined as T)
     case 'groups_save':
     case 'groups_delete':
       return later(undefined as T)

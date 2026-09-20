@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { ChevronDown, FolderOpen, RotateCw, Terminal, X } from 'lucide-react'
+import { ChevronDown, FolderOpen, Pencil, RotateCw, Terminal, X } from 'lucide-react'
 import {
   acceptsPanes,
   bandWidths,
@@ -634,6 +634,27 @@ function PaneFrame({
   children,
 }: FrameProps) {
   const dead = useApp((s) => !!s.deadPanes[pane.id])
+  /** 正在就地改这一格的名字 */
+  const [renaming, setRenaming] = useState(false)
+  /** Esc 取消时置上：blur 才是收尾点（Enter 也会走 blur），得让它知道该不该提交 */
+  const cancelRenameRef = useRef(false)
+
+  /**
+   * 改这一格的名字。
+   *
+   * 空串按取消处理：格子的名字是"这是哪台机器"的唯一线索，清掉之后
+   * 四宫格里就剩四个图标，只能一个个点进去找。
+   */
+  const commitRename = (raw: string) => {
+    setRenaming(false)
+    if (cancelRenameRef.current) {
+      cancelRenameRef.current = false
+      return
+    }
+    const title = raw.trim()
+    if (!title || title === pane.title) return
+    useApp.getState().renamePane(tabId, pane.id, title)
+  }
 
   return (
     <div
@@ -662,14 +683,56 @@ function PaneFrame({
           于是以为"分屏只能连同一台机器"。
           点击在 window 的 mouseup 里判（见 onUp），不挂 onClick。
         */}
+        {renaming ? (
+          /*
+            改名用的输入框必须整块包在 data-pane-action 里：标题条的 mousedown
+            会起"拖动换位"，不排除掉的话在输入框里选字会被当成拖格子。
+            它也不能带 data-pane-title —— 否则松手时外面那套逻辑会顺手弹出换主机框。
+          */
+          <span data-pane-action className="flex min-w-0 flex-1 items-center gap-1 px-1 -mx-1">
+            <Terminal size={11} className="shrink-0 text-ink-tertiary" />
+            <input
+              autoFocus
+              defaultValue={pane.title}
+              onBlur={(e) => commitRename(e.currentTarget.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') e.currentTarget.blur()
+                if (e.key === 'Escape') {
+                  cancelRenameRef.current = true
+                  e.currentTarget.blur()
+                }
+              }}
+              className="h-4 w-full min-w-0 rounded border border-accent bg-surface-2 px-1 text-[11px] text-ink outline-none"
+            />
+          </span>
+        ) : (
+          <span
+            data-pane-title={pane.id}
+            title={showTitle ? '点一下换一台主机连到这一格 · 拖动可以跟别的格子换位' : undefined}
+            className="flex min-w-0 flex-1 cursor-pointer items-center gap-1 rounded px-1 -mx-1 transition-colors hover:bg-surface-3 hover:text-ink"
+          >
+            <Terminal size={11} className="shrink-0 text-ink-tertiary" />
+            <span className="min-w-0 truncate">{pane.title}</span>
+            <ChevronDown size={11} className="shrink-0 text-ink-tertiary" />
+          </span>
+        )}
+
+        {/*
+          改这一格的名字。**不给双击** —— 标题的单击已经被"换主机"占着
+          （在 window 的 mouseup 里判），双击等于连点两下，会弹出两轮换主机框。
+          所以这里用一个明摆着的按钮。
+        */}
         <span
-          data-pane-title={pane.id}
-          title={showTitle ? '点一下换一台主机连到这一格 · 拖动可以跟别的格子换位' : undefined}
-          className="flex min-w-0 flex-1 cursor-pointer items-center gap-1 rounded px-1 -mx-1 transition-colors hover:bg-surface-3 hover:text-ink"
+          data-pane-action
+          data-pane-rename={pane.id}
+          title="改这一格显示的名字（只影响显示）"
+          className="flex shrink-0"
+          onClick={() => setRenaming(true)}
         >
-          <Terminal size={11} className="shrink-0 text-ink-tertiary" />
-          <span className="min-w-0 truncate">{pane.title}</span>
-          <ChevronDown size={11} className="shrink-0 text-ink-tertiary" />
+          <Pencil
+            size={11}
+            className="text-ink-tertiary opacity-60 transition-colors hover:text-accent hover:opacity-100"
+          />
         </span>
 
         {pane.sessionId && (

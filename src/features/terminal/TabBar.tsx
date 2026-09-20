@@ -39,10 +39,33 @@ export function TabBar() {
     deadPanes,
     reconnectSinks,
     focusedPane,
+    renameTab,
   } = useApp()
 
   /** 分屏布局菜单：锚在哪个标签的按钮上、画在哪儿 */
   const [layoutMenu, setLayoutMenu] = useState<{ tabId: string; x: number; y: number } | null>(null)
+
+  /** 正在就地改名的标签 id。双击标签名进来 */
+  const [renaming, setRenaming] = useState<string | null>(null)
+  /** 按 Esc 取消时置上：blur 才是真正的收尾点（Enter 也会走 blur），得让 blur 知道该不该提交 */
+  const cancelRenameRef = useRef(false)
+
+  /**
+   * 改名的收尾（Enter / 失焦都走这里）。
+   *
+   * 空串按取消处理，而不是"把标题清空"：标签总得有个名字，
+   * 清空了 TabBar 上就剩一个光秃秃的图标，还得再猜它是什么。
+   */
+  const commitRename = (tabId: string, raw: string, current: string) => {
+    setRenaming(null)
+    if (cancelRenameRef.current) {
+      cancelRenameRef.current = false
+      return
+    }
+    const title = raw.trim()
+    if (!title || title === current) return
+    renameTab(tabId, title)
+  }
 
   /* ---------------- 拖标签排序 ---------------- */
 
@@ -214,7 +237,39 @@ export function TabBar() {
             ) : (
               <Terminal size={12} className="shrink-0 text-ink-tertiary" />
             )}
-            <span className="min-w-0 max-w-40 truncate">{tab.title}</span>
+            {/*
+              双击标签名就地改名。**不能挂在标签那个 div 上** —— 它同时是
+              拖拽排序的手柄，双击会先走两轮 mousedown（虽然不足阈值不会真拖起来，
+              但也不该把改名绑在拖拽手柄上）。挂在名字这一块上最不容易误触。
+
+              清空按取消处理（见 commitRename）：标签总得有个名字
+            */}
+            {renaming === tab.id ? (
+              <input
+                autoFocus
+                defaultValue={tab.title}
+                // 必须拦住 mousedown：不拦的话在输入框里选字会被当成拖标签
+                onMouseDown={(e) => e.stopPropagation()}
+                onDoubleClick={(e) => e.stopPropagation()}
+                onBlur={(e) => commitRename(tab.id, e.currentTarget.value, tab.title)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') e.currentTarget.blur()
+                  if (e.key === 'Escape') {
+                    cancelRenameRef.current = true
+                    e.currentTarget.blur()
+                  }
+                }}
+                className="h-5 w-32 min-w-0 rounded border border-accent bg-surface-2 px-1 text-[13px] text-ink outline-none"
+              />
+            ) : (
+              <span
+                className="min-w-0 max-w-40 truncate"
+                title="双击改名"
+                onDoubleClick={() => setRenaming(tab.id)}
+              >
+                {tab.title}
+              </span>
+            )}
             {/* 有一格断线且自动重连已放弃：给个 ↻，一次把整个标签的格子都拉一遍 */}
             {hasDead && (
               <span data-no-drag title="重新连接" className="flex shrink-0">

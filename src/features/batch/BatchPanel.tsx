@@ -20,6 +20,7 @@ import {
   type HostRecord,
 } from '@/lib/api'
 import { hostToConfig } from '../session/connectHost'
+import { hostEndpoint, hostLabel, tagTone } from '@/lib/hosts'
 
 /**
  * 批量执行面板：勾几台主机、写一条命令、并发跑完把每台的输出收回来。
@@ -329,7 +330,8 @@ export function BatchPanel({ initialHostIds }: { initialHostIds?: string[] }) {
 
   const blankRow = (h: HostRecord): Row => ({
     hostId: h.id,
-    name: h.name,
+    // 显示用名字：用户起过名就用那个，没起名回退成 用户名@地址
+    name: hostLabel(h),
     address: `${h.username}@${h.address}:${h.port}`,
     status: 'queued',
     exitCode: null,
@@ -544,10 +546,18 @@ export function BatchPanel({ initialHostIds }: { initialHostIds?: string[] }) {
         <button
           onClick={() => toggle(host.id)}
           className="flex min-w-0 flex-1 items-center gap-2 text-left"
-          title={`${host.username}@${host.address}:${host.port}`}
+          title={hostEndpoint(host)}
         >
-          <span className="truncate text-[13px]">{host.name}</span>
-          <span className="ml-auto truncate text-[11px] text-ink-tertiary">{host.address}</span>
+          {/* 起了名显名字，没起名就是 用户名@地址 —— 跟会话树同一套写法 */}
+          <span className="min-w-0 truncate text-[13px]">{hostLabel(host)}</span>
+          {(host.tags ?? []).slice(0, 2).map((t) => (
+            <span key={t} className={`shrink-0 rounded-sm px-1 py-px text-[10px] ${tagTone(t)}`}>
+              {t}
+            </span>
+          ))}
+          <span className="ml-auto truncate pl-1 text-[11px] text-ink-tertiary">
+            {host.address}
+          </span>
         </button>
         {/* 结果状态就地显示在目标列表上：跑完不用挨个点开看哪台红了 */}
         {row && (

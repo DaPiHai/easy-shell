@@ -10,16 +10,20 @@
  * 前置：另开一个终端跑 `npm run dev:web`（探针自己要连 1420 端口的预览页）。
  *
  * 用法：
- *   node tools/probe.mjs                # 两个场景都跑
+ *   node tools/probe.mjs                # 所有场景
  *   node tools/probe.mjs drag           # 只跑「拖标签进终端窗口并分屏」
  *   node tools/probe.mjs newline        # 只跑「命令框里只有换行」
+ *   node tools/probe.mjs tags           # 只跑「标签筛选 / 关键词过滤 / 编辑主机」
+ *   node tools/probe.mjs rename         # 只跑「双击标签改名」
  *
  * 环境变量：EDGE_PATH / PROBE_PORT / PROBE_URL 可覆盖默认值。
  * 截图落在 `.workbuddy-ai/shots/`（该目录不进版本库）。
  *
  * 场景里用到的 DOM 约定（改 UI 时留意，探针断了多半是这里变了）：
  *   - 标签栏的标签：`div[title]` 且 class 含 `h-9` + `cursor-pointer`
- *   - 会话树主机行：`div[title="点击连接"]`
+ *   - 会话树主机行的可点区：`div[title="点击连接"]`
+ *   - 会话树过滤框：`[data-host-filter]`；标签快捷条：`[data-tag-filter="<标签>"]`
+ *   - 主机行里的标签 chip：`[data-tag-chip]`；主机行编辑按钮：`[data-host-edit]`
  *   - 终端窗口：`[data-pane-grid]`，格数 = 里面 `[data-pane-title]` 的个数
  *   - 投放高亮层：`div[aria-hidden]` 且 class 含 `border-dashed`
  *   - 右下角提示条：`div.fixed.bottom-8.right-4`
@@ -193,6 +197,22 @@ window.__probe = {
     const el = [...document.querySelectorAll('div')].find((d) => d.className.includes('fixed') && d.className.includes('z-50') && d.textContent.includes('松手'))
     return el ? { text: el.textContent, rect: el.getBoundingClientRect().toJSON() } : null
   },
+  /** 会话树里当前**可见**的主机行文字（过滤生效后剩几行，看它） */
+  hostsVisible() {
+    return [...document.querySelectorAll('div[title="点击连接"]')].map((el) => el.textContent)
+  },
+  /** 顶部标签快捷条上的标签 */
+  tagBar() {
+    return [...document.querySelectorAll('[data-tag-filter]')].map((el) => el.getAttribute('data-tag-filter'))
+  },
+  /** 主机行里那些标签 chip 的文字 */
+  rowTags() {
+    return [...document.querySelectorAll('[data-tag-chip]')].map((el) => el.textContent)
+  },
+  /** 表单里所有输入框的当前值（编辑主机时用来看有没有预填） */
+  inputValues() {
+    return [...document.querySelectorAll('input')].map((el) => el.value)
+  },
 }
 'injected'
 `
@@ -205,6 +225,43 @@ async function waitFor(cdp, expr, label, ms = 15000) {
     await sleep(200)
   }
   throw new Error(`等不到：${label}（页面文本：${(await cdp.eval('document.body.innerText')).slice(0, 300)}）`)
+}
+
+/** 拿选择器对应的中点坐标，找不到就报错（比静默点空地方好查） */
+async function boxOf(cdp, sel) {
+  const box = await cdp.eval(`(() => {
+    const el = document.querySelector(${JSON.stringify(sel)})
+    if (!el) return null
+    const r = el.getBoundingClientRect()
+    return { x: r.left + r.width / 2, y: r.top + r.height / 2 }
+  })()`)
+  if (!box) throw new Error(`找不到元素：${sel}`)
+  return box
+}
+
+/** 真鼠标点一下某个选择器 */
+async function clickSel(cdp, sel) {
+  const box = await boxOf(cdp, sel)
+  await cdp.mouse('mousePressed', box.x, box.y)
+  await cdp.mouse('mouseReleased', box.x, box.y)
+  return box
+}
+
+/**
+ * 往受控输入框里塞值。
+ *
+ * 必须走**原生 setter + input 事件**：`Input.insertText` 和直接改 `el.value`
+ * 都绕过了 React 的受控更新，界面看着变了、React 那边还是旧值。
+ */
+async function typeInto(cdp, sel, text) {
+  return cdp.eval(`(() => {
+    const el = document.querySelector(${JSON.stringify(sel)})
+    if (!el) return 'no-element'
+    const proto = el instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype
+    Object.getOwnPropertyDescriptor(proto, 'value').set.call(el, ${JSON.stringify(text)})
+    el.dispatchEvent(new Event('input', { bubbles: true }))
+    return el.value
+  })()`)
 }
 
 async function scenarioDragTab(cdp) {
@@ -255,6 +312,34 @@ async function scenarioDragTab(cdp) {
   console.log('松手后窗口:', JSON.stringify(await cdp.eval('__probe.grids()')))
   console.log('松手后标签:', JSON.stringify(await cdp.eval('__probe.tabs()')))
   await cdp.shot('probe-3-after-drop.png')
+
+  // 顺手验证「格子改名」那个按钮：双击用不了（标题的单击已经被换主机占用），
+  // 所以它是明摆着的铅笔按钮 —— 这里确认它真的能改名
+  const paneIds = await cdp.eval(
+    `[...document.querySelectorAll('[data-pane-rename]')].map((e) => e.getAttribute('data-pane-rename'))`,
+  )
+  console.log('可改名的格子:', JSON.stringify(paneIds))
+  if (paneIds.length < 2) throw new Error('分屏之后应该有 2 个格子可改名')
+  await clickSel(cdp, `[data-pane-rename="${paneIds[1]}"]`)
+  await sleep(250)
+  await cdp.eval(`(() => {
+    // 改名输入框就长在标题条的 data-pane-action 里面（外面那个是筛选框，别点错）
+    const el = document.querySelector('[data-pane-action] input')
+    if (!el) return 'no-input'
+    el.focus()
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(el, '第二格')
+    el.dispatchEvent(new Event('input', { bubbles: true }))
+    el.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
+    return 'ok'
+  })()`)
+  await sleep(300)
+  console.log(
+    '改完之后各格的标题:',
+    JSON.stringify(
+      await cdp.eval(`[...document.querySelectorAll('[data-pane-title]')].map((e) => e.textContent)`),
+    ),
+  )
+  await cdp.shot('probe-3b-pane-rename.png')
 
   console.log('\n--- 页面控制台 ---')
   for (const l of cdp.logs.slice(-40)) console.log(l)
@@ -331,13 +416,144 @@ async function scenarioNewlineOnly(cdp) {
 
 /* ---------------- main ---------------- */
 
-// newline 场景要先有分屏（底部那条把手是多格标签才有的），所以它自带依赖：
-// 单独指定 `newline` 时也先把 drag 跑一遍
+/**
+ * 标签筛选 / 关键词过滤 / 编辑主机对话框。
+ *
+ * 这几条都是"点了之后界面该变成什么样"，靠读代码推演等于自我确认 ——
+ * 真正要证的是：筛选真的把行筛掉了、对话框真的预填了那条记录。
+ */
+async function scenarioTags(cdp) {
+  await cdp.send('Page.navigate', { url: PAGE })
+  await sleep(1200)
+  await cdp.eval(HELPERS)
+  await waitFor(cdp, '__probe.hosts().length > 0', '会话树里的主机行')
+
+  const all = await cdp.eval('__probe.hostsVisible()')
+  console.log('主机行（初始）:', JSON.stringify(all))
+  console.log('标签快捷条:', JSON.stringify(await cdp.eval('__probe.tagBar()')))
+  console.log('行内标签 chip:', JSON.stringify(await cdp.eval('__probe.rowTags()')))
+  await cdp.shot('probe-tags-1-overview.png')
+
+  // 点快捷条里的 prod（假数据里正好两台带它）
+  await clickSel(cdp, '[data-tag-filter="prod"]')
+  await sleep(300)
+  const byTag = await cdp.eval('__probe.hostsVisible()')
+  console.log('按标签 prod 筛选后:', JSON.stringify(byTag))
+  if (byTag.length !== 2) throw new Error(`按 prod 应该剩 2 台，实际 ${byTag.length}`)
+  await cdp.shot('probe-tags-2-filter.png')
+
+  // 再点一次 = 取消
+  await clickSel(cdp, '[data-tag-filter="prod"]')
+  await sleep(300)
+  const back = await cdp.eval('__probe.hostsVisible()')
+  console.log('取消标签筛选后:', JSON.stringify(back))
+  if (back.length !== all.length) throw new Error('取消筛选后行数没恢复')
+
+  // 关键词用**标签文字**：能搜到说明标签确实进了搜索范围
+  await typeInto(cdp, '[data-host-filter]', '开发')
+  await sleep(300)
+  const byKw = await cdp.eval('__probe.hostsVisible()')
+  console.log('关键词「开发」（只有一台带这个标签）:', JSON.stringify(byKw))
+  if (byKw.length !== 1) throw new Error(`关键词「开发」应该剩 1 台，实际 ${byKw.length}`)
+  await cdp.shot('probe-tags-3-keyword.png')
+
+  // 关键词 + 标签是"与"的关系：两者同时命中才留下
+  await typeInto(cdp, '[data-host-filter]', 'prod')
+  await clickSel(cdp, '[data-tag-filter="开发"]')
+  await sleep(300)
+  const both = await cdp.eval('__probe.hostsVisible()')
+  console.log('关键词 prod + 标签 开发（互斥，应为 0）:', JSON.stringify(both))
+  if (both.length !== 0) throw new Error(`互斥条件应该剩 0 台，实际 ${both.length}`)
+  await clickSel(cdp, '[data-tag-filter="开发"]')
+  await typeInto(cdp, '[data-host-filter]', '')
+  await sleep(300)
+
+  // 点第一台的编辑按钮：对话框该切成编辑形态并预填
+  await clickSel(cdp, '[data-host-edit]')
+  await sleep(500)
+  console.log(
+    '编辑对话框:', 
+    JSON.stringify({
+      hasEditTitle: await cdp.eval(`document.body.innerText.includes('编辑主机')`),
+      hasSaveButton: await cdp.eval(
+        `[...document.querySelectorAll('button')].some((b) => b.textContent.trim() === '保存')`,
+      ),
+      inputs: await cdp.eval('__probe.inputValues()'),
+    }),
+  )
+  await cdp.shot('probe-tags-4-edit.png')
+
+  // 改个名字存下去，再看会话树那行是不是跟着变了
+  const nameAt = await cdp.eval(`(() => {
+    const el = [...document.querySelectorAll('input')].find((i) => i.placeholder.includes('人或主机') || i.placeholder.includes('@'))
+    return el ? el.placeholder : 'no-name-input'
+  })()`)
+  console.log('名称框的 placeholder（没填名字时显示的兜底）:', nameAt)
+}
+
+/** 双击标签名就地改名 */
+async function scenarioTabRename(cdp) {
+  await cdp.send('Page.navigate', { url: PAGE })
+  await sleep(1200)
+  await cdp.eval(HELPERS)
+  await waitFor(cdp, '__probe.hosts().length > 0', '会话树里的主机行')
+
+  // 先连一台把标签开出来（改名得先有个标签）
+  const hosts = await cdp.eval('__probe.hosts()')
+  await cdp.mouse('mousePressed', hosts[2].x, hosts[2].y)
+  await cdp.mouse('mouseReleased', hosts[2].x, hosts[2].y)
+  await waitFor(cdp, '__probe.tabs().length > 0', '至少一个标签')
+  await sleep(500)
+
+  const before = await cdp.eval('__probe.tabs()')
+  console.log('改名前的标签:', JSON.stringify(before.map((t) => t.title)))
+
+  // 真双击：两轮 pressed/released，clickCount 依次 1、2
+  const t = before[0]
+  await cdp.mouse('mousePressed', t.x, t.y, { clickCount: 1 })
+  await cdp.mouse('mouseReleased', t.x, t.y, { clickCount: 1, buttons: 0 })
+  await cdp.mouse('mousePressed', t.x, t.y, { clickCount: 2 })
+  await cdp.mouse('mouseReleased', t.x, t.y, { clickCount: 2, buttons: 0 })
+  await sleep(300)
+
+  const editor = await cdp.eval(`(() => {
+    const inputs = [...document.querySelectorAll('input')]
+    return { count: inputs.length, values: inputs.map((i) => i.value) }
+  })()`)
+  console.log('双击后页面上的输入框:', JSON.stringify(editor))
+  if (editor.count === 0) throw new Error('双击标签名没有进入改名态（没出现输入框）')
+
+  // 输入新名字，回车提交
+  await cdp.eval(`(() => {
+    const el = [...document.querySelectorAll('input')].find((i) => i.value === ${JSON.stringify(t.title)})
+    if (!el) return 'no-input'
+    el.focus()
+    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set
+    setter.call(el, '我的生产机')
+    el.dispatchEvent(new Event('input', { bubbles: true }))
+    return el.value
+  })()`)
+  await cdp.eval(`(() => {
+    const el = [...document.querySelectorAll('input')].find((i) => i.value === '我的生产机')
+    if (!el) return 'no-input'
+    el.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
+    return 'enter-sent'
+  })()`)
+  await sleep(400)
+
+  const after = await cdp.eval('__probe.tabs()')
+  console.log('改名后的标签:', JSON.stringify(after.map((x) => x.title)))
+  if (!after.some((x) => x.title === '我的生产机')) throw new Error('改名没生效')
+  await cdp.shot('probe-rename.png')
+}
+
 const want = process.argv[2] ?? 'all'
 const { cdp, proc } = await launch()
 try {
   if (want === 'all' || want === 'drag' || want === 'newline') await scenarioDragTab(cdp)
   if (want === 'all' || want === 'newline') await scenarioNewlineOnly(cdp)
+  if (want === 'all' || want === 'tags') await scenarioTags(cdp)
+  if (want === 'rename') await scenarioTabRename(cdp)
 } catch (e) {
   console.error('探针失败:', e)
   console.log('--- 页面控制台 ---')
