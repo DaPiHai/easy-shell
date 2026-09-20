@@ -22,6 +22,7 @@ import type { GroupRecord, HostRecord } from '@/lib/api'
 import { hostEndpoint, hostLabel, matchesHost, tagTone } from '@/lib/hosts'
 import { copyQuietly } from '@/lib/clipboard'
 import { ContextMenu, menuAt, sep, type MenuEntry } from '@/components/ContextMenu'
+import { ErrorBoundary } from '@/components/ErrorBoundary'
 import { connectHost } from './connectHost'
 
 /** 主机行下面那排标签最多摆几个。再多给个 `+N`，完整清单在 tooltip 里 */
@@ -161,9 +162,6 @@ export function SessionTree() {
 
   const ungrouped = visible(hosts.filter((h) => !h.groupId))
   const matchedCount = visible(hosts).length
-
-  // 收起时整块不渲染：一块 0 宽的壳留着也没意义，回来有状态栏那个按钮
-  if (sidebarCollapsed) return null
 
   /**
    * 哪几台主机「连着」：有**某一格**挂着它的 sessionId，且那条连接还没断。
@@ -427,8 +425,26 @@ export function SessionTree() {
     )
   }
 
+  /**
+   * 收起时整块不渲染：一块 0 宽的壳留着也没意义，回来有状态栏那个按钮。
+   *
+   * **必须放在所有 hook 之后**。这条以前在中间（`const [menu, setMenu] = useState(...)`
+   * 之前），于是收起侧栏时 hook 少跑一个 —— React 抛
+   * 「Rendered fewer hooks than expected」并把整棵树卸载，表现是**整个窗口变黑**
+   * （只剩窗口标题栏），而不是"侧栏没了"。收起状态存在 localStorage，所以重启后照样黑。
+   */
+  if (sidebarCollapsed) return null
+
   return (
-    <aside className="flex w-60 shrink-0 flex-col border-r border-hairline bg-surface-1">
+    /*
+      外面这层壳带的是"侧栏占地"的那几个类（宽 240 / 满高 / 右边线），
+      兜底组件在里面 —— 这样侧栏内部炸了（比如主机数据里有个 null），
+      红字只会占住侧栏这块 240px，主区照常能用；壳留在外面则不会把布局挤歪。
+      `h-full` 两个都要：aside 现在是壳的子元素，不再是 flex 直接子项，拿不到 stretch。
+    */
+    <div className="h-full w-60 shrink-0 border-r border-hairline bg-surface-1">
+      <ErrorBoundary label="会话侧栏出错了">
+        <aside className="flex h-full min-h-0 flex-col">
       <div className="flex h-9 items-center justify-between px-3">
         <span className="text-[11px] font-medium tracking-[0.4px] text-ink-subtle">会话</span>
         <div className="flex items-center gap-0.5">
@@ -676,6 +692,8 @@ export function SessionTree() {
           }
         />
       )}
-    </aside>
+        </aside>
+      </ErrorBoundary>
+    </div>
   )
 }

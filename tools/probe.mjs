@@ -385,6 +385,54 @@ window.__probe = {
     const r = el.getBoundingClientRect()
     return { x: r.left + r.width / 2, y: r.top + r.height / 2 }
   },
+  /**
+   * 关键容器的尺寸，用来查"黑屏 / 布局塌陷"这类问题。
+   *
+   * docScroll 比 inner 大就说明整页被内容撑破了 —— 那时标题栏会被顶出可视区，
+   * 看起来就是"一片黑只剩窗口边框"。
+   */
+  layout() {
+    const box = (sel) => {
+      const el = document.querySelector(sel)
+      if (!el) return null
+      const r = el.getBoundingClientRect()
+      return {
+        w: Math.round(r.width),
+        h: Math.round(r.height),
+        top: Math.round(r.top),
+        left: Math.round(r.left),
+      }
+    }
+    return {
+      inner: [window.innerWidth, window.innerHeight],
+      docScroll: [document.documentElement.scrollWidth, document.documentElement.scrollHeight],
+      root: box('#root'),
+      aside: box('aside'),
+      main: box('main'),
+      tabbar: box('main > div'),
+      grid: box('[data-pane-grid]'),
+      xterm: box('.xterm'),
+      status: box('footer'),
+    }
+  },
+  /** 当前**可见**那个终端窗口里每一格的矩形（按格子顺序） */
+  cells() {
+    const grid = [...document.querySelectorAll('[data-pane-grid]')].find(
+      (g) => !g.closest('.hidden'),
+    )
+    if (!grid) return []
+    return [...grid.querySelectorAll('[data-pane-title]')].map((t) => {
+      const cell = t.closest('[style]')
+      const r = cell.getBoundingClientRect()
+      return {
+        title: t.textContent,
+        left: Math.round(r.left),
+        top: Math.round(r.top),
+        w: Math.round(r.width),
+        h: Math.round(r.height),
+      }
+    })
+  },
 }
 'injected'
 `
@@ -1051,6 +1099,168 @@ async function scenarioConnectForm(cdp) {
   console.log('\n新建会话表单探针：全部通过')
 }
 
+/**
+ * 场景：收起会话侧栏
+ *
+ * 用户报的：收起之后整块内容变黑，只剩窗口标题栏。侧栏的收起状态存在 localStorage，
+ * 所以"刷新一下就黑"也能复现 —— 这条比点按钮更值得验，用户重启后就是这么撞上的。
+ */
+async function scenarioSidebar(cdp) {
+  await cdp.send('Page.navigate', { url: PAGE })
+  await sleep(1200)
+  await cdp.eval(HELPERS)
+  await waitFor(cdp, '__probe.hosts().length > 0', '会话树里的主机行')
+
+  // 开一个终端标签：黑屏只在有终端时才看得出来
+  const host = (await cdp.eval('__probe.hosts()'))[0]
+  await cdp.mouse('mousePressed', host.x, host.y)
+  await cdp.mouse('mouseReleased', host.x, host.y)
+  await waitFor(cdp, '__probe.tabs().length > 0', '一个终端标签')
+  await sleep(900)
+  console.log('收起前:', JSON.stringify(await cdp.eval('__probe.layout()')))
+  await cdp.shot('probe-sidebar-0-expanded.png')
+
+  await clickSel(cdp, 'aside button[title^="收起侧栏"]')
+  await sleep(900)
+  const collapsed = await cdp.eval('__probe.layout()')
+  console.log('收起后:', JSON.stringify(collapsed))
+  await cdp.shot('probe-sidebar-1-collapsed.png')
+
+  /* 侧栏收起了、主区该占满整宽 */
+  if (collapsed.aside) throw new Error('侧栏没真收起（aside 还在）')
+  if (collapsed.main.left !== 0) throw new Error(`主区左边没归零：${collapsed.main.left}`)
+  if (collapsed.main.w !== collapsed.inner[0]) {
+    throw new Error(`主区没占满宽：${collapsed.main.w} / ${collapsed.inner[0]}`)
+  }
+  /* 状态栏必须还在可视区里 —— 它在底部，被顶出去就等于"整页塌了" */
+  if (!collapsed.status || collapsed.status.top + collapsed.status.h > collapsed.inner[1] + 1) {
+    throw new Error('状态栏被挤出可视区：' + JSON.stringify(collapsed.status))
+  }
+  if (collapsed.docScroll[1] > collapsed.inner[1] + 1 || collapsed.docScroll[0] > collapsed.inner[0] + 1) {
+    throw new Error(`整页被撑破了：docScroll ${collapsed.docScroll} vs 视口 ${collapsed.inner}`)
+  }
+  if (collapsed.grid.h > collapsed.inner[1]) {
+    throw new Error(`终端区比视口还高：${collapsed.grid.h} > ${collapsed.inner[1]}`)
+  }
+
+  /* 刷新一次（收起状态是持久化的）也得是好的 */
+  await cdp.send('Page.reload')
+  await sleep(1500)
+  await cdp.eval(HELPERS)
+  await waitFor(cdp, '__probe.tabs().length > 0 || document.body.innerText.length > 0', '刷新后')
+  await sleep(800)
+  const reloaded = await cdp.eval('__probe.layout()')
+  console.log('收起状态下刷新:', JSON.stringify(reloaded))
+  if (reloaded.docScroll[1] > reloaded.inner[1] + 1) {
+    throw new Error('收起状态下刷新，整页还是被撑破：' + JSON.stringify(reloaded.docScroll))
+  }
+  await cdp.shot('probe-sidebar-2-reloaded.png')
+
+  // 收尾：展开回去，别把持久化状态留给后面的场景
+  await cdp.eval(`window.localStorage.setItem('sidebarCollapsed', '0')`)
+  console.log('\n侧栏探针：全部通过')
+}
+
+/**
+ * 场景：多分屏窗口里的拖拽落点
+ *
+ * 用户报的：多分屏时"特殊显示的区域"不对 —— 高亮盖住的那一格，
+ * 并不是新格子真正会落下的位置。
+ */
+async function scenarioDropZone(cdp) {
+  await cdp.send('Page.navigate', { url: PAGE })
+  await sleep(1200)
+  await cdp.eval(HELPERS)
+  await waitFor(cdp, '__probe.hosts().length > 2', '至少三台主机')
+
+  const hosts = await cdp.eval('__probe.hosts()')
+  for (const h of hosts.slice(0, 3)) {
+    await cdp.mouse('mousePressed', h.x, h.y)
+    await cdp.mouse('mouseReleased', h.x, h.y)
+    await sleep(500)
+  }
+  await waitFor(cdp, '__probe.tabs().length >= 3', '三个标签')
+
+  /** 把某个标签拖到 (x,y) 上，按住不松 */
+  const dragTabTo = async (tab, x, y) => {
+    await cdp.mouse('mousePressed', tab.x, tab.y)
+    await sleep(60)
+    for (let i = 1; i <= 10; i += 1) {
+      const t = i / 10
+      await cdp.mouse('mouseMoved', tab.x + (x - tab.x) * t, tab.y + (y - tab.y) * t)
+      await sleep(40)
+    }
+    await sleep(250)
+  }
+
+  /* ---------- 1. 先拼出两格（左右二分） ---------- */
+  // 先**切到第 1 个标签**再量它的窗口：隐藏的标签 display:none，矩形全是 0，
+  // 而拖动源不能是落点那个标签自己（那是"拖回自己"，按设计不并）
+  let tabs = await cdp.eval('__probe.tabs()')
+  await cdp.mouse('mousePressed', tabs[0].x, tabs[0].y)
+  await cdp.mouse('mouseReleased', tabs[0].x, tabs[0].y)
+  await sleep(600)
+  const g0 = (await cdp.eval('__probe.grids()')).find((g) => !g.hidden)
+  const halfX = Math.round(g0.left + (g0.right - g0.left) * 0.25)
+  const midY = Math.round((g0.top + g0.bottom) / 2)
+  await dragTabTo(tabs[2], halfX, midY)
+  console.log('拖到一半时的浮签:', JSON.stringify(await cdp.eval('__probe.ghost()')))
+  console.log('拖到一半时的高亮:', JSON.stringify(await cdp.eval('__probe.highlights()')))
+  await cdp.mouse('mouseReleased', halfX, midY, { buttons: 0 })
+  await sleep(1800)
+  const two = await cdp.eval('__probe.cells()')
+  console.log('拼两格后:', JSON.stringify(two))
+  if (two.length !== 2) throw new Error(`应该拼成两格，实际 ${two.length}`)
+
+  /* ---------- 2. 把剩下的那个标签拖到**右格的后半边** ---------- */
+  tabs = await cdp.eval('__probe.tabs()')
+  const src = tabs[tabs.length - 1]
+  const right = two[1]
+  const hoverX = Math.round(right.left + right.w * 0.75)
+  const hoverY = Math.round(right.top + right.h / 2)
+  await dragTabTo(src, hoverX, hoverY)
+  const ghost = await cdp.eval('__probe.ghost()')
+  const zone = await cdp.eval('__probe.highlights()')
+  console.log('悬停右格（偏右）时的浮签:', JSON.stringify(ghost))
+  console.log('悬停右格（偏右）时的高亮:', JSON.stringify(zone))
+  console.log('此刻两格:', JSON.stringify(two))
+  await cdp.shot('probe-dropzone-1-hover-right.png')
+
+  /*
+   * 高亮必须**只盖住右格的后半边**。
+   * 以前这里是整格 —— 于是"高亮盖着 web-01 那一格、新格子却插到了它左边"，
+   * 用户看到的就是"特殊显示的区域不对"。
+   */
+  if (!ghost?.text.includes('右侧')) {
+    throw new Error(`浮签没说清落点：${ghost?.text}`)
+  }
+  const expectLeft = Math.round(right.left + right.w / 2)
+  const expectW = Math.round(right.w / 2)
+  const hl = zone[0]
+  if (!hl || Math.abs(hl.left - expectLeft) > 3 || Math.abs(hl.w - expectW) > 3) {
+    throw new Error(
+      `高亮区域不对：${JSON.stringify(hl)}，应该盖住右格的后半边（left≈${expectLeft} w≈${expectW}）`,
+    )
+  }
+
+  await cdp.mouse('mouseReleased', hoverX, hoverY, { buttons: 0 })
+  await sleep(1800)
+  const after = await cdp.eval('__probe.cells()')
+  console.log('松手后:', JSON.stringify(after))
+  await cdp.shot('probe-dropzone-2-after.png')
+
+  /* 新格子必须落在**右格之后**（最右），而不是插到它左边 */
+  if (after.length !== 3) throw new Error(`应该变成三格，实际 ${after.length}`)
+  if (after[1].title !== right.title) {
+    throw new Error(`web-01 不在中间了：${JSON.stringify(after.map((c) => c.title))}`)
+  }
+  if (!(after[2].left > after[1].left)) {
+    throw new Error(`新格子没落在最右边：${JSON.stringify(after)}`)
+  }
+
+  console.log('\n多分屏落点探针：全部通过')
+}
+
 const want = process.argv[2] ?? 'all'
 const { cdp, proc } = await launch()
 try {
@@ -1060,6 +1270,13 @@ try {
   if (want === 'rename') await scenarioTabRename(cdp)
   if (want === 'all' || want === 'menu') await scenarioContextMenu(cdp)
   if (want === 'all' || want === 'connect') await scenarioConnectForm(cdp)
+  if (want === 'sidebar') await scenarioSidebar(cdp)
+  if (want === 'dropzone') await scenarioDropZone(cdp)
+  // 这两个也进 all：它们各自先 navigate，不会互相污染；侧栏那条结尾会把 localStorage 复位
+  if (want === 'all') {
+    await scenarioSidebar(cdp)
+    await scenarioDropZone(cdp)
+  }
 } catch (e) {
   console.error('探针失败:', e)
   console.log('--- 页面控制台 ---')

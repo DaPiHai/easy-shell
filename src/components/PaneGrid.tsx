@@ -369,36 +369,43 @@ export function PaneGrid({ tabId, panes, layout, renderPane }: Props) {
         }
 
         /**
-         * 落点格的下标 = 新格子插进去的位置。
+         * 落点：插到这一格的**哪一侧**。
          *
-         * 单格窗口（源和目标各一格）特殊：落点落在哪半边，就横着还是竖着切。
-         * 高亮也只点那半边 —— 新格子会出现在哪，就该让用户看见哪，
-         * 整窗罩一层的话"并到下方"和"并到这一格"长得一模一样。
+         * **所有情况都按半格判**（以前只有"单格窗口"这么算，多格窗口退化成整格 +
+         * 插到那一格**之前**）—— 于是把标签拖到右格上，高亮盖着右格、新格子却出现在
+         * 它左边（实测：两格 `dev-box | web-01`，悬停右格偏右，松手后变成
+         * `dev-box | db-primary | web-01`）。高亮画在哪儿，新格子就该出现在哪儿：
+         * 压在这一格的左/上半边 = 插到它之前，右/下半边 = 插到它之后。
+         *
+         * `layoutHint` 只给单格窗口：那时横竖由这一次落点决定（cols2 / rows2）；
+         * 多格窗口的形状交给 `grownLayout` 长一档 —— 硬塞一个形状会打乱原有排布。
          */
         const hitIndex = targetPanes.findIndex((p) => p.id === hit)
+        const solo = targetPanes.length === 1 && panesOf(src).length === 1
         let insertAt = hitIndex >= 0 ? hitIndex : targetPanes.length
         let layoutHint: PaneLayout | undefined
         let zone: DropZone = 'full'
         let text = '松手：并到这一格（那一格会重开一个 shell）'
-        if (targetPanes.length === 1 && panesOf(src).length === 1) {
-          const r = (hit ? cellsRef.current.get(hit) : null)?.getBoundingClientRect()
-          if (r) {
-            const onRight = e.clientX - r.left > r.width / 2
-            const below = e.clientY - r.top > r.height / 2
-            const horizontal = Math.abs(e.clientX - (r.left + r.width / 2)) >
-              Math.abs(e.clientY - (r.top + r.height / 2))
-            if (horizontal) {
-              layoutHint = 'cols2'
-              insertAt = onRight ? 1 : 0
-              zone = onRight ? 'right' : 'left'
-              text = `松手：并到${onRight ? '右侧' : '左侧'}（重开一个 shell）`
-            } else {
-              layoutHint = 'rows2'
-              insertAt = below ? 1 : 0
-              zone = below ? 'bottom' : 'top'
-              text = `松手：并到${below ? '下方' : '上方'}（重开一个 shell）`
-            }
-          }
+        const r = (hit ? cellsRef.current.get(hit) : null)?.getBoundingClientRect()
+        if (r) {
+          // 横着还是竖着切：看光标偏离中心的那根轴，哪边偏得多就按哪边算
+          const horizontal =
+            Math.abs(e.clientX - (r.left + r.width / 2)) >
+            Math.abs(e.clientY - (r.top + r.height / 2))
+          const after = horizontal
+            ? e.clientX - r.left > r.width / 2
+            : e.clientY - r.top > r.height / 2
+          zone = horizontal ? (after ? 'right' : 'left') : after ? 'bottom' : 'top'
+          insertAt = (hitIndex >= 0 ? hitIndex : targetPanes.length) + (after ? 1 : 0)
+          if (solo) layoutHint = horizontal ? 'cols2' : 'rows2'
+          const sideText = horizontal
+            ? after
+              ? '右侧'
+              : '左侧'
+            : after
+              ? '下方'
+              : '上方'
+          text = `松手：插到这一格的${sideText}（重开一个 shell）`
         }
         pendingTabDrop = { targetTabId: tabId, sourceTabId: dragTabId, insertAt, layoutHint }
         setTabDrop({ state, paneId: hit, zone })
