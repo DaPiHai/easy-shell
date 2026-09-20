@@ -171,6 +171,20 @@ export function BatchPanel({ initialHostIds }: { initialHostIds?: string[] }) {
     return out
   }, [tabs, deadPanes, hosts, filter])
 
+  /**
+   * 关掉的格子要从勾选集合里退出去。
+   *
+   * 不退的话「已选 N 个终端格子」会一直算着那个已经不存在的格子 ——
+   * 数字对不上、发送时又静默跳过，看着像丢了一份命令。
+   */
+  useEffect(() => {
+    const alive = new Set(openPanes.map((p) => p.paneId))
+    setPickedPanes((prev) => {
+      const next = new Set([...prev].filter((id) => alive.has(id)))
+      return next.size === prev.size ? prev : next
+    })
+  }, [openPanes])
+
   const togglePane = (paneId: string) =>
     setPickedPanes((prev) => {
       const next = new Set(prev)
