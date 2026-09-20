@@ -14,6 +14,7 @@ import { TunnelDialog } from '@/features/tunnel/TunnelDialog'
 import { SnippetsDialog } from '@/features/snippets/SnippetsDialog'
 import { EditorView } from '@/features/editor/EditorView'
 import { BatchPanel } from '@/features/batch/BatchPanel'
+import { PaneBatchBar } from '@/features/batch/PaneBatchBar'
 import { UnlockScreen } from '@/features/session/UnlockScreen'
 import { EmptyState, StatusBar } from '@/components/EmptyState'
 import { useApp, DEFAULT_FONT_SIZE, layoutOf, panesOf } from '@/lib/store'
@@ -165,6 +166,7 @@ export default function App() {
   const tabs = useApp((s) => s.tabs)
   const activeTabId = useApp((s) => s.activeTabId)
   const error = useApp((s) => s.error)
+  const deadPanes = useApp((s) => s.deadPanes)
 
   if (phase === 'loading') {
     return (
@@ -198,35 +200,49 @@ export default function App() {
                   <SftpPanel sessionId={tab.sessionId} />
                 ) : (tab.kind === 'terminal' || tab.kind === 'local') &&
                   panesOf(tab).length > 0 ? (
-                  <PaneGrid
-                    tabId={tab.id}
-                    panes={panesOf(tab)}
-                    layout={layoutOf(tab)}
-                    // 每格各包一层 ErrorBoundary：一格炸了（xterm 渲染器那类问题）
-                    // 不该把同一个标签里其它几格一起带走
-                    renderPane={(pane) => (
-                      <ErrorBoundary label={`「${tab.title}」的这一格出错了`}>
-                        <TerminalView
-                          paneId={pane.id}
-                          kind={pane.kind}
-                          sessionId={pane.sessionId}
-                          // 本地 shell 退出就是退出，没有重连可言。
-                          // 只关这一格 —— 本地 Shell 跟远程并到一屏之后（拖标签进来），
-                          // 一句 exit 不该把旁边的远程终端一起带走；只剩它自己时才关标签
-                          onClosed={
-                            pane.kind === 'local'
-                              ? () => {
-                                  const s = useApp.getState()
-                                  const live = s.tabs.find((t) => t.id === tab.id)
-                                  if (panesOf(live).length > 1) s.closePane(tab.id, pane.id)
-                                  else s.closeTab(tab.id)
-                                }
-                              : undefined
-                          }
-                        />
-                      </ErrorBoundary>
+                  /**
+                   * 上面是分屏终端，下面是「本屏批量执行」条。
+                   *
+                   * 把命令发到这一屏的其中几格，属于"同时看着这几格"的同一件事 ——
+                   * 让人切到「批量执行」标签去做，等于把眼睛从目标上挪开。
+                   * 只有一格时不显示那条：那时它就是命令片段，白占一行竖向空间。
+                   */
+                  <div className="flex h-full min-h-0 flex-col">
+                    <div className="min-h-0 flex-1">
+                      <PaneGrid
+                        tabId={tab.id}
+                        panes={panesOf(tab)}
+                        layout={layoutOf(tab)}
+                        // 每格各包一层 ErrorBoundary：一格炸了（xterm 渲染器那类问题）
+                        // 不该把同一个标签里其它几格一起带走
+                        renderPane={(pane) => (
+                          <ErrorBoundary label={`「${tab.title}」的这一格出错了`}>
+                            <TerminalView
+                              paneId={pane.id}
+                              kind={pane.kind}
+                              sessionId={pane.sessionId}
+                              // 本地 shell 退出就是退出，没有重连可言。
+                              // 只关这一格 —— 本地 Shell 跟远程并到一屏之后（拖标签进来），
+                              // 一句 exit 不该把旁边的远程终端一起带走；只剩它自己时才关标签
+                              onClosed={
+                                pane.kind === 'local'
+                                  ? () => {
+                                      const s = useApp.getState()
+                                      const live = s.tabs.find((t) => t.id === tab.id)
+                                      if (panesOf(live).length > 1) s.closePane(tab.id, pane.id)
+                                      else s.closeTab(tab.id)
+                                    }
+                                  : undefined
+                              }
+                            />
+                          </ErrorBoundary>
+                        )}
+                      />
+                    </div>
+                    {panesOf(tab).length > 1 && (
+                      <PaneBatchBar panes={panesOf(tab)} deadPanes={deadPanes} />
                     )}
-                  />
+                  </div>
                 ) : (
                   <EmptyState />
                 )}
