@@ -347,8 +347,15 @@ export function BatchPanel({ initialHostIds }: { initialHostIds?: string[] }) {
    */
   const runAll = async (targets: HostRecord[], retry = false) => {
     if (running) return
-    const text = command.trim()
-    if (!text) {
+    /**
+     * 判空看**原值**，不 trim。
+     *
+     * `trim()` 会把用户敲的换行一起吃掉 —— 于是"只发一个空回车"这种命令
+     * 永远发不出去（输入框里看着有内容，一点执行就说"先写命令"）。
+     * 空回车在真实场景里是有用的：确认一个提示、把提示符推下来一行。
+     * 只有长度真的是 0 才算"没写"。
+     */
+    if (command.length === 0) {
       setError('先写要执行的命令')
       return
     }
@@ -417,13 +424,13 @@ export function BatchPanel({ initialHostIds }: { initialHostIds?: string[] }) {
 
     // 危险命令问一句。**不在这里问"确定要在 N 台机器上跑吗"** ——
     // 那句每次都弹，弹到第三次就没人看了
-    if (isDangerous(text)) {
+    if (isDangerous(command)) {
       setConfirmPrompt({
         kind: 'confirm',
         danger: true,
         title: '这条命令有破坏性',
         message: `将在 ${targets.length} 台主机上执行它，且没有撤销的机会。`,
-        detail: text,
+        detail: command,
         confirmLabel: `在 ${targets.length} 台主机上执行`,
         onConfirm: () => void go(),
       })
@@ -441,11 +448,15 @@ export function BatchPanel({ initialHostIds }: { initialHostIds?: string[] }) {
    * 2. 只勾了主机 —— 退回"每台一格"的老行为，省得为了发一条命令还得先去勾格子。
    */
   const sendToTerminals = () => {
-    const text = command.trim()
-    if (!text) {
+    // 同 runAll：只拦"真的什么都没写"。**输入的换行要原样留着** ——
+    // 敲一个空回车到终端是很常见的需求（推一行提示符、确认掉一个提示），
+    // trim 之后这类命令会被判成空而被拦住
+    if (command.length === 0) {
       setError('先写要执行的命令')
       return
     }
+    // 末尾有换行就照原样发，没有才补一个：发"空回车"时补一个会变成两个
+    const payload = command.endsWith('\n') ? command : `${command}\n`
     const s = useApp.getState()
     let sent = 0
 
@@ -453,7 +464,7 @@ export function BatchPanel({ initialHostIds }: { initialHostIds?: string[] }) {
       for (const paneId of pickedPanes) {
         const sink = s.terminalSinks[paneId]
         if (!sink) continue
-        sink(`${text}\n`)
+        sink(payload)
         sent += 1
       }
       if (sent === 0) {
@@ -472,7 +483,7 @@ export function BatchPanel({ initialHostIds }: { initialHostIds?: string[] }) {
       const sink = s.terminalSinks[pane.id]
       if (!sink) continue
       seen.add(host.id)
-      sink(`${text}\n`)
+      sink(payload)
       sent += 1
     }
     if (sent === 0) {

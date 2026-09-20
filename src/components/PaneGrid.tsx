@@ -31,6 +31,15 @@ interface Divider {
   band: number
 }
 
+/** 投放高亮覆盖层的形状：新格子会长在哪一块，就点亮哪一块 */
+const ZONE_CLASS: Record<DropZone, string> = {
+  full: 'inset-0',
+  left: 'inset-y-0 left-0 w-1/2',
+  right: 'inset-y-0 right-0 w-1/2',
+  top: 'inset-x-0 top-0 h-1/2',
+  bottom: 'inset-x-0 bottom-0 h-1/2',
+}
+
 /** 第 i 条边界在轴上的位置 = 前 i+1 带宽度之和 */
 function edgeAt(widths: number[], band: number): number {
   return widths.slice(0, band + 1).reduce((a, b) => a + b, 0)
@@ -92,6 +101,28 @@ function dividersOf(layout: PaneLayout, colW: number[], rowW: number[]): Divider
 
 /** 拖标签落到本窗口时的结果：能并 / 拖到了自己身上 / 满了 / 放不下 / 有一边不是终端 */
 type TabDropState = 'ok' | 'self' | 'full' | 'tight' | 'notTerminal'
+
+/** 新格子会落在哪一块。单格窗口落上半就是上半，不是"整个窗口" */
+type DropZone = 'full' | 'left' | 'right' | 'top' | 'bottom'
+
+/**
+ * 这一轮"拖标签来找地方拼"的落点。
+ *
+ * **写在模块级而不是组件的 ref 里** —— 这是踩过一次的地方：拖动时 TabBar 的
+ * mouseup 会先把 store 里的 `draggingTabId` 清成 null，React 随即重渲染并跑
+ * PaneGrid 的 effect，那个 effect 会把组件 ref 一并清掉；等 PaneGrid 自己的
+ * mouseup 处理函数轮到执行时，ref 已经是 null 了 —— 表现就是"浮签都对、松手
+ * 什么都没发生"。放在模块级就没人会顺手清它，谁写谁消费。
+ *
+ * 同一时刻只可能有一个目标窗口在写，所以单例够用；多写一个 `targetTabId`
+ * 是为了让别的 PaneGrid 收到同一个 mouseup 时知道"这不是我的落点"。
+ */
+let pendingTabDrop: {
+  targetTabId: string
+  sourceTabId: string
+  insertAt: number
+  layoutHint?: PaneLayout
+} | null = null
 
 /** 拒绝时的浮签文案（能并的时候文案跟着落点走，见 onMove） */
 const TAB_DROP_TEXT: Record<TabDropState, string> = {
@@ -223,24 +254,25 @@ export function PaneGrid({ tabId, panes, layout, renderPane }: Props) {
   const [swapTarget, setSwapTarget] = useState<string | null>(null)
 
   /**
-   * 标签栏拖着一个标签、且落点在本窗口上时，记住是哪个标签。
-   * 用 ref 而不是直接读 store：mouseup 时 TabBar 可能已经把手松开并清掉了
-   * `draggingTabId`（两个监听器都挂在 window 上，谁先跑不保证）。
+   * 落点格 + 结果（ok 时高亮那一格，其余只给浮签）。
+   * 高亮只是"给人看"的，真正的落点记在模块级的 `pendingTabDrop` 里 ——
+   * 这份 state 会被 effect 清掉（见那边注释），清掉不可惜。
+   * `zone` 决定高亮画整格还是半格：新格子会出现在哪半边，就点亮哪半边。
    */
-  const tabDragOverRef = useRef<string | null>(null)
-  /** 落点格：新标签并进来时插到这一格的位置。只有真放得下才有值 */
-  const tabDropPlanRef = useRef<{ insertAt: number; layoutHint?: PaneLayout } | null>(null)
-  /** 落点格 + 结果（ok 时高亮那一格，其余只给浮签） */
-  const [tabDrop, setTabDrop] = useState<{ state: TabDropState; paneId: string | null } | null>(null)
+  const [tabDrop, setTabDrop] = useState<{
+    state: TabDropState
+    paneId: string | null
+    zone: DropZone
+  } | null>(null)
   /** 跟着光标的浮签（SftpPanel 那套 ghost）：动作或拒绝原因 */
   const [ghost, setGhost] = useState<{ x: number; y: number; text: string } | null>(null)
 
-  // 拖拽取消（Esc）或标签被放下时不会再有 mousemove，高亮得跟着灭
+  // 拖拽取消（Esc）或标签被放下时不会再有 mousemove，高亮得跟着灭。
+  // **只清给人看的那些**：模块级的 pendingTabDrop 留给 mouseup 去消费 ——
+  // 在这儿清掉它就是那个"松手没反应"的老 bug
   const draggingTabId = useApp((s) => s.draggingTabId)
   useEffect(() => {
     if (!draggingTabId) {
-      tabDragOverRef.current = null
-      tabDropPlanRef.current = null
       setTabDrop((cur) => (cur ? null : cur))
       setGhost((cur) => (cur ? null : cur))
     }
@@ -269,12 +301,12 @@ export function PaneGrid({ tabId, panes, layout, renderPane }: Props) {
    * 而且那之后随便动一下鼠标都还在按旧状态算落点。
    */
   const cancelTabDrop = useCallback(() => {
-    tabDragOverRef.current = null
-    tabDropPlanRef.current = null
+    // 只作废**本窗口**的那份落点：别的 PaneGrid 可能正拿它做自己的判断
+    if (pendingTabDrop?.targetTabId === tabId) pendingTabDrop = null
     setTabDrop((cur) => (cur ? null : cur))
     setGhost((cur) => (cur ? null : cur))
     useApp.getState().setDraggingTabId(null)
-  }, [])
+  }, [tabId])
 
   useEffect(() => {
     /** 落点在本窗口里没？隐藏的标签（display:none）矩形是 0，一律不算 */
@@ -286,10 +318,17 @@ export function PaneGrid({ tabId, panes, layout, renderPane }: Props) {
     const onMove = (e: MouseEvent) => {
       /**
        * 先看是不是"标签栏里拖着某个标签来找地方拼"。
-       * 用 ref 记住落点，别在 mouseup 里问 store —— TabBar 的 mouseup 可能先跑，
-       * 它会把 draggingTabId 清掉（两个监听器都在 window 上，顺序不保证）。
+       *
+       * 落点写进模块级的 `pendingTabDrop`（而不是组件 ref）：TabBar 的 mouseup
+       * 会先清掉 store 里的 `draggingTabId`，React 随即重渲染并跑 effect ——
+       * 那一刻 ref 会被清空，等我们的 mouseup 轮到执行时就什么都没了。
        */
       const dragTabId = useApp.getState().draggingTabId
+      if (!dragTabId) {
+        // 没在拖标签：上一轮的落点若还留着（松在别处没人消费），现在就清掉，
+        // 免得下一次普通松手把它当成"并进来"
+        if (pendingTabDrop?.targetTabId === tabId) pendingTabDrop = null
+      }
       if (dragTabId) {
         const src = useApp.getState().tabs.find((t) => t.id === dragTabId)
         // 已经松手了（松在窗口外面时 mouseup 到不了这儿），或者源标签没了：这一轮作废
@@ -298,8 +337,7 @@ export function PaneGrid({ tabId, panes, layout, renderPane }: Props) {
           return
         }
         if (!insideMe(e.clientX, e.clientY)) {
-          tabDragOverRef.current = null
-          tabDropPlanRef.current = null
+          if (pendingTabDrop?.targetTabId === tabId) pendingTabDrop = null
           setTabDrop((cur) => (cur ? null : cur))
           setGhost((cur) => (cur ? null : cur))
           return
@@ -322,17 +360,23 @@ export function PaneGrid({ tabId, panes, layout, renderPane }: Props) {
                   : 'tight'
 
         if (state !== 'ok') {
-          tabDragOverRef.current = null
-          tabDropPlanRef.current = null
-          setTabDrop({ state, paneId: null })
+          if (pendingTabDrop?.targetTabId === tabId) pendingTabDrop = null
+          setTabDrop({ state, paneId: null, zone: 'full' })
           setGhost({ x: e.clientX, y: e.clientY, text: TAB_DROP_TEXT[state] })
           return
         }
 
-        // 落点格的下标 = 新格子插进去的位置。单格窗口特殊：落点半边决定横竖
+        /**
+         * 落点格的下标 = 新格子插进去的位置。
+         *
+         * 单格窗口（源和目标各一格）特殊：落点落在哪半边，就横着还是竖着切。
+         * 高亮也只点那半边 —— 新格子会出现在哪，就该让用户看见哪，
+         * 整窗罩一层的话"并到下方"和"并到这一格"长得一模一样。
+         */
         const hitIndex = targetPanes.findIndex((p) => p.id === hit)
         let insertAt = hitIndex >= 0 ? hitIndex : targetPanes.length
         let layoutHint: PaneLayout | undefined
+        let zone: DropZone = 'full'
         let text = '松手：并到这一格（那一格会重开一个 shell）'
         if (targetPanes.length === 1 && panesOf(src).length === 1) {
           const r = (hit ? cellsRef.current.get(hit) : null)?.getBoundingClientRect()
@@ -344,17 +388,18 @@ export function PaneGrid({ tabId, panes, layout, renderPane }: Props) {
             if (horizontal) {
               layoutHint = 'cols2'
               insertAt = onRight ? 1 : 0
+              zone = onRight ? 'right' : 'left'
               text = `松手：并到${onRight ? '右侧' : '左侧'}（重开一个 shell）`
             } else {
               layoutHint = 'rows2'
               insertAt = below ? 1 : 0
+              zone = below ? 'bottom' : 'top'
               text = `松手：并到${below ? '下方' : '上方'}（重开一个 shell）`
             }
           }
         }
-        tabDragOverRef.current = dragTabId
-        tabDropPlanRef.current = { insertAt, layoutHint }
-        setTabDrop({ state, paneId: hit })
+        pendingTabDrop = { targetTabId: tabId, sourceTabId: dragTabId, insertAt, layoutHint }
+        setTabDrop({ state, paneId: hit, zone })
         setGhost((cur) =>
           cur && cur.text === text ? cur : { x: e.clientX, y: e.clientY, text },
         )
@@ -380,16 +425,24 @@ export function PaneGrid({ tabId, panes, layout, renderPane }: Props) {
     }
 
     const onUp = (e: MouseEvent) => {
-      // 拖着标签松手：把这个标签并进本窗口（插到落点格的位置）
-      const draggedTabId = tabDragOverRef.current
-      const plan = tabDropPlanRef.current
-      if (draggedTabId) {
-        tabDragOverRef.current = null
-        tabDropPlanRef.current = null
-        setTabDrop(null)
-        setGhost(null)
-        if (plan && insideMe(e.clientX, e.clientY)) {
-          useApp.getState().mergeTabIntoPane(tabId, draggedTabId, plan.insertAt, plan.layoutHint)
+      /**
+       * 拖着标签松手：把这个标签并进本窗口（插到落点格的位置）。
+       *
+       * 认的是模块级的落点，**不是** store 里的 `draggingTabId` ——
+       * TabBar 的 mouseup 挂在同一个 window 上、可能先跑，它一清，
+       * 我们就无从知道这一拖本来要落到哪儿了（这正是"松手没反应"的根因）。
+       * 多个 PaneGrid 会同时收到这个 mouseup，所以先看落点是不是本窗口的。
+       */
+      const plan = pendingTabDrop?.targetTabId === tabId ? pendingTabDrop : null
+      if (plan) {
+        pendingTabDrop = null
+        setTabDrop((cur) => (cur ? null : cur))
+        setGhost((cur) => (cur ? null : cur))
+        useApp.getState().setDraggingTabId(null)
+        if (insideMe(e.clientX, e.clientY)) {
+          useApp
+            .getState()
+            .mergeTabIntoPane(tabId, plan.sourceTabId, plan.insertAt, plan.layoutHint)
         }
         return
       }
@@ -476,6 +529,8 @@ export function PaneGrid({ tabId, panes, layout, renderPane }: Props) {
               dragging={swapSource === pane.id}
               // 两类拖拽共用这一格高亮：拖标题换位（swapTarget）、拖标签并进来（tabDrop）
               dropActive={swapTarget === pane.id || tabDrop?.paneId === pane.id}
+              // 换位是整格，并进来则按落点点亮半个 —— 新格子长在哪儿就亮哪儿
+              dropZone={tabDrop?.paneId === pane.id ? tabDrop.zone : 'full'}
               closable={count > 1}
               registerCell={(el) => {
                 if (el) cellsRef.current.set(pane.id, el)
@@ -551,6 +606,8 @@ interface FrameProps {
   dragging: boolean
   /** 别格被拖到这一格上（松手就换位） */
   dropActive: boolean
+  /** 高亮画哪一块：整格 / 上下左右半边（拖标签并进来时就说新格子会长在哪儿） */
+  dropZone: DropZone
   closable: boolean
   registerCell: (el: HTMLDivElement | null) => void
   onTitleMouseDown: (e: React.MouseEvent) => void
@@ -570,6 +627,7 @@ function PaneFrame({
   focused,
   dragging,
   dropActive,
+  dropZone,
   closable,
   registerCell,
   onTitleMouseDown,
@@ -670,7 +728,9 @@ function PaneFrame({
       )}
       {dropActive && (
         <div
-          className="pointer-events-none absolute inset-0 border-2 border-dashed border-accent bg-accent/10"
+          // 半格高亮的形状：整格用 inset-0，半边各自钉住两条边 —— 别写成 w-1/2 配默认
+          // 的 left:auto（绝对定位的 left 取的是内容盒起点，会偏出 padding）
+          className={`pointer-events-none absolute border-2 border-dashed border-accent bg-accent/10 ${ZONE_CLASS[dropZone]}`}
           aria-hidden
         />
       )}

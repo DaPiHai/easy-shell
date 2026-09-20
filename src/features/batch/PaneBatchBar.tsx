@@ -154,8 +154,14 @@ export function PaneBatchBar({ panes, deadPanes }: { panes: Pane[]; deadPanes: R
 
   const run = (targets: Pane[]) => {
     if (running) return
-    const text = command.trim()
-    if (!text) {
+    /**
+     * 判空看**原值**，不 trim。
+     *
+     * trim 会连用户敲的换行一起吃掉 —— "只发一个空回车"就永远发不出去
+     * （输入框里明明有内容，一点执行却说"先写命令"）。空回车是有用的：
+     * 推一行提示符、确认掉一个交互提示。只有长度真是 0 才算没写。
+     */
+    if (command.length === 0) {
       setError('先写要执行的命令')
       return
     }
@@ -174,19 +180,19 @@ export function PaneBatchBar({ panes, deadPanes }: { panes: Pane[]; deadPanes: R
       await Promise.all(
         targets.map(async (p) => {
           if (stopped.current) return
-          await runOne(p, text)
+          await runOne(p, command)
         }),
       )
       setRunning(false)
     }
 
-    if (DANGEROUS.some((re) => re.test(text))) {
+    if (DANGEROUS.some((re) => re.test(command))) {
       setConfirmPrompt({
         kind: 'confirm',
         danger: true,
         title: '这条命令有破坏性',
         message: `将在这一屏的 ${targets.length} 个终端上执行它，且没有撤销的机会。`,
-        detail: text,
+        detail: command,
         confirmLabel: `在 ${targets.length} 个终端上执行`,
         onConfirm: () => void go(),
       })
@@ -197,17 +203,18 @@ export function PaneBatchBar({ panes, deadPanes }: { panes: Pane[]; deadPanes: R
 
   /** 只发送：把命令敲进这几格（要的是现场，拿不到退出码） */
   const send = (targets: Pane[]) => {
-    const text = command.trim()
-    if (!text) {
+    if (command.length === 0) {
       setError('先写要执行的命令')
       return
     }
+    // 末尾已有换行就原样发：发"空回车"时再补一个会变成两个空行
+    const payload = command.endsWith('\n') ? command : `${command}\n`
     const s = useApp.getState()
     let sent = 0
     for (const p of targets) {
       const sink = s.terminalSinks[p.id]
       if (!sink) continue
-      sink(`${text}\n`)
+      sink(payload)
       sent += 1
     }
     if (sent === 0) setError('没有可投递的终端')
