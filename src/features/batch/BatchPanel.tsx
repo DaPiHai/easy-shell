@@ -114,6 +114,14 @@ export function BatchPanel({ initialHostIds }: { initialHostIds?: string[] }) {
   const [running, setRunning] = useState(false)
   const [filter, setFilter] = useState('')
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
+  /**
+   * 勾中的**终端格子**（paneId），跟上面那组主机 id 是两码事。
+   *
+   * 分屏窗口的批量执行走这一组：「发到已开终端」按格子投递、**不去重**，
+   * 所以同一台主机上开着的两格（分屏很常见）会各收到一份，
+   * 而按主机投递永远只能投一格 —— 那正是分屏下少了半边的原因。
+   */
+  const [pickedPanes, setPickedPanes] = useState<Set<string>>(new Set())
 
   /** 「停止」只挡住还没开始的那几台，已经在跑的命令让它跑完 —— 半路掐掉更糟 */
   const stopped = useRef(false)
@@ -138,6 +146,50 @@ export function BatchPanel({ initialHostIds }: { initialHostIds?: string[] }) {
         h.username.toLowerCase().includes(kw),
     )
   }, [hosts, filter])
+
+  /**
+   * 现在开着的终端格子（一行一格，含分屏）。
+   *
+   * 这是「分屏窗口批量执行」的目标来源：一个标签里有几格就列几行，
+   * 勾上谁就把命令敲进谁 —— 想同时给分屏里的两格发同一批命令，勾两行即可。
+   */
+  const openPanes = useMemo(() => {
+    const kw = filter.trim().toLowerCase()
+    const out: Array<{ paneId: string; tabId: string; tabTitle: string; title: string; where: string }> = []
+    for (const tab of tabs) {
+      const panes = panesOf(tab)
+      panes.forEach((p, i) => {
+        if (!p.sessionId || deadPanes[p.id]) return
+        const host = hosts.find((h) => h.id === p.hostId)
+        const where = host ? `${host.username}@${host.address}:${host.port}` : '本地 Shell'
+        // 分屏才写第几格：单格标签重复一遍"第 1 格"只是噪音
+        const title = panes.length > 1 ? `${p.title} · 第 ${i + 1} 格` : p.title
+        if (kw && !`${title} ${where}`.toLowerCase().includes(kw)) return
+        out.push({ paneId: p.id, tabId: tab.id, tabTitle: tab.title, title, where })
+      })
+    }
+    return out
+  }, [tabs, deadPanes, hosts, filter])
+
+  const togglePane = (paneId: string) =>
+    setPickedPanes((prev) => {
+      const next = new Set(prev)
+      if (next.has(paneId)) next.delete(paneId)
+      else next.add(paneId)
+      return next
+    })
+
+  /** 一键勾上当前标签的所有格子 —— 分屏下"这一屏全发"的最短路径 */
+  const pickActiveTabPanes = () => {
+    const s = useApp.getState()
+    const tab = s.tabs.find((t) => t.id === s.activeTabId)
+    const panes = panesOf(tab).filter((p) => p.sessionId && !s.deadPanes[p.id])
+    if (panes.length === 0) {
+      setError('当前标签没有开着的终端 —— 先切到一个终端标签')
+      return
+    }
+    setPickedPanes(new Set(panes.map((p) => p.id)))
+  }
 
   const rowOf = (hostId: string) => rows.find((r) => r.hostId === hostId)
 
@@ -287,7 +339,14 @@ export function BatchPanel({ initialHostIds }: { initialHostIds?: string[] }) {
       return
     }
     if (targets.length === 0) {
-      setError(retry ? '没有失败的项需要重跑' : '先在左边勾上要执行的主机')
+      if (retry) {
+        setError('没有失败的项需要重跑')
+      } else if (pickedPanes.size > 0) {
+        // 只勾了终端格子：那是「发到已开终端」的目标，别让人以为按键坏了
+        setError('「执行」按主机跑（要结果）—— 只给分屏里那几格发命令请用「发到已开终端」')
+      } else {
+        setError('先在左边勾上要执行的主机')
+      }
       return
     }
 
@@ -359,7 +418,14 @@ export function BatchPanel({ initialHostIds }: { initialHostIds?: string[] }) {
     await go()
   }
 
-  /** 把命令敲进已经开着的终端（每台主机只投一格，别一份命令发两遍） */
+  /**
+   * 把命令敲进已经开着的终端。
+   *
+   * 两类目标，优先级分明：
+   * 1. **勾了终端格子**（上面那段）—— 按格子逐个投，**不去重**。这就是分屏窗口的
+   *    批量执行：同一台主机开两格也各收一份（按主机投递永远只能投一格，分屏下正是少了半边）；
+   * 2. 只勾了主机 —— 退回"每台一格"的老行为，省得为了发一条命令还得先去勾格子。
+   */
   const sendToTerminals = () => {
     const text = command.trim()
     if (!text) {
@@ -367,8 +433,24 @@ export function BatchPanel({ initialHostIds }: { initialHostIds?: string[] }) {
       return
     }
     const s = useApp.getState()
-    const seen = new Set<string>()
     let sent = 0
+
+    if (pickedPanes.size > 0) {
+      for (const paneId of pickedPanes) {
+        const sink = s.terminalSinks[paneId]
+        if (!sink) continue
+        sink(`${text}\n`)
+        sent += 1
+      }
+      if (sent === 0) {
+        setError('勾中的终端格子都没了 —— 重新勾一次')
+        return
+      }
+      setError(`已发到 ${sent} 个终端格子`)
+      return
+    }
+
+    const seen = new Set<string>()
     for (const host of chosen) {
       if (seen.has(host.id)) continue
       const pane = livePaneOf(host.id)
@@ -380,7 +462,7 @@ export function BatchPanel({ initialHostIds }: { initialHostIds?: string[] }) {
       sent += 1
     }
     if (sent === 0) {
-      setError('勾选的主机都没有开着的终端 —— 用「执行」会自己建连')
+      setError('没有可投递的终端 —— 上面勾终端格子，或用「执行」自己建连')
       return
     }
     setError(`已发到 ${sent} 个终端`)
@@ -470,7 +552,10 @@ export function BatchPanel({ initialHostIds }: { initialHostIds?: string[] }) {
         <div className="mb-2 flex items-center gap-2">
           <span className="text-[12px] font-medium text-ink">批量执行</span>
           <span className="text-[11px] text-ink-tertiary">
-            已选 {chosen.length} 台 · 连接着的会复用，没连的跑完即断
+            已选 {chosen.length} 台主机
+            {pickedPanes.size > 0 ? ` / ${pickedPanes.size} 个终端格子` : ''}
+            {' · '}
+            连接着的会复用，没连的跑完即断
           </span>
           <div className="ml-auto flex items-center gap-1">
             <button
@@ -537,7 +622,11 @@ export function BatchPanel({ initialHostIds }: { initialHostIds?: string[] }) {
             <button
               onClick={sendToTerminals}
               className={btnClass}
-              title="把命令敲进这些主机已经开着的终端（拿不到结果，要的是现场）"
+              title={
+                pickedPanes.size > 0
+                  ? `把命令敲进勾中的 ${pickedPanes.size} 个终端格子（分屏各格各一份）`
+                  : '把命令敲进勾选主机已经开着的终端（每台一格）'
+              }
             >
               <Send size={12} />
               发到已开终端
@@ -572,18 +661,60 @@ export function BatchPanel({ initialHostIds }: { initialHostIds?: string[] }) {
       </div>
 
       <div className="flex min-h-0 flex-1">
-        {/* 左：选主机 */}
+        {/* 左：选目标 —— 上半是开着的终端格子（分屏那一屏就在这儿勾），下半是主机库 */}
         <div className="flex w-64 shrink-0 flex-col border-r border-hairline bg-surface-1">
           <div className="flex items-center gap-1 px-2 py-2">
             <input
               value={filter}
               onChange={(e) => setFilter(e.target.value)}
-              placeholder="过滤主机"
+              placeholder="过滤主机 / 终端"
               className={inputClass}
             />
           </div>
+
+          {/* 开着的终端：分屏窗口的批量执行在这里勾格子 */}
           <div className="flex items-center gap-2 px-2 pb-1 text-[11px] text-ink-tertiary">
-            <button onClick={() => setSelected(new Set(visible.map((h) => h.id)))} className="hover:text-ink">
+            <span className="font-medium text-ink-subtle">开着的终端</span>
+            <span className="text-ink-tertiary">{openPanes.length}</span>
+            <button
+              onClick={pickActiveTabPanes}
+              className="ml-auto hover:text-ink"
+              title="勾上当前标签的所有格子（分屏一屏全发）"
+            >
+              本屏格子
+            </button>
+            <button onClick={() => setPickedPanes(new Set())} className="hover:text-ink">
+              清空
+            </button>
+          </div>
+          <div className="max-h-40 shrink-0 overflow-y-auto border-b border-hairline px-2 pb-2">
+            {openPanes.length === 0 ? (
+              <p className="px-1 py-2 text-[11px] leading-relaxed text-ink-tertiary">
+                现在没有开着的终端
+              </p>
+            ) : (
+              openPanes.map((t) => (
+                <label
+                  key={t.paneId}
+                  className="flex h-7 cursor-pointer items-center gap-2 rounded px-1 text-ink-muted transition-colors hover:bg-surface-2"
+                  title={`${t.tabTitle} · ${t.where} —— 勾上就把命令敲进这一格`}
+                >
+                  <input
+                    type="checkbox"
+                    checked={pickedPanes.has(t.paneId)}
+                    onChange={() => togglePane(t.paneId)}
+                    className="h-3 w-3 shrink-0 accent-accent"
+                  />
+                  <span className="truncate text-[13px]">{t.title}</span>
+                  <span className="ml-auto truncate text-[11px] text-ink-tertiary">{t.where}</span>
+                </label>
+              ))
+            )}
+          </div>
+
+          <div className="flex items-center gap-2 px-2 pb-1 pt-2 text-[11px] text-ink-tertiary">
+            <span className="font-medium text-ink-subtle">主机</span>
+            <button onClick={() => setSelected(new Set(visible.map((h) => h.id)))} className="ml-auto hover:text-ink">
               全选
             </button>
             <button onClick={() => setSelected(new Set())} className="hover:text-ink">

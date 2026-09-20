@@ -41,7 +41,15 @@ export function LayoutMenu({ x, y, current, onPick, onClose }: Props) {
     })
   }, [x, y])
 
-  useDismiss(onClose)
+  /**
+   * **必须把 ref 传进去。**
+   *
+   * useDismiss 的关闭监听挂在 `mousedown`（capture）上 —— 不传 ref 时任何一次
+   * 按下去都会先关菜单，等 mouseup 到来时按钮已经不在 DOM 里了，`onClick` 根本
+   * 不会派发。表现就是「点布局菜单里任何一项都没反应」，而菜单自己好好地关掉了。
+   * 传 ref 之后「点在菜单里」就被放过，click 才轮得到（右键菜单一直是这么用的）。
+   */
+  useDismiss(onClose, ref)
 
   const groups: Array<[number, PaneLayout[]]> = [1, 2, 3, 4].map((count) => [
     count,
