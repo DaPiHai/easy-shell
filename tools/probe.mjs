@@ -16,6 +16,9 @@
  *   node tools/probe.mjs tags           # 只跑「标签筛选 / 关键词过滤 / 编辑主机（含改分组）」
  *   node tools/probe.mjs menu           # 只跑「各处右键菜单 + 原生菜单拦截」
  *   node tools/probe.mjs connect        # 只跑「新建会话表单的状态清理」
+ *   node tools/probe.mjs paste          # 只跑「粘贴次数」
+ *   node tools/probe.mjs sidebar        # 只跑「收起会话侧栏」
+ *   node tools/probe.mjs dropzone       # 只跑「多分屏拖拽落点」
  *   node tools/probe.mjs rename         # 只跑「双击标签改名」
  *
  * 环境变量：EDGE_PATH / PROBE_PORT / PROBE_URL 可覆盖默认值。
@@ -432,6 +435,52 @@ window.__probe = {
         h: Math.round(r.height),
       }
     })
+  },
+  /**
+   * 开始数"粘贴这件事发生了几次"。
+   *
+   * 两条独立的插入路径要分开数：
+   *  - readText 调用次数 = 我们自己的 Ctrl+Shift+V 处理（读剪贴板 → term.paste）
+   *  - paste 事件次数 = 浏览器原生粘贴（Chromium 把 Ctrl+Shift+V 当"粘贴为纯文本"），
+   *    事件落到 xterm 藏的 textarea 上，xterm 自己也会贴一次
+   * 内容到底发出去几遍看 window.__shellLog（mock 记的）。
+   */
+  watchPaste() {
+    window.__readText = 0
+    window.__pasteEvents = 0
+    if (!window.__pasteWatched) {
+      window.__pasteWatched = true
+      const orig = navigator.clipboard.readText.bind(navigator.clipboard)
+      navigator.clipboard.readText = function () {
+        window.__readText += 1
+        return orig()
+      }
+      document.addEventListener(
+        'paste',
+        () => {
+          window.__pasteEvents += 1
+        },
+        true,
+      )
+    }
+    return 'watching'
+  },
+  pasteStats() {
+    return { readText: window.__readText, pasteEvents: window.__pasteEvents }
+  },
+  /** mock 记下的终端输入原文（预览里唯一能"看见发出去什么"的地方） */
+  shellLog() {
+    return window.__shellLog
+  },
+  clearShellLog() {
+    window.__shellLog.length = 0
+    return 'cleared'
+  },
+  /** 现在焦点在谁身上（键盘事件发给谁） */
+  activeEl() {
+    const el = document.activeElement
+    if (!el) return null
+    return el.tagName + (el.className ? '.' + String(el.className).split(' ')[0] : '')
   },
 }
 'injected'
@@ -1261,22 +1310,171 @@ async function scenarioDropZone(cdp) {
   console.log('\n多分屏落点探针：全部通过')
 }
 
+/** 真按键（带修饰键）。modifiers 是位掩码：1=Alt 2=Ctrl 4=Meta 8=Shift */
+async function pressKey(cdp, { key, code, modifiers = 0, vk }) {
+  const base = { key, code, modifiers, windowsVirtualKeyCode: vk, nativeVirtualKeyCode: vk }
+  await cdp.send('Input.dispatchKeyEvent', { type: 'rawKeyDown', ...base })
+  await cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', ...base })
+}
+
+/**
+ * 模拟一次 **Ctrl+Shift+V**。
+ *
+ * 不能只发按键事件：CDP 的 `Input.dispatchKeyEvent` 不走浏览器那套编辑器命令，
+ * 光发 Ctrl+Shift+V 只会让 xterm 把 `^V` 发给远端（实测，日志里是 "\u0016"），
+ * 一点粘贴都不会发生 —— 那样就复现不出这个 bug。
+ * `commands: ['pasteAndMatchStyle']` 才是 Chromium 给这个快捷键准备的默认动作
+ * （粘贴为纯文本），也就是真机按下时会被执行的那一条。诊断过：只有它能让
+ * 页面里真的冒出 `paste` 事件。
+ */
+async function pressPasteShortcut(cdp) {
+  const base = {
+    key: 'V',
+    code: 'KeyV',
+    modifiers: 2 | 8,
+    windowsVirtualKeyCode: 86,
+    nativeVirtualKeyCode: 86,
+  }
+  await cdp.send('Input.dispatchKeyEvent', {
+    type: 'rawKeyDown',
+    ...base,
+    commands: ['pasteAndMatchStyle'],
+  })
+  await cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', ...base })
+}
+
+/**
+ * 场景：终端里粘贴一次会粘两遍
+ *
+ * 用户报的现象。机制：Chromium 把 **Ctrl+Shift+V** 当成"粘贴为纯文本"的原生快捷键，
+ * 而 xterm 的键盘监听是用 `addEventListener` 挂的、自定义处理器的返回值被包装函数丢掉 ——
+ * 返回 `false` 只是"这次按键 xterm 不处理"，**不会拦原生默认动作**。于是按一次：
+ *   ① 我们的处理 → readText → term.paste（一次）
+ *   ② 浏览器默认动作 → 在 xterm 藏的 textarea 上触发 paste 事件 → xterm 自己也贴一次
+ * 两条路径各贴一遍 = 粘两遍。Ctrl+V 我们没接管，只有原生那条路，所以它是好的
+ * （这也是"只有 Ctrl+Shift+V 会双粘"的原因）。
+ */
+async function scenarioPaste(cdp) {
+  await cdp.send('Page.navigate', { url: PAGE })
+  await sleep(1200)
+  await cdp.eval(HELPERS)
+  await waitFor(cdp, '__probe.hosts().length > 0', '会话树里的主机行')
+
+  // 开一个终端标签，等通道起来（mock 里 ssh_open_shell 60ms + banner 200ms）
+  const host = (await cdp.eval('__probe.hosts()'))[0]
+  await cdp.mouse('mousePressed', host.x, host.y)
+  await cdp.mouse('mouseReleased', host.x, host.y)
+  await waitFor(cdp, '__probe.tabs().length > 0', '一个终端标签')
+  await sleep(1200)
+
+  // 点一下终端，让 xterm 的 textarea 拿到焦点
+  await clickSel(cdp, '.xterm')
+  await sleep(300)
+
+  /* ---------- 0. 自检：普通按键真的会走到"后端" ---------- */
+  await cdp.eval('__probe.clearShellLog()')
+  await pressKey(cdp, { key: 'a', code: 'KeyA', vk: 65 })
+  await sleep(500)
+  const typed = await cdp.eval('__probe.shellLog()')
+  console.log('敲一个 a 之后的输入:', JSON.stringify(typed))
+  if (!typed.join('').includes('a')) {
+    throw new Error('普通按键没走到后端 —— 后面关于粘贴次数的结论都不可信')
+  }
+
+  /* ---------- 1. 往真剪贴板放一个标记串 ---------- */
+  const wrote = await cdp.eval(`(async () => {
+    try {
+      await navigator.clipboard.writeText('PASTE-ME')
+      return 'ok'
+    } catch (e) {
+      return String(e)
+    }
+  })()`)
+  console.log('写剪贴板:', wrote)
+  if (wrote !== 'ok') throw new Error('剪贴板写不进去，没法验原生粘贴那条路：' + wrote)
+
+  /** 数一次操作到底把内容发出去几遍 */
+  const countPaste = async (label) => {
+    const log = (await cdp.eval('__probe.shellLog()')).join('')
+    const stats = await cdp.eval('__probe.pasteStats()')
+    const hits = log.split('PASTE-ME').length - 1
+    console.log(`${label}: 发出去 ${hits} 遍 · readText ${stats.readText} 次 · 原生 paste 事件 ${stats.pasteEvents} 次`)
+    return { hits, stats, log }
+  }
+
+  /* ---------- 2. 右键菜单的「粘贴」：只有我们这一条路径 ---------- */
+  await cdp.eval('__probe.watchPaste()')
+  await cdp.eval('__probe.clearShellLog()')
+  const term = await boxOf(cdp, '.xterm')
+  await cdp.rightClick(term.x, term.y)
+  await sleep(300)
+  console.log('打开菜单时焦点:', await cdp.eval('__probe.activeEl()'))
+  await clickMenuItem(cdp, 'term-paste')
+  await sleep(700)
+  const viaMenu = await countPaste('右键菜单「粘贴」')
+  if (viaMenu.hits !== 1) {
+    throw new Error(`右键菜单的粘贴应该只粘一次，实际 ${viaMenu.hits} 次`)
+  }
+  const focusAfterMenu = await cdp.eval('__probe.activeEl()')
+  console.log('用完菜单后焦点:', focusAfterMenu)
+  if (!String(focusAfterMenu).includes('xterm')) {
+    throw new Error(`用完菜单后焦点没回到终端（现在是 ${focusAfterMenu}）—— 接着敲键盘一个字都进不去`)
+  }
+
+  /* ---------- 3. 被报的那条：Ctrl+Shift+V ---------- */
+  await cdp.eval('__probe.watchPaste()')
+  await cdp.eval('__probe.clearShellLog()')
+  await pressPasteShortcut(cdp)
+  await sleep(700)
+  const viaKey = await countPaste('Ctrl+Shift+V')
+  if (viaKey.hits !== 1) {
+    throw new Error(`Ctrl+Shift+V 应该只粘一次，实际 ${viaKey.hits} 次`)
+  }
+  // 两条路径叠加时，hits（发出去几遍）已经拦在上面了；这两条是为了把"病根"说清楚
+  if (viaKey.stats.readText !== 1) {
+    throw new Error(`我们自己应该读一次剪贴板，实际 ${viaKey.stats.readText} 次`)
+  }
+  if (viaKey.stats.pasteEvents !== 0) {
+    throw new Error(
+      `原生粘贴路径没被拦住（paste 事件 ${viaKey.stats.pasteEvents} 次）—— 会和我们的处理各贴一遍`,
+    )
+  }
+
+  console.log('\n粘贴探针：全部通过')
+}
+
 const want = process.argv[2] ?? 'all'
 const { cdp, proc } = await launch()
+
+/**
+ * 放行剪贴板读写。
+ *
+ * 页面对 `navigator.clipboard.readText()` 需要 `clipboard-read` 权限，浏览器会弹框问 ——
+ * 无头下等于直接拒，于是"我们的粘贴路径"一点内容都读不到，测出来的是假象。
+ * 写（writeText）默认就放行，读必须显式授权。
+ */
 try {
+  await cdp.send('Browser.grantPermissions', {
+    origin: new URL(PAGE).origin,
+    permissions: ['clipboardReadWrite', 'clipboardSanitizedWrite'],
+  })
+  console.log('已放行剪贴板读写权限')
+} catch (e) {
+  console.log('放行剪贴板权限失败（后面的粘贴计数可能不可信）:', e.message)
+}
+
+try {
+  // newline 依赖 drag（底部那条把手只有多格标签才有），所以它顺手先把 drag 跑一遍。
+  // 其余每个场景开头都自己 navigate，所以 all 里顺序无所谓
   if (want === 'all' || want === 'drag' || want === 'newline') await scenarioDragTab(cdp)
   if (want === 'all' || want === 'newline') await scenarioNewlineOnly(cdp)
   if (want === 'all' || want === 'tags') await scenarioTags(cdp)
   if (want === 'rename') await scenarioTabRename(cdp)
   if (want === 'all' || want === 'menu') await scenarioContextMenu(cdp)
   if (want === 'all' || want === 'connect') await scenarioConnectForm(cdp)
-  if (want === 'sidebar') await scenarioSidebar(cdp)
-  if (want === 'dropzone') await scenarioDropZone(cdp)
-  // 这两个也进 all：它们各自先 navigate，不会互相污染；侧栏那条结尾会把 localStorage 复位
-  if (want === 'all') {
-    await scenarioSidebar(cdp)
-    await scenarioDropZone(cdp)
-  }
+  if (want === 'all' || want === 'paste') await scenarioPaste(cdp)
+  if (want === 'all' || want === 'sidebar') await scenarioSidebar(cdp)
+  if (want === 'all' || want === 'dropzone') await scenarioDropZone(cdp)
 } catch (e) {
   console.error('探针失败:', e)
   console.log('--- 页面控制台 ---')

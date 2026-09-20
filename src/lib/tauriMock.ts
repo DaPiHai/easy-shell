@@ -210,6 +210,16 @@ function feedShell(channel: Channel<{ type: string; data?: string; message?: str
   setTimeout(() => channel.emit({ type: 'data', data: encodeUtf8Base64(BANNER) }), 200)
 }
 
+/**
+ * 预览里收到的终端输入原文（`ssh_input` / `local_input`）。
+ *
+ * 真后端不会把这种东西留在前端，但预览里**没有真 pty 回显** —— 要回答
+ * "按一次粘贴到底把内容发出去几遍"就只能看这里。探针（tools/probe.mjs 的 paste 场景）
+ * 读 `window.__shellLog`。只存在于 `--mode web`，不进产物。
+ */
+const shellLog: string[] = []
+;(window as unknown as { __shellLog?: string[] }).__shellLog = shellLog
+
 // ---- 假的 invoke -----------------------------------------------------------
 
 const DELAY = 60
@@ -318,6 +328,12 @@ export async function invoke<T>(cmd: string, args: Record<string, unknown> = {})
       return later(1 as T)
     }
     case 'ssh_input':
+    case 'local_input': {
+      // 记一笔给探针数（见 shellLog），预览里没有真回显
+      const data = args.data
+      if (typeof data === 'string') shellLog.push(data)
+      return later(undefined as T)
+    }
     case 'ssh_resize':
     case 'ssh_close':
     case 'ssh_close_channel':
@@ -353,7 +369,11 @@ export async function invoke<T>(cmd: string, args: Record<string, unknown> = {})
       feedShell(ch)
       return later(1 as T)
     }
-    case 'local_input':
+    case 'local_input': {
+      const data = args.data
+      if (typeof data === 'string') shellLog.push(data)
+      return later(undefined as T)
+    }
     case 'local_resize':
     case 'local_close':
       return later(undefined as T)

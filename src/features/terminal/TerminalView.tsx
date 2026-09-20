@@ -195,12 +195,24 @@ export function TerminalView({ paneId, kind, sessionId, onClosed }: Props) {
     term.attachCustomKeyEventHandler((e) => {
       if (e.type !== 'keydown') return true
       const key = e.key.toLowerCase()
+      /**
+       * 这两条都必须自己 `preventDefault`。
+       *
+       * xterm 的键盘监听是用 `addEventListener` 挂的，包装函数把 `_keyDown` 的返回值
+       * **丢掉了** —— 所以返回 false 只等于"这次按键 xterm 不处理"，
+       * **拦不住浏览器的原生默认动作**。而 Chromium 把 Ctrl+Shift+V 当成
+       * "粘贴为纯文本"的原生快捷键：不管它，浏览器就会在 xterm 藏的 textarea 上
+       * 触发 paste 事件，xterm 自己也贴一次 —— 于是**按一次粘两遍**
+       * （探针实测：readText 1 次 + 原生 paste 事件 1 次，内容发出去 2 遍）。
+       */
       if (e.ctrlKey && e.shiftKey && key === 'c') {
+        e.preventDefault()
         const selected = term.getSelection()
         if (selected) void copyText(selected)
         return false
       }
       if (e.ctrlKey && e.shiftKey && key === 'v') {
+        e.preventDefault()
         pasteFromClipboard(() => (disposed ? null : term))
         return false
       }

@@ -136,6 +136,36 @@ export function ContextMenu({ x, y, items, onClose }: Props) {
     })
   }, [openSub, items])
 
+  /**
+   * 打开菜单前焦点在谁身上，关掉时还给谁。
+   *
+   * 菜单项是 button，点一下焦点就落到它身上；菜单一卸载，焦点掉回 `body` ——
+   * 终端那边就是「右键用一次菜单，接着敲键盘一个字都进不去」（实测：
+   * 用完菜单后 `document.activeElement` 从 xterm 的隐藏 textarea 变成了 BODY）。
+   *
+   * 用 `useLayoutEffect` 是为了抢在下面那条"把焦点给第一项"的前面 —— 晚了抓到的
+   * 就是菜单自己了。清理时只在**焦点真的丢了**（掉到 body、或停在一个已经被卸载的
+   * 元素上）才还回去：点菜单外面关掉菜单时，如果用户点的是别的可聚焦元素，
+   * 焦点已经在它那儿了，这时候抢回来就成了"焦点乱跳"。
+   */
+  useLayoutEffect(() => {
+    const previous = document.activeElement
+    const root = ref.current
+    return () => {
+      const now = document.activeElement
+      // 清理跑在 DOM 移除**之前**，所以"焦点还停在菜单按钮上"也是丢失的一种 ——
+      // 只判 body / 已卸载会漏掉这种（实测漏过）
+      const insideMenu = !!root && !!now && root.contains(now)
+      const lost =
+        !now ||
+        now === document.body ||
+        insideMenu ||
+        (now instanceof HTMLElement && !now.isConnected)
+      if (!lost) return
+      if (previous instanceof HTMLElement && previous.isConnected) previous.focus()
+    }
+  }, [])
+
   /** 打开就把焦点给第一项，键盘用户不用先 Tab 一圈 */
   useEffect(() => {
     focusable(itemRefs.current)[0]?.focus()
