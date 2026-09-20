@@ -483,6 +483,18 @@ impl Vault {
             let plaintext = decrypt_secret(&key, &secret)?;
             let auth: AuthRecord =
                 serde_json::from_slice(&plaintext).map_err(|e| format!("凭据解析失败: {e}"))?;
+            // 老库里的历史痕迹：以前「新建会话」直接把主机地址写进了 `name`，
+            // 于是那批记录的「名称」等于 IP —— 界面上的观感就是「名称」和「主机」
+            // 填了一样的值，多出来一栏没用的东西。
+            //
+            // 所以 `name == address` 一律**读作"没起名"**（空串）。显示上毫无区别
+            // （会话树的回退本来就是地址），但编辑框会空着、标签页标题会用 `用户名@地址`。
+            //
+            // 不做一次性 `UPDATE ... SET name = ''` 是刻意的：这样不动用户数据，
+            // 等他下次保存那条记录时自然会写回空串；也就不用为"这条迁移跑过没有"
+            // 再在 meta 里记一个标志位。代价是有人**故意**把名字起成地址时也会被读成没起名 ——
+            // 那种情况显示出来本来就一模一样，不值得为它把迁移写复杂。
+            let name = if name == address { String::new() } else { name };
             hosts.push(HostRecord {
                 id,
                 name,
@@ -1480,6 +1492,38 @@ mod tests {
 
         let back = vault.list_hosts().unwrap();
         assert!(back[0].tags.is_empty());
+
+        drop(vault);
+        let _ = fs::remove_file(&path);
+    }
+
+    /**
+     * 老数据里 `name` 等于地址的那批，读出来要当成「没起名」。
+     *
+     * 那是早期版本的遗留：新建会话时把主机地址直接写进了 name，于是编辑框里
+     * 「名称」和「主机」显示同一个 IP，看着像多了一栏没用的东西。
+     * 现在读作空串 —— 会话树的显示不变（回退本来就是地址），但编辑框会空着。
+     */
+    #[test]
+    fn 名称等于地址的老记录读出来当作没起名() {
+        let (vault, path) = temp_vault();
+        vault.set_password("pw").unwrap();
+
+        // 老版本存法：name 就是地址
+        let mut legacy = sample_host("h1");
+        legacy.name = legacy.address.clone();
+        vault.save_host(legacy).unwrap();
+        // 真起过名字的不能被顺手抹掉
+        let mut named = sample_host("h2");
+        named.name = "生产 Web 机".to_string();
+        vault.save_host(named).unwrap();
+
+        let back = vault.list_hosts().unwrap();
+        let old = back.iter().find(|h| h.id == "h1").unwrap();
+        assert_eq!(old.name, "", "name 等于地址的老记录应当读成「没起名」");
+        assert_eq!(old.address, "10.0.1.11", "地址本身不能被改动");
+        let keep = back.iter().find(|h| h.id == "h2").unwrap();
+        assert_eq!(keep.name, "生产 Web 机", "起过名字的被抹掉了");
 
         drop(vault);
         let _ = fs::remove_file(&path);
