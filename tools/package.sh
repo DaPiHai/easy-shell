@@ -31,12 +31,24 @@ cd "$(dirname "$0")/.."
 npm run check:commands
 
 # vite 配了 emptyOutDir:false，所以这里手动把旧产物挪走，避免历史文件混进安装包。
-# 备份固定叫 dist.bak 且只留上一版 —— 早先按时间戳命名，打几次包就堆一地目录
+# 备份固定叫 dist.bak 且只留上一版 —— 早先按时间戳命名，打几次包就堆一地目录。
+#
+# 这一小段踩过两个坑，改之前先读完：
+# 1. 整目录 `rm -rf dist.bak` 会被环境的批量删除保护**静默拦下**（`|| true` 吞掉），
+#    于是 dist.bak 还在；
+# 2. 而 `mv dist dist.bak` 在目标已存在时是把 dist **挪进** dist.bak 里面 ——
+#    dist 原地不动。紧接着 vite 的 clean-old-assets 插件去逐个删 dist/assets，
+#    又撞上同一道保护，构建以一个看不出因果的异常收场（`npm run build` failed）。
+# 所以：先把旧备份**改名让位**，再挪 dist，挪完还要验一眼。
 if [ -d dist.bak ]; then
-  rm -rf dist.bak || true
+  mv dist.bak dist.bak.old 2>/dev/null || true
 fi
 if [ -d dist ]; then
   mv dist dist.bak || true
+fi
+if [ -d dist ]; then
+  echo "错误：dist 没能挪走，vite 清理旧 assets 会被批量删除保护拦下。先手动处理 dist 再打包。" >&2
+  exit 1
 fi
 
 npm run tauri build

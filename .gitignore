@@ -1,6 +1,7 @@
 node_modules/
 dist/
-dist.bak/
+# 打包脚本挪出来的上一版产物：dist.bak，以及它被让位时的 dist.bak.old
+dist.bak*/
 .vite/
 
 src-tauri/target/
