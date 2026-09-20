@@ -787,6 +787,14 @@ interface AppState {
 
   connectOpen: boolean
   setConnectOpen: (open: boolean) => void
+  /**
+   * 关掉「新建会话 / 编辑主机」对话框。**所有关闭路径都走它**（✕、点遮罩、Esc）。
+   *
+   * 早先 Esc 只关 `connectOpen`，漏了 `editingHostId` —— 于是「打开编辑主机 → Esc →
+   * Ctrl+N」会直接进编辑形态、预填着刚才那台机器，点保存是**改**它而不是新建。
+   * 这类"开门参数"少清一个，下一次开门就会带上它。
+   */
+  closeConnect: () => void
 
   /**
    * 「正在编辑哪台主机」。非 null 时 `ConnectDialog` 切成编辑形态（预填全部字段、
@@ -1218,6 +1226,14 @@ export const useApp = create<AppState>((set, get) => ({
 
   connectOpen: false,
   setConnectOpen: (open) => set({ connectOpen: open }),
+  closeConnect: () =>
+    set({
+      connectOpen: false,
+      // 这三样是"开门参数"，不清的话下一次开门会带着上一次的意图
+      editingHostId: null,
+      newHostGroupId: null,
+      connectPaneTarget: null,
+    }),
 
   editingHostId: null,
   setEditingHostId: (id) => set({ editingHostId: id }),

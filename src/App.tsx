@@ -111,14 +111,12 @@ export default function App() {
           setPaneHostTarget,
           confirmPrompt,
           setConfirmPrompt,
-          setConnectPaneTarget,
         } = useApp.getState()
         if (paletteOpen) setPaletteOpen(false)
-        // 关对话框时把「这一格要连主机」的目标一起清掉，理由见 ConnectDialog.close
-        if (connectOpen) {
-          setConnectOpen(false)
-          setConnectPaneTarget(null)
-        }
+        // 走 store 的 closeConnect：它把 connectOpen / editingHostId / newHostGroupId /
+        // connectPaneTarget 一起清掉。这里以前只关 connectOpen，于是「编辑主机 → Esc →
+        // Ctrl+N」会带着上一轮的编辑目标开门
+        if (connectOpen) useApp.getState().closeConnect()
         if (paneHostTarget) setPaneHostTarget(null)
         if (tunnelOpen) setTunnelOpen(false)
         if (snippetsOpen) setSnippetsOpen(false)

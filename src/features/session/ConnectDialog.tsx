@@ -37,8 +37,7 @@ const HINTS = {
  * 不是要重开一条连接（已经开着的那些连接也不受影响）。
  */
 export function ConnectDialog() {
-  const { connectOpen, setConnectOpen, addTab, saveHost, setError: showError, setConfirmPrompt } =
-    useApp()
+  const { connectOpen, addTab, saveHost, setError: showError, setConfirmPrompt } = useApp()
   const groups = useApp((s) => s.groups)
   /**
    * 从某一格的「换主机 → 快速连接」进来时非空：连上后会话写进那一格，不开新标签。
@@ -49,8 +48,6 @@ export function ConnectDialog() {
   const editingHostId = useApp((s) => s.editingHostId)
   const editing = useApp((s) => (editingHostId ? s.hosts.find((h) => h.id === editingHostId) : null))
   const isEdit = !!editing
-  /** 新建时的分组预选，见下面那条 effect */
-  const newHostGroupId = useApp((s) => s.newHostGroupId)
 
   const [host, setHost] = useState('')
   const [port, setPort] = useState('22')
@@ -104,24 +101,43 @@ export function ConnectDialog() {
   }, [editingHostId])
 
   /**
-   * 新建会话时的分组预选 —— 会话树分组行的右键「在这个分组里新建会话」会先设好它。
+   * **每次打开「新建会话」都从空表单开始。**
    *
-   * 编辑模式直接让位：上面那条 effect 按记录回填 groupId 才是对的，两条都写会打架。
+   * 这个组件一直挂着的（`App.tsx` 里无条件渲染，靠 `if (!connectOpen) return null` 收起来），
+   * 所以 `useState` 的初值只在应用启动那一瞬算过一次 —— 不显式清，上一次填的
+   * 主机 / 用户名 / 密码 / 名称 / 标签会全部留在框里。密码那条最糟：
+   * 它会把**上一台机器**的密码显示给下一次连接。
+   *
+   * 依赖只写这两个，分组预选在函数里现取 —— 写进依赖的话，用户在开着对话框时
+   * 从会话树右键换了个分组，会把正填着的内容整份冲掉。
+   * 编辑模式直接让位：上面那条 effect 按记录回填才是对的，两条都写会打架。
    */
   useEffect(() => {
-    if (editingHostId) return
-    setGroupId(newHostGroupId ?? '')
-  }, [editingHostId, newHostGroupId])
+    if (!connectOpen || editingHostId) return
+    setHost('')
+    setPort('22')
+    setUsername('')
+    setName('')
+    setGroupId(useApp.getState().newHostGroupId ?? '')
+    setTagInput('')
+    setPassword('')
+    setAuthMode('password')
+    setPrivateKeyPath('')
+    setPassphrase('')
+    setCompat(false)
+    setSaveToVault(true)
+    setError(null)
+  }, [connectOpen, editingHostId])
 
   if (!connectOpen) return null
 
   const tags = parseTags(tagInput)
 
   const close = () => {
-    setConnectOpen(false)
-    useApp.getState().setEditingHostId(null)
-    // 目标格必须跟着对话框一起清：留着它，下次 Ctrl+N 建会话会莫名其妙写进那一格
-    useApp.getState().setConnectPaneTarget(null)
+    // 关门的清理全交给 store 的 closeConnect（✕、点遮罩、Esc 三条路共用一份）：
+    // 早先 Esc 只关 connectOpen，于是「编辑主机 → Esc → Ctrl+N」会直接进编辑形态，
+    // 预填着刚才那台机器，点保存是改它不是新建
+    useApp.getState().closeConnect()
     setError(null)
   }
 

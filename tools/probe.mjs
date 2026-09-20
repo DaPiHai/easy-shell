@@ -15,6 +15,7 @@
  *   node tools/probe.mjs newline        # 只跑「命令框里只有换行」
  *   node tools/probe.mjs tags           # 只跑「标签筛选 / 关键词过滤 / 编辑主机（含改分组）」
  *   node tools/probe.mjs menu           # 只跑「各处右键菜单 + 原生菜单拦截」
+ *   node tools/probe.mjs connect        # 只跑「新建会话表单的状态清理」
  *   node tools/probe.mjs rename         # 只跑「双击标签改名」
  *
  * 环境变量：EDGE_PATH / PROBE_PORT / PROBE_URL 可覆盖默认值。
@@ -346,6 +347,43 @@ window.__probe = {
     if (!el) return null
     const r = el.getBoundingClientRect()
     return { x: r.left + r.width / 2, y: r.top + 24 }
+  },
+  /**
+   * 给 placeholder 里含某段文字的那个受控输入框塞值。
+   *
+   * 走原生 setter + input 事件：Input.insertText 和直接改 el.value 都绕过 React 的
+   * 受控更新，界面看着变了、React 那边还是旧值（这条踩过）。
+   */
+  fill(placeholderPart, text) {
+    const el = [...document.querySelectorAll('input')].find((i) =>
+      i.placeholder.includes(placeholderPart),
+    )
+    if (!el) return 'no-input'
+    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set
+    setter.call(el, text)
+    el.dispatchEvent(new Event('input', { bubbles: true }))
+    return el.value
+  },
+  /** 表单里每个输入框的 placeholder 与当前值 */
+  dialogInputs() {
+    return [...document.querySelectorAll('input')].map((i) => ({
+      ph: i.placeholder,
+      value: i.value,
+    }))
+  },
+  /** 「新建会话 / 编辑主机」对话框的标题（它靠 editingHostId 切形态） */
+  dialogTitle() {
+    const el = [...document.querySelectorAll('span')].find((s) =>
+      ['新建会话', '编辑主机', '连接这一格'].includes(s.textContent.trim()),
+    )
+    return el ? el.textContent.trim() : null
+  },
+  /** 文本完全匹配的按钮的中点坐标（找不到返回 null） */
+  buttonBox(text) {
+    const el = [...document.querySelectorAll('button')].find((b) => b.textContent.trim() === text)
+    if (!el) return null
+    const r = el.getBoundingClientRect()
+    return { x: r.left + r.width / 2, y: r.top + r.height / 2 }
   },
 }
 'injected'
@@ -918,6 +956,101 @@ async function scenarioContextMenu(cdp) {
   console.log('\n右键菜单探针：全部通过')
 }
 
+/**
+ * 场景：新建会话表单
+ *
+ * 用户报的 bug —— 连着新建两次，第二次还留着上一次填的内容（连密码都在）。
+ * 根因是对话框**一直挂着**（App 里无条件渲染 + `if (!connectOpen) return null`），
+ * `useState` 的初值只在应用启动那一瞬算过一次，不显式清就一直是上一份。
+ * 顺带钉住同源的第二条：编辑主机 → Esc → 新建，不该带着编辑目标开门（那样点保存
+ * 会改掉刚才那台机器，而不是新建）。
+ */
+async function scenarioConnectForm(cdp) {
+  await cdp.send('Page.navigate', { url: PAGE })
+  await sleep(1200)
+  await cdp.eval(HELPERS)
+  await waitFor(cdp, '__probe.hosts().length > 0', '会话树里的主机行')
+
+  /** 侧栏头部那个「+」就是新建会话，跟 Ctrl+N 同一个入口 */
+  const openNew = async () => {
+    await clickSel(cdp, 'aside button[title="新建会话"]')
+    await sleep(400)
+  }
+  const fillAll = async (suffix) => {
+    await cdp.eval(`__probe.fill("192.168.1.10", "10.9.9.${suffix}")`)
+    await cdp.eval('__probe.fill("root", "alice")')
+    await cdp.eval('__probe.fill("登录密码", "pw-上一次")')
+    await cdp.eval('__probe.fill("@", "上次的名字")')
+    await cdp.eval('__probe.fill("prod, 客户A", "prod, 机房9")')
+    await sleep(250)
+  }
+  /**
+   * 只看"本该空着"的那几个。端口不算 —— 它的初值本来就是 22，
+   * 而 placeholder 为空的输入框就是它
+   */
+  const leftovers = async () =>
+    (await cdp.eval('__probe.dialogInputs()')).filter((f) => f.value !== '' && f.ph !== '')
+
+  /* ---------- 1. 填满 → Esc 关 → 再开 ---------- */
+  await openNew()
+  const firstTitle = await cdp.eval('__probe.dialogTitle()')
+  console.log('第一次打开:', firstTitle)
+  await fillAll(9)
+  console.log('填完:', JSON.stringify(await cdp.eval('__probe.dialogInputs()')))
+  await cdp.shot('probe-connect-1-filled.png')
+
+  await cdp.escape()
+  await sleep(400)
+  await openNew()
+  const afterEsc = await leftovers()
+  console.log('Esc 关掉再打开，残留字段:', JSON.stringify(afterEsc))
+  if (afterEsc.length > 0) {
+    throw new Error('Esc 关掉后重开还留着上一次的内容：' + JSON.stringify(afterEsc))
+  }
+
+  /* ---------- 2. 填满 → 点「连接」成功关掉 → 再开（用户报的就是这条） ---------- */
+  await fillAll(10)
+  const before = (await cdp.eval('__probe.tabs()')).length
+  const connectBtn = await cdp.eval('__probe.buttonBox("连接")')
+  if (!connectBtn) throw new Error('找不到「连接」按钮')
+  await cdp.mouse('mousePressed', connectBtn.x, connectBtn.y)
+  await cdp.mouse('mouseReleased', connectBtn.x, connectBtn.y)
+  await sleep(1200)
+  const after = (await cdp.eval('__probe.tabs()')).length
+  if (after !== before + 1) throw new Error(`连接之后标签数不对：${before} → ${after}`)
+  if (await cdp.eval('__probe.dialogTitle()')) throw new Error('连上之后对话框没关掉')
+
+  await openNew()
+  const afterConnect = await leftovers()
+  console.log('连接成功再新建，残留字段:', JSON.stringify(afterConnect))
+  if (afterConnect.length > 0) {
+    throw new Error('连接成功后重开还留着上一次的内容：' + JSON.stringify(afterConnect))
+  }
+  await cdp.shot('probe-connect-2-reopened.png')
+
+  /* ---------- 3. 编辑主机 → Esc → 新建 ---------- */
+  await cdp.escape()
+  await sleep(300)
+  await clickSel(cdp, '[data-host-edit]')
+  await sleep(400)
+  console.log('编辑形态的标题:', await cdp.eval('__probe.dialogTitle()'))
+  await cdp.escape()
+  await sleep(400)
+
+  await openNew()
+  const title3 = await cdp.eval('__probe.dialogTitle()')
+  const fields3 = await leftovers()
+  console.log('编辑 Esc 之后新建:', title3, JSON.stringify(fields3))
+  if (title3 !== '新建会话') {
+    throw new Error(`编辑目标没清掉，标题是「${title3}」（点保存会改掉刚那台机器）`)
+  }
+  if (fields3.length > 0) {
+    throw new Error('编辑 Esc 之后重开还留着内容：' + JSON.stringify(fields3))
+  }
+
+  console.log('\n新建会话表单探针：全部通过')
+}
+
 const want = process.argv[2] ?? 'all'
 const { cdp, proc } = await launch()
 try {
@@ -926,6 +1059,7 @@ try {
   if (want === 'all' || want === 'tags') await scenarioTags(cdp)
   if (want === 'rename') await scenarioTabRename(cdp)
   if (want === 'all' || want === 'menu') await scenarioContextMenu(cdp)
+  if (want === 'all' || want === 'connect') await scenarioConnectForm(cdp)
 } catch (e) {
   console.error('探针失败:', e)
   console.log('--- 页面控制台 ---')
