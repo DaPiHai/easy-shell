@@ -609,6 +609,34 @@ export function panesOf(tab: Tab | undefined | null): Pane[] {
   return tab?.panes ?? []
 }
 
+/**
+ * 某个 SSH 会话还活着的终端格子。
+ *
+ * SFTP 面板右键「在终端里 cd 过去」要用它：命令得敲进**那条会话对应的**终端，
+ * 而不是当前聚焦的那一格 —— 双栏 SFTP 和终端常常是两个不同的标签。
+ * 断线的不算（那格的通道已经废了，敲进去没人收）。
+ */
+export function livePaneOfSession(sessionId: string): Pane | null {
+  const s = useApp.getState()
+  for (const tab of s.tabs) {
+    for (const p of panesOf(tab)) {
+      if (p.kind === 'terminal' && p.sessionId === sessionId && !s.deadPanes[p.id]) return p
+    }
+  }
+  return null
+}
+
+/** 还活着的本地 Shell 格子。右键「在终端里打开这个目录」优先投给它，没有再开一个 */
+export function liveLocalPane(): Pane | null {
+  const s = useApp.getState()
+  for (const tab of s.tabs) {
+    for (const p of panesOf(tab)) {
+      if (p.kind === 'local' && !s.deadPanes[p.id]) return p
+    }
+  }
+  return null
+}
+
 /** 一个标签里所有活着的 SSH 会话（终端标签的每格各一条，SFTP/编辑器标签是它自己那条） */
 export function tabSessionIds(tab: Tab): string[] {
   const ids = panesOf(tab)
@@ -768,6 +796,17 @@ interface AppState {
   editingHostId: string | null
   setEditingHostId: (id: string | null) => void
 
+  /**
+   * 「新建会话」时分组下拉的预选值。
+   *
+   * 跟 `editingHostId` 属于同一类"开门参数"：会话树分组行的右键
+   * （「在这个分组里新建会话」）先把值设好再开门，对话框读一次就完事 ——
+   * 不然用户得先新建、再把那台机器拖进分组，两步里漏一步就落进未分组。
+   */
+  newHostGroupId: string | null
+  /** 打开「新建会话」并预选分组。三步合成一步，别在调用点手写 */
+  openNewHostIn: (groupId: string | null) => void
+
   /** 手动改标签页名字（置 `titlePinned`，之后不再被自动更新覆盖） */
   renameTab: (tabId: string, title: string) => void
   /** 手动改某一格的名字。同上 */
@@ -926,6 +965,14 @@ interface AppState {
    * 否则直接关。程序自动关（本地 shell 退出、锁库清标签）仍用 closeTab 绕开它。
    */
   requestCloseTab: (id: string) => void
+
+  /**
+   * 一次关掉一批标签（右键菜单的「关闭其它」/「关闭右侧」）。
+   *
+   * 未保存的编辑器守卫不能绕过，但也不能弹 N 个确认框 —— 把有改动的那些
+   * 一次列出来问一遍就够了（弹到第三个就没人看了，直接一路点确定反而更危险）。
+   */
+  requestCloseMany: (ids: string[]) => void
 
   /**
    * 每个标签聚焦在哪一格（tabId → paneId）。点格子里的任何地方都会记一笔，
@@ -1095,6 +1142,20 @@ interface AppState {
    * 不放进 React state，避免每次注册都触发重渲染。
    */
   terminalSinks: Record<string, (text: string) => void>
+  /** 还没发出去的输入，见 `queuePaneInput` */
+  pendingInput: Record<string, string[]>
+
+  /**
+   * 等通道就绪再发的输入（按 paneId 排队）。
+   *
+   * `terminalSinks` 是**注册即用**的，但格子刚开时通道还没好 —— sink 里那句
+   * `if (channelId === null) return` 会把内容静默丢掉。右键「在终端里打开这个目录」
+   * 正是"先开标签、再把 cd 敲进去"，只能排在这儿，由 TerminalView 在通道就绪的
+   * 那一刻补发，而不是让调用方 sleep 一个时长去赌。
+   */
+  queuePaneInput: (paneId: string, text: string) => void
+  /** 取走并清空某个格子排队的输入（拿到就发，别留着重发）。只有 TerminalView 该调 */
+  takePaneInput: (paneId: string) => string[]
   registerTerminalSink: (paneId: string, sink: (text: string) => void) => void
   unregisterTerminalSink: (paneId: string) => void
 
@@ -1160,6 +1221,9 @@ export const useApp = create<AppState>((set, get) => ({
 
   editingHostId: null,
   setEditingHostId: (id) => set({ editingHostId: id }),
+  newHostGroupId: null,
+  openNewHostIn: (groupId) =>
+    set({ editingHostId: null, newHostGroupId: groupId, connectOpen: true }),
 
   renameTab: (tabId, title) =>
     set((s) => ({
@@ -1543,6 +1607,32 @@ export const useApp = create<AppState>((set, get) => ({
       return
     }
     get().closeTab(id)
+  },
+
+  requestCloseMany: (ids) => {
+    const s = get()
+    // 传进来的可能包含"点右键时还在、这会儿已经关了"的标签，先滤掉
+    const alive = ids.filter((id) => s.tabs.some((t) => t.id === id))
+    if (alive.length === 0) return
+    const titleOf = (id: string) => s.tabs.find((t) => t.id === id)?.title ?? '未命名'
+    const dirty = alive.filter((id) => s.editorGuards[id]?.isDirty())
+    if (dirty.length === 0) {
+      for (const id of alive) get().closeTab(id)
+      return
+    }
+    set({
+      confirmPrompt: {
+        kind: 'confirm',
+        danger: true,
+        title: `有 ${dirty.length} 个标签还没保存`,
+        message: '关掉之后这些改动就找不回来了。',
+        detail: dirty.map(titleOf).join('、'),
+        confirmLabel: '仍然关闭',
+        onConfirm: () => {
+          for (const id of alive) get().closeTab(id)
+        },
+      },
+    })
   },
 
   editorGuards: {},
@@ -1982,6 +2072,21 @@ export const useApp = create<AppState>((set, get) => ({
   },
 
   terminalSinks: {},
+  pendingInput: {},
+  queuePaneInput: (paneId, text) =>
+    set((s) => ({
+      pendingInput: { ...s.pendingInput, [paneId]: [...(s.pendingInput[paneId] ?? []), text] },
+    })),
+  takePaneInput: (paneId) => {
+    const queued = get().pendingInput[paneId]
+    if (!queued || queued.length === 0) return []
+    set((s) => {
+      const next = { ...s.pendingInput }
+      delete next[paneId]
+      return { pendingInput: next }
+    })
+    return queued
+  },
   registerTerminalSink: (paneId, sink) =>
     set((s) => ({ terminalSinks: { ...s.terminalSinks, [paneId]: sink } })),
   unregisterTerminalSink: (paneId) =>

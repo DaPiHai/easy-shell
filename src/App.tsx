@@ -28,6 +28,31 @@ export default function App() {
     void useApp.getState().initVault()
   }, [])
 
+  /**
+   * 全局屏蔽 WebView2 的原生右键菜单。
+   *
+   * 不接这一步，凡是没自绘菜单的地方右键都会冒出「刷新 / 另存为 / 打印 / 检查」——
+   * 跟一个 SSH 客户端毫无关系，尤其「检查」会把 webview 的开发者工具拉出来，
+   * 误触之后用户只会觉得窗口坏了。
+   *
+   * 两条放行：
+   *  - `defaultPrevented`：本应用自绘菜单的区域（终端、会话树、标签栏、分屏标题条、
+   *    SFTP、编辑器）自己已经 preventDefault 过了。React 的监听挂在根容器上、
+   *    比这里的 window 监听早跑，所以到这个时刻这个标记是可靠的。
+   *  - 输入框 / 多行文本：那里的原生菜单有剪切、复制、粘贴，我们没打算把表单
+   *    也重画一遍 —— 留着比屏蔽掉有用。
+   */
+  useEffect(() => {
+    const onContextMenu = (e: MouseEvent) => {
+      if (e.defaultPrevented) return
+      const el = e.target instanceof HTMLElement ? e.target : null
+      if (el?.closest('input, textarea, [contenteditable="true"]')) return
+      e.preventDefault()
+    }
+    window.addEventListener('contextmenu', onContextMenu)
+    return () => window.removeEventListener('contextmenu', onContextMenu)
+  }, [])
+
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       const { paletteOpen, setPaletteOpen, connectOpen, setConnectOpen } = useApp.getState()

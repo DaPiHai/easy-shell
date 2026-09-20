@@ -14,6 +14,7 @@
  *   node tools/probe.mjs drag           # 只跑「拖标签进终端窗口并分屏」
  *   node tools/probe.mjs newline        # 只跑「命令框里只有换行」
  *   node tools/probe.mjs tags           # 只跑「标签筛选 / 关键词过滤 / 编辑主机（含改分组）」
+ *   node tools/probe.mjs menu           # 只跑「各处右键菜单 + 原生菜单拦截」
  *   node tools/probe.mjs rename         # 只跑「双击标签改名」
  *
  * 环境变量：EDGE_PATH / PROBE_PORT / PROBE_URL 可覆盖默认值。
@@ -103,6 +104,39 @@ class Cdp {
       ...extra,
     })
   }
+
+  /**
+   * 真实右键（右键菜单要用真事件）。
+   *
+   * `button: 'right'` 和 `buttons: 2` 两个都得给：浏览器是**看着 buttons 位**
+   * 决定要不要派发 `contextmenu` 的，只给 button 的话页面里只会收到一个孤零零的
+   * mouseup，菜单永远不开 —— 而那时你会以为是功能坏了。
+   */
+  async rightClick(x, y) {
+    await this.send('Input.dispatchMouseEvent', {
+      type: 'mousePressed',
+      x,
+      y,
+      button: 'right',
+      buttons: 2,
+      clickCount: 1,
+    })
+    await this.send('Input.dispatchMouseEvent', {
+      type: 'mouseReleased',
+      x,
+      y,
+      button: 'right',
+      buttons: 0,
+      clickCount: 1,
+    })
+  }
+
+  /** 发一个 Esc（菜单靠它关；真实按键才能走到 window 的 keydown 监听） */
+  async escape() {
+    const base = { key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27, nativeVirtualKeyCode: 27 }
+    await this.send('Input.dispatchKeyEvent', { type: 'rawKeyDown', ...base })
+    await this.send('Input.dispatchKeyEvent', { type: 'keyUp', ...base })
+  }
 }
 
 /* ---------------- 启动 / 收尾 ---------------- */
@@ -151,7 +185,13 @@ async function launch() {
 
 /* ---------------- 场景 ---------------- */
 
-/** 页面里那些会用到的小工具（注入一次，后面直接调） */
+/**
+ * 页面里那些会用到的小工具（注入一次，后面直接调）。
+ *
+ * 注意：整段是**模板字符串**，里面不能出现反引号 —— 连注释里拿来当代码引号也不行，
+ * 会把模板截断成语法错误，报的还是「Invalid left-hand side expression in postfix operation」
+ * 这种完全看不出因果的话（被自己坑过一次）。要用引号就老实写引号。
+ */
 const HELPERS = `
 window.__probe = {
   /** 标签栏里的标签（标题 + 中点坐标） */
@@ -226,6 +266,86 @@ window.__probe = {
     return [...document.querySelectorAll('[aria-label][title]')]
       .filter((el) => el.textContent.trim() === '')
       .map((el) => el.getAttribute('title'))
+  },
+
+  /**
+   * 当前打开的右键菜单（没开返回 null）。
+   *
+   * 只读**第一层**的直接子元素：分隔线是 div、展开的子菜单又是个 [role=menu] 的 div，
+   * 三种东西要分开认，不然断言写不准。
+   */
+  menu() {
+    const read = (el) =>
+      [...el.children].map((c) => {
+        if (c.getAttribute('role') === 'menu') return { submenu: read(c) }
+        if (c.tagName !== 'BUTTON') return { sep: true }
+        const r = c.getBoundingClientRect()
+        return {
+          id: c.getAttribute('data-menu-item'),
+          text: (c.querySelector('span') ?? c).textContent.trim(),
+          disabled: c.disabled,
+          checked: !!c.querySelector('svg.lucide-check'),
+          hasSub: !!c.querySelector('svg.lucide-chevron-right'),
+          x: r.left + 24,
+          y: r.top + r.height / 2,
+        }
+      })
+    const root = document.querySelector('[role="menu"]')
+    return root ? read(root) : null
+  },
+  /** 菜单项的 id 列表，拍平了好断言（--- 是分隔线、>sub: 后面跟子菜单） */
+  menuIds() {
+    const m = window.__probe.menu()
+    if (!m) return null
+    // 这里**不能用模板字符串**：整段 HELPERS 本身就是模板字符串，反引号会把它截断
+    return m.map((e) => {
+      if (e.submenu) return '>sub:' + e.submenu.map((s) => s.id).join(',')
+      if (e.sep) return '---'
+      return e.id + (e.disabled ? '(禁用)' : '')
+    })
+  },
+  /**
+   * 开始记录每一次 contextmenu 有没有被应用拦下。
+   *
+   * 监听挂在 window 上、加在应用自己的处理器**之后**，所以跑到我们时
+   * defaultPrevented 才有意义 —— 这是「原生菜单被屏蔽了没」唯一能自动验的方式
+   * （合成事件不触发浏览器默认行为，拦没拦都看不出来）。
+   */
+  watchCtx() {
+    window.__ctxLog = []
+    if (!window.__ctxWatched) {
+      window.__ctxWatched = true
+      window.addEventListener('contextmenu', (e) => {
+        window.__ctxLog.push({ prevented: e.defaultPrevented, tag: e.target.tagName })
+      })
+    }
+    return 'watching'
+  },
+  ctxLog() {
+    return window.__ctxLog ?? []
+  },
+  clearCtxLog() {
+    window.__ctxLog = []
+    return 'cleared'
+  },
+  /** SFTP 两栏里的文件行（size 是 — 的那行是目录） */
+  fileRows() {
+    return [...document.querySelectorAll('table tbody tr')].map((el) => {
+      const r = el.getBoundingClientRect()
+      return {
+        name: el.querySelector('td')?.textContent?.trim() ?? '',
+        size: el.children[1]?.textContent?.trim() ?? '',
+        x: r.left + 40,
+        y: r.top + r.height / 2,
+      }
+    })
+  },
+  /** CodeMirror 编辑区里一块可以右键的地方 */
+  editorBox() {
+    const el = document.querySelector('.cm-editor')
+    if (!el) return null
+    const r = el.getBoundingClientRect()
+    return { x: r.left + r.width / 2, y: r.top + 24 }
   },
 }
 'injected'
@@ -611,6 +731,193 @@ async function scenarioTabRename(cdp) {
   await cdp.shot('probe-rename.png')
 }
 
+/** 点菜单里 id 为 X 的那一项（真鼠标）。找不到就把现有项列出来，免得只报一句"没有" */
+async function clickMenuItem(cdp, id) {
+  const items = await cdp.eval('__probe.menu()')
+  const flat = []
+  for (const it of items ?? []) {
+    if (it.submenu) flat.push(...it.submenu)
+    else if (!it.sep) flat.push(it)
+  }
+  const hit = flat.find((i) => i.id === id)
+  if (!hit) {
+    throw new Error(`菜单里没有 ${id}（现有：${flat.map((i) => i.id).join(', ')}）`)
+  }
+  await cdp.mouse('mousePressed', hit.x, hit.y)
+  await cdp.mouse('mouseReleased', hit.x, hit.y)
+  await sleep(350)
+  return hit
+}
+
+/**
+ * 场景：右键菜单。
+ *
+ * 全部走**真鼠标**（`Input.dispatchMouseEvent` 的 button:'right'），不用合成事件 ——
+ * "原生菜单有没有被拦下"只有真事件序列能验：合成事件不触发浏览器的默认行为，
+ * 拦没拦从外面看不出来。
+ */
+async function scenarioContextMenu(cdp) {
+  await cdp.send('Page.navigate', { url: PAGE })
+  await sleep(1200)
+  await cdp.eval(HELPERS)
+  await waitFor(cdp, '__probe.hosts().length > 0', '会话树里的主机行')
+
+  const t0 = (await cdp.eval('__probe.hosts()'))[0]
+
+  /* ---------- 1. 主机行 ---------- */
+  await cdp.rightClick(t0.x, t0.y)
+  await sleep(300)
+  const hostMenu = await cdp.eval('__probe.menuIds()')
+  console.log('主机行菜单:', JSON.stringify(hostMenu))
+  if (!hostMenu) throw new Error('主机行右键没出菜单')
+  for (const id of ['host-connect', 'host-sftp', 'host-move-group', 'host-copy-address', 'host-delete']) {
+    if (!hostMenu.some((m) => m.startsWith(id))) throw new Error(`主机行菜单少了 ${id}`)
+  }
+  await cdp.shot('probe-menu-1-host.png')
+
+  /* ---------- 2. 子菜单（移入分组） ---------- */
+  const hostItems = await cdp.eval('__probe.menu()')
+  const moveItem = hostItems.find((i) => i.id === 'host-move-group')
+  await cdp.mouse('mouseMoved', moveItem.x, moveItem.y)
+  await sleep(350)
+  const withSub = await cdp.eval('__probe.menuIds()')
+  console.log('展开「移入分组」后:', JSON.stringify(withSub))
+  if (!withSub?.some((m) => m.startsWith('>sub:'))) throw new Error('「移入分组」没有展开子菜单')
+  await cdp.shot('probe-menu-2-submenu.png')
+  await cdp.escape()
+  await sleep(250)
+
+  /* ---------- 3. 分组行 ---------- */
+  const group = await cdp.eval(`(() => {
+    const el = [...document.querySelectorAll('[data-group-id]')].find((d) => d.getAttribute('data-group-id'))
+    const row = el && el.firstElementChild
+    if (!row) return null
+    const r = row.getBoundingClientRect()
+    return { x: r.left + r.width / 2, y: r.top + r.height / 2 }
+  })()`)
+  if (!group) throw new Error('找不到分组行')
+  await cdp.rightClick(group.x, group.y)
+  await sleep(300)
+  const groupMenu = await cdp.eval('__probe.menuIds()')
+  console.log('分组行菜单:', JSON.stringify(groupMenu))
+  if (!groupMenu?.some((m) => m.startsWith('group-new-host'))) throw new Error('分组行菜单少了「新建会话」')
+  if (!groupMenu.some((m) => m.startsWith('group-delete'))) throw new Error('分组行菜单少了「删除分组」')
+  await cdp.shot('probe-menu-3-group.png')
+  await cdp.escape()
+  await sleep(250)
+
+  /* ---------- 4. 原生菜单：输入框放行、普通区域拦下 ---------- */
+  await cdp.eval('__probe.watchCtx()')
+
+  await cdp.eval('__probe.clearCtxLog()')
+  const filter = await boxOf(cdp, '[data-host-filter]')
+  await cdp.rightClick(filter.x, filter.y)
+  await sleep(250)
+  const inputLog = await cdp.eval('__probe.ctxLog()')
+  console.log('过滤框上右键:', JSON.stringify(inputLog))
+  if (inputLog.some((e) => e.prevented)) {
+    throw new Error('输入框上不该拦原生菜单（剪切/粘贴还得用）')
+  }
+  await cdp.escape()
+  await sleep(200)
+
+  await cdp.eval('__probe.clearCtxLog()')
+  const toolbar = await boxOf(cdp, 'aside > div:last-child')
+  await cdp.rightClick(toolbar.x, toolbar.y)
+  await sleep(250)
+  const plainLog = await cdp.eval('__probe.ctxLog()')
+  console.log('侧栏工具区右键:', JSON.stringify(plainLog))
+  if (!plainLog.some((e) => e.prevented)) {
+    throw new Error('普通区域的原生右键菜单没被拦住')
+  }
+  await cdp.escape()
+  await sleep(200)
+
+  /* ---------- 5. 标签栏 ---------- */
+  const hosts = await cdp.eval('__probe.hosts()')
+  for (const h of hosts.slice(0, 2)) {
+    await cdp.mouse('mousePressed', h.x, h.y)
+    await cdp.mouse('mouseReleased', h.x, h.y)
+    await sleep(500)
+  }
+  await waitFor(cdp, '__probe.tabs().length >= 2', '两个标签')
+  const tabs = await cdp.eval('__probe.tabs()')
+  await cdp.rightClick(tabs[0].x, tabs[0].y)
+  await sleep(300)
+  const tabMenu = await cdp.eval('__probe.menuIds()')
+  console.log('标签菜单:', JSON.stringify(tabMenu))
+  if (!tabMenu?.some((m) => m.startsWith('tab-close-others'))) throw new Error('标签菜单少了「关闭其它」')
+  if (!tabMenu.some((m) => m.startsWith('tab-close-right'))) throw new Error('标签菜单少了「关闭右侧」')
+  await cdp.shot('probe-menu-4-tab.png')
+
+  await clickMenuItem(cdp, 'tab-close-others')
+  await sleep(500)
+  const left = await cdp.eval('__probe.tabs()')
+  console.log('「关闭其它」之后剩:', left.length, JSON.stringify(left.map((t) => t.title)))
+  if (left.length !== 1) throw new Error(`「关闭其它」没生效，还剩 ${left.length} 个标签`)
+
+  /* ---------- 6. SFTP 文件行 ---------- */
+  const h0 = (await cdp.eval('__probe.hosts()'))[0]
+  await cdp.rightClick(h0.x, h0.y)
+  await sleep(250)
+  await clickMenuItem(cdp, 'host-sftp')
+  await waitFor(cdp, `document.querySelectorAll('table tbody tr').length > 0`, 'SFTP 文件列表')
+  await sleep(400)
+
+  const rows = await cdp.eval('__probe.fileRows()')
+  console.log('文件行:', JSON.stringify(rows.map((r) => `${r.name}/${r.size}`)))
+  const fileRow = rows.find((r) => r.size !== '—')
+  if (!fileRow) throw new Error('SFTP 里没有文件（全是目录？）')
+  await cdp.rightClick(fileRow.x, fileRow.y)
+  await sleep(300)
+  const fileMenu = await cdp.eval('__probe.menuIds()')
+  console.log(`文件行（${fileRow.name}）菜单:`, JSON.stringify(fileMenu))
+  for (const id of ['file-transfer', 'file-edit', 'file-copy-path', 'file-open-terminal']) {
+    if (!fileMenu?.some((m) => m.startsWith(id))) throw new Error(`文件行菜单少了 ${id}`)
+  }
+  await cdp.shot('probe-menu-5-file.png')
+
+  /* ---------- 7. 编辑器（从文件行菜单进去） ---------- */
+  await clickMenuItem(cdp, 'file-edit')
+  await waitFor(cdp, `document.querySelector('.cm-editor') !== null`, '内置编辑器')
+  await sleep(500)
+  const editor = await cdp.eval('__probe.editorBox()')
+  if (!editor) throw new Error('编辑器区域量不到')
+  await cdp.rightClick(editor.x, editor.y)
+  await sleep(300)
+  const editorMenu = await cdp.eval('__probe.menuIds()')
+  console.log('编辑器菜单:', JSON.stringify(editorMenu))
+  for (const id of ['editor-undo', 'editor-copy', 'editor-save', 'editor-copy-path']) {
+    if (!editorMenu?.some((m) => m.startsWith(id))) throw new Error(`编辑器菜单少了 ${id}`)
+  }
+  await cdp.shot('probe-menu-6-editor.png')
+  await cdp.escape()
+  await sleep(200)
+
+  /* ---------- 8. 「在终端里打开」：没有本地 Shell 时应顺手开一个 ---------- */
+  // 回 SFTP 标签（编辑器标签把它挡住了，坐标也能点，但切过去更接近真人操作）
+  const tabsNow = await cdp.eval('__probe.tabs()')
+  const sftpTab = tabsNow.find((t) => t.title.includes('文件'))
+  if (sftpTab) {
+    await cdp.mouse('mousePressed', sftpTab.x, sftpTab.y)
+    await cdp.mouse('mouseReleased', sftpTab.x, sftpTab.y)
+    await sleep(400)
+  }
+  const localFile = (await cdp.eval('__probe.fileRows()')).find((r) => r.size !== '—')
+  await cdp.rightClick(localFile.x, localFile.y)
+  await sleep(300)
+  await clickMenuItem(cdp, 'file-open-terminal')
+  await sleep(1200)
+  const titles = (await cdp.eval('__probe.tabs()')).map((t) => t.title)
+  console.log('「在终端里打开」之后标签:', JSON.stringify(titles))
+  if (!titles.some((t) => t === '本地 Shell')) {
+    throw new Error('本地目录的「在终端里打开」没有开出本地 Shell 标签')
+  }
+  await cdp.shot('probe-menu-7-open-in-terminal.png')
+
+  console.log('\n右键菜单探针：全部通过')
+}
+
 const want = process.argv[2] ?? 'all'
 const { cdp, proc } = await launch()
 try {
@@ -618,6 +925,7 @@ try {
   if (want === 'all' || want === 'newline') await scenarioNewlineOnly(cdp)
   if (want === 'all' || want === 'tags') await scenarioTags(cdp)
   if (want === 'rename') await scenarioTabRename(cdp)
+  if (want === 'all' || want === 'menu') await scenarioContextMenu(cdp)
 } catch (e) {
   console.error('探针失败:', e)
   console.log('--- 页面控制台 ---')

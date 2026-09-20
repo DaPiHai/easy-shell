@@ -49,6 +49,8 @@ export function ConnectDialog() {
   const editingHostId = useApp((s) => s.editingHostId)
   const editing = useApp((s) => (editingHostId ? s.hosts.find((h) => h.id === editingHostId) : null))
   const isEdit = !!editing
+  /** 新建时的分组预选，见下面那条 effect */
+  const newHostGroupId = useApp((s) => s.newHostGroupId)
 
   const [host, setHost] = useState('')
   const [port, setPort] = useState('22')
@@ -100,6 +102,16 @@ export function ConnectDialog() {
     setCompat(!!rec.compat)
     setError(null)
   }, [editingHostId])
+
+  /**
+   * 新建会话时的分组预选 —— 会话树分组行的右键「在这个分组里新建会话」会先设好它。
+   *
+   * 编辑模式直接让位：上面那条 effect 按记录回填 groupId 才是对的，两条都写会打架。
+   */
+  useEffect(() => {
+    if (editingHostId) return
+    setGroupId(newHostGroupId ?? '')
+  }, [editingHostId, newHostGroupId])
 
   if (!connectOpen) return null
 

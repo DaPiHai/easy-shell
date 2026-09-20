@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { ChevronDown, FolderOpen, Pencil, RotateCw, Terminal, X } from 'lucide-react'
+import { ContextMenu, menuAt, sep, type MenuEntry } from '@/components/ContextMenu'
+import { copyQuietly } from '@/lib/clipboard'
 import {
   acceptsPanes,
   bandWidths,
@@ -638,6 +640,76 @@ function PaneFrame({
   const [renaming, setRenaming] = useState(false)
   /** Esc 取消时置上：blur 才是收尾点（Enter 也会走 blur），得让它知道该不该提交 */
   const cancelRenameRef = useRef(false)
+  /** 标题条的右键菜单位置 */
+  const [menu, setMenu] = useState<{ x: number; y: number } | null>(null)
+
+  /**
+   * 标题条的右键菜单。
+   *
+   * 这里**不放复制/粘贴**：那些是终端内容上的动作，终端自己的右键菜单里有，
+   * 而这一格的终端满屏都是 —— 同一个菜单在同一个区域出现两种含义只会让人搞不清
+   * 粘到哪儿去了。这一份只管"这一格"本身。
+   */
+  const menuItems: MenuEntry[] = [
+    {
+      label: '换一台主机…',
+      testId: 'pane-swap-host',
+      icon: <ChevronDown size={13} className="shrink-0 text-ink-tertiary" />,
+      // 跟单击标题是同一个入口，见 onUp 里那段注释
+      onSelect: () => useApp.getState().setPaneHostTarget({ tabId, paneId: pane.id }),
+    },
+    {
+      label: '重命名这一格',
+      testId: 'pane-rename',
+      icon: <Pencil size={13} className="shrink-0 text-ink-tertiary" />,
+      onSelect: () => setRenaming(true),
+    },
+    {
+      label: '复制这一格的名字',
+      testId: 'pane-copy-title',
+      onSelect: () => copyQuietly(pane.title),
+    },
+    ...(pane.sessionId
+      ? [
+          {
+            label: '打开这一格的 SFTP',
+            testId: 'pane-sftp',
+            icon: <FolderOpen size={13} className="shrink-0 text-ink-tertiary" />,
+            onSelect: () =>
+              useApp.getState().addTab({
+                title: `${pane.title} · 文件`,
+                kind: 'sftp',
+                sessionId: pane.sessionId,
+                hostId: pane.hostId,
+              }),
+          } satisfies MenuEntry,
+        ]
+      : []),
+    // 断线且自动重连已放弃时才有得连（跟标题条上那个 ↻ 同一个回调）
+    ...(dead
+      ? [
+          {
+            label: '重新连接这一格',
+            testId: 'pane-reconnect',
+            icon: <RotateCw size={13} className="shrink-0 text-warning" />,
+            onSelect: () => useApp.getState().reconnectSinks[pane.id]?.(),
+          } satisfies MenuEntry,
+        ]
+      : []),
+    // 只剩一格时不给关（那等于关标签，走标签的 ✕），跟标题条上的按钮一个规矩
+    ...(closable
+      ? [
+          sep(),
+          {
+            label: '关掉这一格',
+            testId: 'pane-close',
+            danger: true,
+            icon: <X size={13} className="shrink-0" />,
+            onSelect: () => useApp.getState().closePane(tabId, pane.id),
+          } satisfies MenuEntry,
+        ]
+      : []),
+  ]
 
   /**
    * 改这一格的名字。
@@ -672,6 +744,12 @@ function PaneFrame({
     >
       <div
         onMouseDown={onTitleMouseDown}
+        // 右键也开菜单。这个 mousedown 起的是"拖动换位"，但它只认左键
+        // （beginSwap 里 `e.button !== 0` 直接 return），所以右键不会误起拖拽
+        onContextMenu={(e) => {
+          const at = menuAt(e)
+          if (at) setMenu(at)
+        }}
         className={`flex h-6 shrink-0 select-none items-center gap-1 border-b border-hairline px-2 text-[11px] ${
           showTitle ? 'cursor-grab active:cursor-grabbing' : 'hidden'
         } ${focused ? 'bg-surface-2 text-ink' : 'bg-surface-1 text-ink-subtle'}`}
@@ -796,6 +874,10 @@ function PaneFrame({
           className={`pointer-events-none absolute border-2 border-dashed border-accent bg-accent/10 ${ZONE_CLASS[dropZone]}`}
           aria-hidden
         />
+      )}
+
+      {menu && (
+        <ContextMenu x={menu.x} y={menu.y} items={menuItems} onClose={() => setMenu(null)} />
       )}
     </div>
   )

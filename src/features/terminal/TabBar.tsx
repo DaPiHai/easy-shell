@@ -19,6 +19,8 @@ import {
 } from '@/lib/store'
 import { LayoutIcon } from '@/components/LayoutIcon'
 import { LayoutMenu } from '@/components/LayoutMenu'
+import { ContextMenu, menuAt, sep, type MenuEntry } from '@/components/ContextMenu'
+import { copyQuietly } from '@/lib/clipboard'
 
 /** 拖拽判定阈值：手抖点一下不该被当成拖动 */
 const DRAG_THRESHOLD = 5
@@ -35,6 +37,7 @@ export function TabBar() {
     activeTabId,
     setActiveTab,
     requestCloseTab,
+    requestCloseMany,
     setPaneLayout,
     deadPanes,
     reconnectSinks,
@@ -44,6 +47,9 @@ export function TabBar() {
 
   /** 分屏布局菜单：锚在哪个标签的按钮上、画在哪儿 */
   const [layoutMenu, setLayoutMenu] = useState<{ tabId: string; x: number; y: number } | null>(null)
+
+  /** 标签的右键菜单：开在哪儿、针对哪个标签 */
+  const [tabMenu, setTabMenu] = useState<{ x: number; y: number; tab: Tab } | null>(null)
 
   /** 正在就地改名的标签 id。双击标签名进来 */
   const [renaming, setRenaming] = useState<string | null>(null)
@@ -65,6 +71,81 @@ export function TabBar() {
     const title = raw.trim()
     if (!title || title === current) return
     renameTab(tabId, title)
+  }
+
+  /**
+   * 标签的右键菜单。
+   *
+   * 「关闭其它 / 关闭右侧」是这一份里唯一在别处没有的动作 —— 标签一多，
+   * 一个个点 ✕ 是最烦的事，而这两个动作放成按钮（哪怕 hover 才出现）
+   * 太容易误点：一次点错关掉五个终端，回滚历史就再也找不回来了。
+   */
+  const tabMenuItems = (tab: Tab): MenuEntry[] => {
+    const index = tabs.findIndex((t) => t.id === tab.id)
+    const others = tabs.filter((t) => t.id !== tab.id).map((t) => t.id)
+    const toRight = tabs.slice(index + 1).map((t) => t.id)
+    const pane = focusedPaneOf(tab, focusedPane)
+    return [
+      {
+        label: '重命名',
+        hint: '双击标题',
+        testId: 'tab-rename',
+        onSelect: () => setRenaming(tab.id),
+      },
+      {
+        label: '复制标题',
+        testId: 'tab-copy-title',
+        onSelect: () => copyQuietly(tab.title),
+      },
+      ...(pane?.sessionId
+        ? [
+            {
+              label: '打开 SFTP',
+              testId: 'tab-sftp',
+              icon: <FolderOpen size={13} className="shrink-0 text-ink-tertiary" />,
+              onSelect: () =>
+                useApp.getState().addTab({
+                  title: `${tab.title} · 文件`,
+                  kind: 'sftp',
+                  sessionId: pane.sessionId,
+                  hostId: pane.hostId,
+                }),
+            } satisfies MenuEntry,
+          ]
+        : []),
+      // 有一格断线且自动重连已放弃时才有得连（跟标签上那个 ↻ 同一条路径）
+      ...(tabHasDeadPane(tab, deadPanes)
+        ? [
+            {
+              label: '重新连接',
+              testId: 'tab-reconnect',
+              icon: <RotateCw size={13} className="shrink-0 text-warning" />,
+              onSelect: () => {
+                for (const p of panesOf(tab)) reconnectSinks[p.id]?.()
+              },
+            } satisfies MenuEntry,
+          ]
+        : []),
+      sep(),
+      {
+        label: '关闭',
+        hint: '中键',
+        testId: 'tab-close',
+        onSelect: () => requestCloseTab(tab.id),
+      },
+      {
+        label: '关闭其它',
+        testId: 'tab-close-others',
+        disabled: others.length === 0,
+        onSelect: () => requestCloseMany(others),
+      },
+      {
+        label: '关闭右侧',
+        testId: 'tab-close-right',
+        disabled: toRight.length === 0,
+        onSelect: () => requestCloseMany(toRight),
+      },
+    ]
   }
 
   /* ---------------- 拖标签排序 ---------------- */
@@ -211,6 +292,12 @@ export function TabBar() {
             }}
             onMouseDown={beginDrag(tab, index)}
             onClick={() => setActiveTab(tab.id)}
+            // 右键菜单针对的是**这一条**标签，所以不顺手切激活 ——
+            // 切了会让「关闭其它」那类动作的作用范围看起来变了样
+            onContextMenu={(e) => {
+              const at = menuAt(e)
+              if (at) setTabMenu({ ...at, tab })
+            }}
             // 中键关标签 —— 浏览器里的肌肉记忆，不接的话按了没反应很别扭
             onAuxClick={(e) => {
               if (e.button === 1) {
@@ -389,6 +476,15 @@ export function TabBar() {
           })()}
           onPick={(key) => setPaneLayout(layoutMenu.tabId, key)}
           onClose={() => setLayoutMenu(null)}
+        />
+      )}
+
+      {tabMenu && (
+        <ContextMenu
+          x={tabMenu.x}
+          y={tabMenu.y}
+          items={tabMenuItems(tabMenu.tab)}
+          onClose={() => setTabMenu(null)}
         />
       )}
     </div>

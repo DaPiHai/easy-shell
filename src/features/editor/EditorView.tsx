@@ -3,8 +3,21 @@ import CodeMirror from '@uiw/react-codemirror'
 import { LanguageDescription, type LanguageSupport } from '@codemirror/language'
 import { languages } from '@codemirror/language-data'
 import { openSearchPanel } from '@codemirror/search'
+import { redo, redoDepth, undo, undoDepth } from '@codemirror/commands'
 import type { EditorView as CodeMirrorView } from '@codemirror/view'
-import { Check, Loader2, Save, Search } from 'lucide-react'
+import {
+  Check,
+  ClipboardCopy,
+  ClipboardPaste,
+  Copy,
+  Loader2,
+  RefreshCw,
+  Redo2,
+  Save,
+  Scissors,
+  Search,
+  Undo2,
+} from 'lucide-react'
 import {
   localReadText,
   localWriteText,
@@ -13,6 +26,8 @@ import {
   type EditorTarget,
 } from '@/lib/api'
 import { useApp } from '@/lib/store'
+import { copyQuietly, readClipboardText } from '@/lib/clipboard'
+import { ContextMenu, menuAt, sep, type MenuEntry } from '@/components/ContextMenu'
 
 const readFile = (t: EditorTarget) =>
   t.side === 'remote'
@@ -156,6 +171,168 @@ export function EditorView({ target, tabId }: { target: EditorTarget; tabId?: st
 
   const dirty = content !== original
 
+  /** 编辑器区域的右键菜单 */
+  const [menu, setMenu] = useState<{ x: number; y: number } | null>(null)
+
+  /**
+   * 拿 CodeMirror 的 view 干一件事。
+   *
+   * 每次都现取 `cmViewRef`，不在闭包里存一份 —— 语言包是异步加载的，加载完
+   * `@uiw` 会重建 view，存下来的那份会指向已经作废的实例。
+   * 拿不到就说一句，别静默什么都不做（"点了一动不动"是最难报的 bug）。
+   */
+  const withView = (fn: (view: CodeMirrorView) => void) => {
+    const view = cmViewRef.current
+    if (!view) {
+      setError('编辑器还没就绪，稍后再试')
+      return
+    }
+    fn(view)
+  }
+
+  /** 当前选中的内容（没选就是空串） */
+  const selectionOf = (view: CodeMirrorView) => {
+    const { from, to } = view.state.selection.main
+    return { from, to, text: view.state.sliceDoc(from, to) }
+  }
+
+  /** 用一段文本替换选中内容，光标落到插入内容之后 */
+  const replaceSelection = (view: CodeMirrorView, text: string) => {
+    const { from, to } = view.state.selection.main
+    view.dispatch({
+      changes: { from, to, insert: text },
+      selection: { anchor: from + text.length },
+    })
+    // 菜单关掉之后焦点得回到编辑器，否则接着敲键盘哪儿都不去
+    view.focus()
+  }
+
+  /**
+   * 重新从磁盘（远端则从 SFTP）读一遍，丢掉没保存的改动。
+   *
+   * `originalRef` 必须**同步**更新 —— 关标签的守卫读的是它，等 React 重渲染就晚了。
+   */
+  const reload = () => {
+    useApp.getState().setConfirmPrompt({
+      kind: 'confirm',
+      danger: true,
+      title: '重新载入？',
+      message: '没保存的改动会丢掉，内容回到文件里的那一份。',
+      confirmLabel: '重新载入',
+      onConfirm: () => {
+        void readFile(targetRef.current)
+          .then((text) => {
+            originalRef.current = text
+            setContent(text)
+            setOriginal(text)
+          })
+          .catch((e: unknown) => setError(String(e)))
+      },
+    })
+  }
+
+  /**
+   * 编辑器的右键菜单。
+   *
+   * 这里**必须**自绘：编辑区是 contenteditable，而 App 里那条全局兜底对
+   * contenteditable 是放行的（输入框的原生菜单有用）—— 于是不接管的话，
+   * 用户看到的是「撤销/复制/粘贴」混着「打印/检查」那一份。
+   * 那几项正是这里要的，所以照着做一遍、把不相关的去掉。
+   */
+  const menuItems: MenuEntry[] = [
+    {
+      label: '撤销',
+      hint: 'Ctrl+Z',
+      testId: 'editor-undo',
+      icon: <Undo2 size={13} className="shrink-0 text-ink-tertiary" />,
+      // 没得撤销时灰掉，而不是点了没反应
+      disabled: !cmViewRef.current || undoDepth(cmViewRef.current.state) === 0,
+      onSelect: () => withView((v) => void undo(v)),
+    },
+    {
+      label: '重做',
+      hint: 'Ctrl+Y',
+      testId: 'editor-redo',
+      icon: <Redo2 size={13} className="shrink-0 text-ink-tertiary" />,
+      disabled: !cmViewRef.current || redoDepth(cmViewRef.current.state) === 0,
+      onSelect: () => withView((v) => void redo(v)),
+    },
+    sep(),
+    {
+      label: '剪切',
+      hint: 'Ctrl+X',
+      testId: 'editor-cut',
+      icon: <Scissors size={13} className="shrink-0 text-ink-tertiary" />,
+      onSelect: () =>
+        withView((v) => {
+          const { text } = selectionOf(v)
+          if (!text) return
+          copyQuietly(text)
+          replaceSelection(v, '')
+        }),
+    },
+    {
+      label: '复制',
+      hint: 'Ctrl+C',
+      testId: 'editor-copy',
+      icon: <Copy size={13} className="shrink-0 text-ink-tertiary" />,
+      disabled: !cmViewRef.current || !selectionOf(cmViewRef.current).text,
+      onSelect: () => withView((v) => copyQuietly(selectionOf(v).text)),
+    },
+    {
+      label: '粘贴',
+      hint: 'Ctrl+V',
+      testId: 'editor-paste',
+      icon: <ClipboardPaste size={13} className="shrink-0 text-ink-tertiary" />,
+      onSelect: () =>
+        withView((v) => {
+          void readClipboardText()
+            .then((text) => {
+              if (text) replaceSelection(v, text)
+            })
+            .catch(() => setError('读不到剪贴板内容，试试 Ctrl+V'))
+        }),
+    },
+    {
+      label: '全选',
+      hint: 'Ctrl+A',
+      testId: 'editor-select-all',
+      onSelect: () =>
+        withView((v) => {
+          v.dispatch({ selection: { anchor: 0, head: v.state.doc.length } })
+          v.focus()
+        }),
+    },
+    sep(),
+    {
+      label: '保存',
+      hint: 'Ctrl+S',
+      testId: 'editor-save',
+      icon: <Save size={13} className="shrink-0 text-ink-tertiary" />,
+      disabled: saving || !dirty,
+      onSelect: () => void save(),
+    },
+    {
+      label: '复制文件路径',
+      testId: 'editor-copy-path',
+      icon: <ClipboardCopy size={13} className="shrink-0 text-ink-tertiary" />,
+      onSelect: () => copyQuietly(target.path),
+    },
+    // 没有改动就谈不上"丢弃改动"，整个入口收起来
+    ...(dirty
+      ? [
+          sep(),
+          {
+            label: '重新载入（丢弃改动）',
+            testId: 'editor-reload',
+            danger: true,
+            icon: <RefreshCw size={13} className="shrink-0" />,
+            onSelect: reload,
+          } satisfies MenuEntry,
+        ]
+      : []),
+  ]
+
   if (loading) {
     return (
       <div className="grid h-full place-items-center text-ink-tertiary">
@@ -212,7 +389,17 @@ export function EditorView({ target, tabId }: { target: EditorTarget; tabId?: st
         </button>
       </div>
 
-      <div className="min-h-0 flex-1 overflow-auto">
+      {/*
+        右键菜单挂在这一层而不是 CodeMirror 内部：CM 的 DOM 会被语言包/主题变化重建，
+        挂进去的监听会跟着没。这里 cover 整个编辑区，右键落在哪一行都算。
+      */}
+      <div
+        className="min-h-0 flex-1 overflow-auto"
+        onContextMenu={(e) => {
+          const at = menuAt(e)
+          if (at) setMenu(at)
+        }}
+      >
         <CodeMirror
           value={content}
           height="100%"
@@ -233,6 +420,10 @@ export function EditorView({ target, tabId }: { target: EditorTarget; tabId?: st
           className="h-full text-[13px]"
         />
       </div>
+
+      {menu && (
+        <ContextMenu x={menu.x} y={menu.y} items={menuItems} onClose={() => setMenu(null)} />
+      )}
     </div>
   )
 }

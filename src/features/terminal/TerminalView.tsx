@@ -22,41 +22,12 @@ import {
 import { useApp, DEFAULT_TERM_FONT } from '@/lib/store'
 import { resolveTermTheme } from '@/lib/termSchemes'
 import { FindBar } from './FindBar'
-import { TerminalMenu } from './TerminalMenu'
+import { ContextMenu, menuAt, sep, type MenuEntry } from '@/components/ContextMenu'
+import { copyText, readClipboardText } from '@/lib/clipboard'
 import '@xterm/xterm/css/xterm.css'
 
 /** 多久没收到输出就提示一下，别让用户对着黑屏干等 */
 const NO_DATA_HINT_MS = 5000
-
-/**
- * 复制到剪贴板。
- *
- * 优先用 clipboard API，某些 webview 里它没权限（需要用户手势 + 安全上下文），
- * 这时退回 execCommand —— 老接口虽然废弃，但在 WebView2 里反而更可靠。
- */
-async function copyText(text: string): Promise<boolean> {
-  try {
-    await navigator.clipboard.writeText(text)
-    return true
-  } catch {
-    /* 接着走 fallback */
-  }
-  const ta = document.createElement('textarea')
-  ta.value = text
-  ta.style.position = 'fixed'
-  ta.style.top = '-1000px'
-  ta.style.opacity = '0'
-  document.body.appendChild(ta)
-  ta.select()
-  let ok = false
-  try {
-    ok = document.execCommand('copy')
-  } catch {
-    ok = false
-  }
-  ta.remove()
-  return ok
-}
 
 /**
  * 从剪贴板粘到终端里。
@@ -66,11 +37,11 @@ async function copyText(text: string): Promise<boolean> {
  * 传 getter 而不是实例：读剪贴板是异步的，读完那个终端可能已经卸载了。
  */
 function pasteFromClipboard(getTerm: () => Terminal | null) {
-  void navigator.clipboard
-    .readText()
+  void readClipboardText()
     .then((text) => {
       const term = getTerm()
       if (text && term) term.paste(text)
+      // 剪贴板本来就是空的：不吭声。那不是出错，弹一句红字反而吓人
     })
     .catch(() => {
       // 明确告诉用户还有 Ctrl+V 这条路 —— 别提右键菜单之外的原生菜单，
@@ -108,7 +79,7 @@ export function TerminalView({ paneId, kind, sessionId, onClosed }: Props) {
   const manualReconnectRef = useRef<(() => void) | null>(null)
 
   /** 右键菜单的位置。null = 没开。位置用 clientX/clientY（逻辑像素），直接喂给 fixed 定位 */
-  const [menuAt, setMenuAt] = useState<{ x: number; y: number } | null>(null)
+  const [menu, setMenu] = useState<{ x: number; y: number } | null>(null)
 
   // 字号是外部可改的，得能拿到 term 和 safeFit 才能在变化时应用
   const termRef = useRef<Terminal | null>(null)
@@ -249,8 +220,19 @@ export function TerminalView({ paneId, kind, sessionId, onClosed }: Props) {
     // 先给一行可见的状态，避免"连上了但还没数据"看起来像黑屏
     term.writeln('\x1b[90m正在连接…\x1b[0m')
 
+    /**
+     * 通道 id 就绪（或重连后换了新的）时同步给 ref，并在就绪的那一刻补发排队的输入。
+     *
+     * 排队这件事见 store 的 `queuePaneInput`：右键「在终端里打开这个目录」是
+     * "先开标签、再把 cd 命令敲进去"，而通道是异步开的 —— 早一步发就被丢掉了。
+     */
     const syncChannel = () => {
       channelIdRef.current = channelId
+      if (channelId === null || disposed) return
+      for (const text of useApp.getState().takePaneInput(paneId)) {
+        if (kind === 'local') void localShellInput(channelId, text)
+        else void sshInput(channelId, text)
+      }
     }
 
     const channel = new Channel<ShellEvent>()
@@ -497,6 +479,64 @@ export function TerminalView({ paneId, kind, sessionId, onClosed }: Props) {
    * 开始排的 —— 上下各 8px 就凭空多出一行，终端底部会溢出容器（盖住状态栏再往下露一截）。
    * 远程终端有 PaneGrid 的 overflow-hidden 兜着看不出来，本地 Shell 没有，肉眼可见。
    */
+  /**
+   * 终端这一格的右键菜单。
+   *
+   * 只放**跟终端本身有关**的动作。会话树 / SFTP / 标签栏各有自己的菜单，
+   * 混在一起会变成"在终端里点『删除』，删的是哪个文件"这种说不清的事。
+   */
+  const menuItems: MenuEntry[] = [
+    {
+      label: '复制',
+      hint: 'Ctrl+Shift+C',
+      testId: 'term-copy',
+      // 没选中东西时置灰，而不是点了没反应
+      disabled: !termRef.current?.hasSelection(),
+      onSelect: () => {
+        const term = termRef.current
+        if (term) void copyText(term.getSelection())
+      },
+    },
+    {
+      label: '粘贴',
+      hint: 'Ctrl+Shift+V',
+      testId: 'term-paste',
+      onSelect: () => pasteFromClipboard(() => termRef.current),
+    },
+    { label: '全选', testId: 'term-select-all', onSelect: () => termRef.current?.selectAll() },
+    {
+      label: '清屏',
+      testId: 'term-clear',
+      // 清屏只是把屏上的内容推进回滚（还在），所以不问
+      onSelect: () => termRef.current?.clear(),
+    },
+    {
+      label: '查找…',
+      hint: 'Ctrl+Shift+F',
+      testId: 'term-find',
+      onSelect: () => useApp.getState().toggleFind(),
+    },
+    sep(),
+    {
+      label: '重置终端',
+      testId: 'term-reset',
+      danger: true,
+      onSelect: () => {
+        const term = termRef.current
+        if (!term) return
+        // 回滚历史丢了就找不回来，所以问一句（远端不受影响，别让人以为会重启会话）
+        useApp.getState().setConfirmPrompt({
+          kind: 'confirm',
+          title: '重置终端',
+          message: '会清掉这个终端的回滚历史。远端那边的会话不受影响，继续吗？',
+          confirmLabel: '重置',
+          danger: true,
+          onConfirm: () => term.reset(),
+        })
+      },
+    },
+  ]
+
   return (
     // padding 那一圈用终端自己的底色，而不是画布色：换了非默认配色之后，
     // 画布色会在终端周围留一圈对不上的边。应用默认那套里 --term-bg 本就等于
@@ -506,62 +546,21 @@ export function TerminalView({ paneId, kind, sessionId, onClosed }: Props) {
       className="relative h-full w-full overflow-hidden p-2"
       style={{ background: xtermTheme.background }}
       onContextMenu={(e) => {
-        // 菜单自己身上的右键别再重开一次（否则菜单会跳到光标下）
-        if ((e.target as HTMLElement).closest('[role="menu"]')) return
-        // xterm 自己也监听右键，但它只把选中文本塞进 textarea 好让**原生菜单**的复制能用，
-        // 并不拦原生菜单 —— 想换成自绘菜单就得自己 preventDefault
-        e.preventDefault()
-        setMenuAt({ x: e.clientX, y: e.clientY })
+        // menuAt 里做掉两件事：挡掉"在菜单自身上再右键"（否则菜单会跳到光标底下），
+        // 以及 preventDefault —— xterm 自己也监听右键，但它只把选中文本塞进隐藏的
+        // textarea 好让**原生菜单**的复制能用，并不拦原生菜单，想换成自绘的就得自己拦
+        const at = menuAt(e)
+        if (at) setMenu(at)
       }}
     >
       <div ref={hostRef} className="h-full w-full" />
       {findOpen && <FindBar termRef={termRef} onClose={() => useApp.getState().closeFind()} />}
-      {menuAt && (
-        <TerminalMenu
-          x={menuAt.x}
-          y={menuAt.y}
-          onClose={() => setMenuAt(null)}
-          items={[
-            {
-              label: '复制',
-              hint: 'Ctrl+Shift+C',
-              // 没选中东西时置灰，而不是点了没反应
-              disabled: !termRef.current?.hasSelection(),
-              onSelect: () => {
-                const term = termRef.current
-                if (term) void copyText(term.getSelection())
-              },
-            },
-            {
-              label: '粘贴',
-              hint: 'Ctrl+Shift+V',
-              onSelect: () => pasteFromClipboard(() => termRef.current),
-            },
-            { label: '全选', onSelect: () => termRef.current?.selectAll() },
-            { label: '清屏', onSelect: () => termRef.current?.clear() },
-            {
-              label: '重置终端',
-              danger: true,
-              onSelect: () => {
-                const term = termRef.current
-                if (!term) return
-                // 回滚历史丢了就找不回来，所以问一句（远端不受影响，别让人以为会重启会话）
-                useApp.getState().setConfirmPrompt({
-                  kind: 'confirm',
-                  title: '重置终端',
-                  message: '会清掉这个终端的回滚历史。远端那边的会话不受影响，继续吗？',
-                  confirmLabel: '重置',
-                  danger: true,
-                  onConfirm: () => term.reset(),
-                })
-              },
-            },
-            {
-              label: '查找…',
-              hint: 'Ctrl+Shift+F',
-              onSelect: () => useApp.getState().toggleFind(),
-            },
-          ]}
+      {menu && (
+        <ContextMenu
+          x={menu.x}
+          y={menu.y}
+          onClose={() => setMenu(null)}
+          items={menuItems}
         />
       )}
     </div>

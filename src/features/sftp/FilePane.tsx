@@ -85,6 +85,14 @@ interface FilePaneProps {
    * 所以内部拖拽改用鼠标事件自己实现，谁都不耽误。
    */
   onRowMouseDown: (e: ReactMouseEvent, entry: FileEntry) => void
+  /**
+   * 在某一行上右键。
+   *
+   * 触发**之前**已经确保那一行在选中集合里（见下面 onContextMenu）——
+   * 不这样的话，菜单里的「下载 / 删除」会作用在用户没在看的另外几个文件上，
+   * 而且是在删东西的时候才发现。
+   */
+  onRowMenu?: (e: ReactMouseEvent, entry: FileEntry) => void
   /** 当前是不是拖拽的落点，用来画高亮框 */
   dropActive: boolean
   paneRef: React.Ref<HTMLDivElement>
@@ -149,6 +157,7 @@ export function FilePane({
   onEdit,
   onTransfer,
   onRowMouseDown,
+  onRowMenu,
   sort,
   onSort,
   dropActive,
@@ -304,6 +313,12 @@ export function FilePane({
                       }
                     }}
                     onDoubleClick={() => onActivate(entry)}
+                    onContextMenu={(e) => {
+                      // 右键的那一行不在选中集合里，就先把选中切到它 ——
+                      // 菜单里的动作（下载、删除）都是按选中集合来的
+                      if (!active) onSelect([entry.path])
+                      onRowMenu?.(e, entry)
+                    }}
                     className={`cursor-default border-b border-hairline/40 transition-colors ${
                       active ? 'bg-accent/15' : 'hover:bg-surface-1'
                     }`}

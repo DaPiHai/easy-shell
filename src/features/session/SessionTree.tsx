@@ -4,6 +4,7 @@ import {
   ChevronDown,
   ChevronRight,
   FileCode2,
+  FolderInput,
   FolderOpen,
   FolderPlus,
   ListChecks,
@@ -17,8 +18,10 @@ import {
   X,
 } from 'lucide-react'
 import { useApp, panesOf, terminalTab } from '@/lib/store'
-import type { HostRecord } from '@/lib/api'
+import type { GroupRecord, HostRecord } from '@/lib/api'
 import { hostEndpoint, hostLabel, matchesHost, tagTone } from '@/lib/hosts'
+import { copyQuietly } from '@/lib/clipboard'
+import { ContextMenu, menuAt, sep, type MenuEntry } from '@/components/ContextMenu'
 import { connectHost } from './connectHost'
 
 /** 主机行下面那排标签最多摆几个。再多给个 `+N`，完整清单在 tooltip 里 */
@@ -41,6 +44,7 @@ export function SessionTree() {
     openLocalFileDialog,
     addTab,
     openBatchTab,
+    openNewHostIn,
     removeHost,
     setConfirmPrompt,
     promptNewGroup,
@@ -175,6 +179,139 @@ export function SessionTree() {
     if (p.hostId && p.sessionId && !deadPanes[p.id]) connectedHosts.add(p.hostId)
   }
 
+  /**
+   * 右键菜单：开在哪儿、针对谁。
+   *
+   * 「复制地址 / 复制名称 / 移入分组」这些动作本来就存在，只是以前要么得先点进对话框、
+   * 要么得靠拖动 —— 右键是它们唯一说得清的入口。菜单里的项按 `kind` 分支生成，
+   * 两种行的菜单差别很大，合成一个数组只会让每一项都要判类型。
+   */
+  const [menu, setMenu] = useState<
+    | { x: number; y: number; kind: 'host'; host: HostRecord }
+    | { x: number; y: number; kind: 'group'; group: GroupRecord }
+    | { x: number; y: number; kind: 'ungrouped' }
+    | null
+  >(null)
+
+  /** 主机行的菜单 */
+  const hostMenu = (host: HostRecord): MenuEntry[] => {
+    const tags = host.tags ?? []
+    return [
+      {
+        label: '连接（新标签页）',
+        testId: 'host-connect',
+        icon: <SquareTerminal size={13} className="shrink-0 text-ink-tertiary" />,
+        onSelect: () => connect(host),
+      },
+      {
+        label: '打开 SFTP',
+        testId: 'host-sftp',
+        icon: <FolderOpen size={13} className="shrink-0 text-ink-tertiary" />,
+        // 有活着的连接就复用，没有才新建 —— 跟工具栏那个按钮同一条路径
+        onSelect: () => openSftp(host),
+      },
+      {
+        label: '批量执行（勾上这台）',
+        testId: 'host-batch',
+        icon: <ListChecks size={13} className="shrink-0 text-ink-tertiary" />,
+        onSelect: () => openBatchTab([host.id]),
+      },
+      sep(),
+      {
+        label: '编辑…',
+        testId: 'host-edit',
+        icon: <Pencil size={13} className="shrink-0 text-ink-tertiary" />,
+        onSelect: () => editHost(host),
+      },
+      {
+        label: '移入分组',
+        testId: 'host-move-group',
+        icon: <FolderInput size={13} className="shrink-0 text-ink-tertiary" />,
+        // 一个分组都没有时整项灰掉并说明原因 —— 展开一个只有「未分组」的子菜单
+        // 只会让人以为分组功能坏了
+        disabled: groups.length === 0,
+        hint: groups.length === 0 ? '还没有分组' : undefined,
+        children:
+          groups.length === 0
+            ? []
+            : [
+                { label: '未分组', checked: !host.groupId, onSelect: () => moveToGroup(host.id, null) },
+                ...groups.map((g) => ({
+                  label: g.name,
+                  checked: host.groupId === g.id,
+                  onSelect: () => moveToGroup(host.id, g.id),
+                })),
+              ],
+      },
+      sep(),
+      {
+        label: '复制地址',
+        testId: 'host-copy-address',
+        hint: hostEndpoint(host),
+        // 提示里回显要复制的内容，省得复制完还得找地方粘一下才知道对不对
+        onSelect: () => copyQuietly(hostEndpoint(host)),
+      },
+      {
+        label: '复制名称',
+        testId: 'host-copy-name',
+        // 没起过名就没什么可复制的，灰掉而不是复制一个空串
+        disabled: !host.name,
+        onSelect: () => copyQuietly(host.name),
+      },
+      ...(tags.length > 0
+        ? [
+            {
+              label: '复制标签',
+              testId: 'host-copy-tags',
+              onSelect: () => copyQuietly(tags.join(', ')),
+            } satisfies MenuEntry,
+          ]
+        : []),
+      sep(),
+      {
+        label: '删除主机',
+        testId: 'host-delete',
+        danger: true,
+        icon: <Trash2 size={13} className="shrink-0" />,
+        onSelect: () => deleteHost(host),
+      },
+    ]
+  }
+
+  /** 分组行的菜单。未分组那一块没有记录，只给「在这里新建会话」 */
+  const groupMenu = (group: GroupRecord | null): MenuEntry[] => [
+    {
+      label: group ? `在「${group.name}」里新建会话` : '在未分组里新建会话',
+      testId: 'group-new-host',
+      icon: <Plus size={13} className="shrink-0 text-ink-tertiary" />,
+      // 预选分组再开门：不然新建完还得把那台机器拖进来，漏一步就落进未分组
+      onSelect: () => openNewHostIn(group?.id ?? null),
+    },
+    ...(group
+      ? [
+          {
+            label: '重命名分组',
+            testId: 'group-rename',
+            icon: <Pencil size={13} className="shrink-0 text-ink-tertiary" />,
+            onSelect: () => renameGroup(group.id, group.name),
+          } satisfies MenuEntry,
+          {
+            label: '复制分组名',
+            testId: 'group-copy-name',
+            onSelect: () => copyQuietly(group.name),
+          } satisfies MenuEntry,
+          sep(),
+          {
+            label: '删除分组',
+            testId: 'group-delete',
+            danger: true,
+            icon: <Trash2 size={13} className="shrink-0" />,
+            onSelect: () => deleteGroup(group.id, group.name),
+          } satisfies MenuEntry,
+        ]
+      : []),
+  ]
+
   const renderHost = (host: HostRecord) => {
     const tags = host.tags ?? []
     const connected = connectedHosts.has(host.id)
@@ -196,6 +333,12 @@ export function SessionTree() {
           e.dataTransfer.effectAllowed = 'move'
         }}
         className="group rounded pl-5 pr-1 text-ink-muted transition-colors hover:bg-surface-2"
+        // 挂在整行上（含标签那一行）：行里空的地方右键也该出菜单，
+        // 否则用户得精确点在名字上，而这一行本来就没多少像素
+        onContextMenu={(e) => {
+          const at = menuAt(e)
+          if (at) setMenu({ ...at, kind: 'host', host })
+        }}
       >
         <div className="flex h-7 items-center">
           <div
@@ -374,6 +517,10 @@ export function SessionTree() {
                     e.preventDefault()
                   }
                 }}
+                onContextMenu={(e) => {
+                  const at = menuAt(e)
+                  if (at) setMenu({ ...at, kind: 'group', group })
+                }}
                 onDrop={(e) => {
                   const hostId = e.dataTransfer.getData('application/x-easy-shell-host')
                   if (hostId) {
@@ -428,7 +575,13 @@ export function SessionTree() {
               }
             }}
           >
-            <div className="flex h-7 items-center px-1 text-[12px] font-medium text-ink-subtle">
+            <div
+              className="flex h-7 items-center px-1 text-[12px] font-medium text-ink-subtle"
+              onContextMenu={(e) => {
+                const at = menuAt(e)
+                if (at) setMenu({ ...at, kind: 'ungrouped' })
+              }}
+            >
               未分组
             </div>
             <div className="mt-0.5">{ungrouped.map(renderHost)}</div>
@@ -506,6 +659,23 @@ export function SessionTree() {
           设置
         </button>
       </div>
+
+      {/*
+        会话树的两套右键菜单。主机行和分组行的动作差别很大（前者管一台机器、
+        后者管一个容器），所以按 `kind` 各生成一份，而不是拉一个通用列表再逐项判类型
+      */}
+      {menu && (
+        <ContextMenu
+          x={menu.x}
+          y={menu.y}
+          onClose={() => setMenu(null)}
+          items={
+            menu.kind === 'host'
+              ? hostMenu(menu.host)
+              : groupMenu(menu.kind === 'group' ? menu.group : null)
+          }
+        />
+      )}
     </aside>
   )
 }

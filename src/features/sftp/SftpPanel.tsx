@@ -1,5 +1,5 @@
 import { type MouseEvent as ReactMouseEvent, useCallback, useEffect, useRef, useState } from 'react'
-import { Eye, EyeOff } from 'lucide-react'
+import { Download, Eye, EyeOff, FileCode2, FolderPlus, PencilLine, SquareTerminal, Trash2, Upload } from 'lucide-react'
 import {
   isDesktop,
   localCopy,
@@ -19,8 +19,10 @@ import {
   sftpUpload,
   type FileEntry,
 } from '@/lib/api'
-import { useApp } from '@/lib/store'
-import { FilePane, type Side, type SortKey, type SortState } from './FilePane'
+import { liveLocalPane, livePaneOfSession, terminalTab, useApp } from '@/lib/store'
+import { copyQuietly } from '@/lib/clipboard'
+import { ContextMenu, menuAt, sep, type MenuEntry } from '@/components/ContextMenu'
+import { FilePane, parentPath, type Side, type SortKey, type SortState } from './FilePane'
 import { TransferQueue } from './TransferQueue'
 import type { ConflictPolicy } from '@/lib/api'
 
@@ -59,6 +61,11 @@ export function SftpPanel({ sessionId }: Props) {
   const [sort, setSort] = useState<SortState>({ key: 'name', dir: 'asc' })
   /** 远端栏是否显示点文件（.git/.env 这类）。默认显示，与改造前一致 */
   const [showHidden, setShowHidden] = useState(true)
+
+  /** 文件行的右键菜单：开在哪儿、哪一栏、点的是哪一项 */
+  const [menu, setMenu] = useState<
+    { x: number; y: number; side: Side; entry: FileEntry } | null
+  >(null)
 
   const toggleSort = (key: SortKey) =>
     setSort((prev) =>
@@ -482,6 +489,155 @@ export function SftpPanel({ sessionId }: Props) {
     })
   }
 
+  /**
+   * 把路径包成 shell 里的**字面量**。
+   *
+   * 不用双引号是被真实路径教育过的：Windows 的 `C:\$Recycle.Bin` 在 PowerShell 的
+   * 双引号里会把 `$Recycle` 当变量吃掉，POSIX 那边 `$`、反引号同理。
+   * 单引号在两个世界里都是字面量，只有"路径本身带单引号"时的转义规则不同：
+   * PowerShell 连着写两个，POSIX 是 `'\''`。
+   *
+   * 远端一律按 POSIX 算 —— ssh 过去的那一端是 sh 系。
+   */
+  const quotePath = (dir: string, side: Side): string => {
+    if (side === 'local' && navigator.userAgent.includes('Windows')) {
+      return `'${dir.replace(/'/g, "''")}'`
+    }
+    return `'${dir.replace(/'/g, "'\\''")}'`
+  }
+
+  /**
+   * 在终端里切到某个目录。
+   *
+   * 远端必须**已经有一条活着的终端**才做 —— 建连要认证（还可能撞上主机密钥确认），
+   * 不能在右键后面偷偷替你拨一次。本地 Shell 没有认证这回事，没有就顺手开一个，
+   * cd 命令排队等到通道就绪再发（见 store 的 `queuePaneInput`）。
+   */
+  const openInTerminal = (side: Side, dir: string) => {
+    const s = useApp.getState()
+    const command = `cd ${quotePath(dir, side)}\n`
+    if (side === 'remote') {
+      const pane = livePaneOfSession(sessionId)
+      if (!pane) {
+        setError('这台主机没有开着的终端 —— 先连上它（或在它上面开个标签）再试')
+        return
+      }
+      s.terminalSinks[pane.id]?.(command)
+      return
+    }
+    const live = liveLocalPane()
+    if (live) {
+      s.terminalSinks[live.id]?.(command)
+      return
+    }
+    // 新开一个本地 Shell。`terminalTab` 生成的 pane id 之后不会再变（addTab 只补 tab.id），
+    // 所以可以现在就把它排进队列
+    const spec = terminalTab({ title: '本地 Shell', kind: 'local' })
+    s.addTab(spec)
+    const paneId = spec.panes?.[0]?.id
+    if (paneId) s.queuePaneInput(paneId, command)
+  }
+
+  /**
+   * 文件行的右键菜单。
+   *
+   * 动作都作用在**选中集合**上（FilePane 保证右键那一行一定在里面），
+   * 所以标签里要带上数量 —— 「删除」后面跟着「3 项」和只有一项，是两次完全不同的确认。
+   */
+  const fileMenu = (side: Side, entry: FileEntry): MenuEntry[] => {
+    const picked = selected[side]
+    const many = picked.length
+    const pool = side === 'local' ? localEntries : remoteEntries
+    const chosen = pool.filter((e) => picked.includes(e.path))
+    /** 要"在终端里打开"的目录：目录自己，文件则取它所在的目录 */
+    const dir = entry.isDir ? entry.path : (parentPath(entry.path) ?? '')
+    const only = many === 1
+    return [
+      {
+        label: entry.isDir ? '打开' : side === 'remote' ? '下载到本地' : '上传到远程',
+        testId: 'file-activate',
+        hint: entry.isDir ? undefined : '双击',
+        onSelect: () => activate(side, entry),
+      },
+      sep(),
+      {
+        label:
+          side === 'local'
+            ? `上传${many > 1 ? ` ${many} 项` : ''}`
+            : `下载${many > 1 ? ` ${many} 项` : ''}`,
+        testId: 'file-transfer',
+        icon:
+          side === 'local' ? (
+            <Upload size={13} className="shrink-0 text-ink-tertiary" />
+          ) : (
+            <Download size={13} className="shrink-0 text-ink-tertiary" />
+          ),
+        onSelect: () =>
+          side === 'local'
+            ? void uploadPaths(picked)
+            : void download(chosen.length > 0 ? chosen : [entry]),
+      },
+      {
+        label: '用内置编辑器打开',
+        testId: 'file-edit',
+        icon: <FileCode2 size={13} className="shrink-0 text-ink-tertiary" />,
+        // 一次只能编辑一个文件，选了一堆时先灰掉，别猜用户想要哪个
+        disabled: entry.isDir || !only,
+        hint: entry.isDir ? '这是目录' : !only ? `选了 ${many} 项` : undefined,
+        onSelect: () => openEditor(side),
+      },
+      {
+        label: '重命名',
+        testId: 'file-rename',
+        icon: <PencilLine size={13} className="shrink-0 text-ink-tertiary" />,
+        disabled: !only,
+        hint: only ? undefined : `选了 ${many} 项`,
+        onSelect: () => rename(side),
+      },
+      {
+        label: '新建目录',
+        testId: 'file-mkdir',
+        icon: <FolderPlus size={13} className="shrink-0 text-ink-tertiary" />,
+        onSelect: () => mkdir(side),
+      },
+      {
+        label: `删除${many > 1 ? ` ${many} 项` : ''}`,
+        testId: 'file-delete',
+        danger: true,
+        icon: <Trash2 size={13} className="shrink-0" />,
+        onSelect: () => remove(side),
+      },
+      sep(),
+      {
+        label: '复制路径',
+        testId: 'file-copy-path',
+        // 选中多个时每行一条 —— 这是唯一能把整批路径一次拿去用的形式
+        onSelect: () => copyQuietly(picked.join('\n')),
+      },
+      {
+        label: '复制名称',
+        testId: 'file-copy-name',
+        onSelect: () => copyQuietly(entry.name),
+      },
+      sep(),
+      {
+        label:
+          side === 'remote'
+            ? entry.isDir
+              ? '在终端里 cd 过去'
+              : '在终端里 cd 到所在目录'
+            : entry.isDir
+              ? '在终端里打开这个目录'
+              : '在终端里打开所在目录',
+        testId: 'file-open-terminal',
+        icon: <SquareTerminal size={13} className="shrink-0 text-ink-tertiary" />,
+        // 根目录没有父目录可去（parentPath 给 null），那就没什么可 cd 的
+        disabled: !dir,
+        onSelect: () => openInTerminal(side, dir),
+      },
+    ]
+  }
+
   return (
     <div className="flex h-full flex-col">
       <div className="flex min-h-0 flex-1">
@@ -504,6 +660,10 @@ export function SftpPanel({ sessionId }: Props) {
           onEdit={() => openEditor('local')}
           onTransfer={() => void uploadPaths(selected.local)}
           onRowMouseDown={beginDrag('local')}
+          onRowMenu={(e, entry) => {
+            const at = menuAt(e)
+            if (at) setMenu({ ...at, side: 'local', entry })
+          }}
           dropActive={dropSide === 'local'}
           paneRef={(el) => {
             paneRefs.current.local = el
@@ -533,6 +693,10 @@ export function SftpPanel({ sessionId }: Props) {
             void download(remoteEntries.filter((e) => selected.remote.includes(e.path)))
           }
           onRowMouseDown={beginDrag('remote')}
+          onRowMenu={(e, entry) => {
+            const at = menuAt(e)
+            if (at) setMenu({ ...at, side: 'remote', entry })
+          }}
           dropActive={dropSide === 'remote'}
           paneRef={(el) => {
             paneRefs.current.remote = el
@@ -565,6 +729,15 @@ export function SftpPanel({ sessionId }: Props) {
         >
           {ghost.label}
         </div>
+      )}
+
+      {menu && (
+        <ContextMenu
+          x={menu.x}
+          y={menu.y}
+          items={fileMenu(menu.side, menu.entry)}
+          onClose={() => setMenu(null)}
+        />
       )}
     </div>
   )
