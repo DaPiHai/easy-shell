@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react'
 import {
   ArrowRightLeft,
   ChevronDown,
@@ -8,7 +8,6 @@ import {
   FolderOpen,
   FolderPlus,
   ListChecks,
-  PanelLeftClose,
   Pencil,
   Plus,
   ScrollText,
@@ -28,6 +27,9 @@ import { connectHost } from './connectHost'
 /** 主机行下面那排标签最多摆几个。再多给个 `+N`，完整清单在 tooltip 里 */
 const MAX_ROW_TAGS = 4
 
+/** 拖拽判定阈值：手抖点一下不该被当成拖动（PaneGrid / TabBar 同款） */
+const DRAG_THRESHOLD = 5
+
 export function SessionTree() {
   const {
     groups,
@@ -35,7 +37,6 @@ export function SessionTree() {
     collapsed,
     toggleGroup,
     sidebarCollapsed,
-    toggleSidebar,
     tabs,
     deadPanes,
     setConnectOpen,
@@ -75,17 +76,18 @@ export function SessionTree() {
   }, [hosts])
 
   /** 连上之后开一条标签。失败路径（密钥不符 / 算法不兼容）在 connectHost 里统一处理 */
-  const connect = (host: HostRecord, kind: 'terminal' | 'sftp' = 'terminal') => {
+  const connect = useCallback((host: HostRecord, kind: 'terminal' | 'sftp' = 'terminal') => {
     void connectHost(host, (sessionId) => {
+      const s = useApp.getState()
       const label = hostLabel(host)
       const title = kind === 'sftp' ? `${label} · 文件` : label
-      addTab(
+      s.addTab(
         kind === 'sftp'
           ? { title, kind, sessionId, hostId: host.id }
           : terminalTab({ title, sessionId, hostId: host.id }),
       )
     })
-  }
+  }, [])
 
   /**
    * 打开这台主机的 SFTP 双栏。
@@ -150,10 +152,110 @@ export function SessionTree() {
   }
 
   /** 把主机拖到某个分组上 = 移入该分组 */
-  const moveToGroup = (hostId: string, groupId: string | null) => {
-    const host = hosts.find((h) => h.id === hostId)
+  const moveToGroup = useCallback((hostId: string, groupId: string | null) => {
+    const s = useApp.getState()
+    const host = s.hosts.find((h) => h.id === hostId)
     if (!host || host.groupId === groupId) return
-    void useApp.getState().saveHost({ ...host, groupId })
+    void s.saveHost({ ...host, groupId })
+  }, [])
+
+  /**
+   * 「拖主机换分组」这一轮拖拽。起点记在 ref 里，视觉状态（源行半透明、
+   * 落点高亮、跟手浮签）在 state 里。
+   *
+   * **不能用 HTML5 拖拽**：`tauri.conf.json` 开着 `dragDropEnabled: true`，
+   * wry 装的 IDropTarget 会让内部 HTML5 拖拽在 Windows 上整体失效
+   * （PaneGrid 文件头有详细记载）—— 改造前这里就是 `draggable` + `onDragOver/onDrop`，
+   * 打包版里拖了没有任何反应。照 PaneGrid / TabBar 的手法用鼠标事件自己实现。
+   */
+  const dragRef = useRef<{ hostId: string; ox: number; oy: number; active: boolean } | null>(null)
+  const [dragId, setDragId] = useState<string | null>(null)
+  /** 落点那一块的 `data-group-id`（'' = 未分组）；undefined = 不在任何落点上 */
+  const [dropTarget, setDropTarget] = useState<string | undefined>(undefined)
+  const [ghost, setGhost] = useState<{ x: number; y: number } | null>(null)
+
+  const endDrag = useCallback(() => {
+    dragRef.current = null
+    document.body.style.userSelect = ''
+    setDragId(null)
+    setDropTarget(undefined)
+    setGhost(null)
+  }, [])
+
+  useEffect(() => {
+    const onMove = (e: MouseEvent) => {
+      const st = dragRef.current
+      if (!st) return
+      // 松手在窗口外面时 webview 收不到 mouseup：靠"当前没按着键"把这一轮收掉，
+      // 否则源行会一直是半透明的、高亮也留在那儿
+      if (e.buttons === 0) {
+        endDrag()
+        return
+      }
+      if (!st.active) {
+        if (Math.abs(e.clientX - st.ox) + Math.abs(e.clientY - st.oy) < DRAG_THRESHOLD) return
+        st.active = true
+        document.body.style.userSelect = 'none'
+        setDragId(st.hostId)
+      }
+      // 落点按"哪一块分组"判：分组块与未分组块都带 data-group-id（'' = 未分组）
+      const zone = document.elementFromPoint(e.clientX, e.clientY)?.closest('[data-group-id]')
+      setDropTarget(zone ? (zone as HTMLElement).dataset.groupId : undefined)
+      setGhost({ x: e.clientX, y: e.clientY })
+    }
+    const onUp = (e: MouseEvent) => {
+      const st = dragRef.current
+      if (!st) return
+      const moved = st.active
+      const el = e.target as HTMLElement | null
+      const zone = el?.closest('[data-group-id]')
+      const target = zone ? (zone as HTMLElement).dataset.groupId : undefined
+      endDrag()
+      if (moved) {
+        // 落在空白处 = 取消；落回自己那组时 moveToGroup 自己会 no-op
+        if (target === undefined) return
+        moveToGroup(st.hostId, target === '' ? null : target)
+        return
+      }
+      /**
+       * 没拖动就是点击：标题点了就连。**故意不用 onClick** —— 拖完（哪怕拖回原地
+       * 松手）浏览器照样会补一次 click，挂 onClick 的话"拖一下就蹦出个连接"。
+       * 这里在 mouseup 里按 `moved` 判，落点还在标题上才算（PaneGrid 同款）。
+       */
+      if (el?.closest('[data-host-title]')) {
+        const host = useApp.getState().hosts.find((h) => h.id === st.hostId)
+        if (host) connect(host)
+      }
+    }
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && dragRef.current) endDrag()
+    }
+    // 指针离开窗口 / 窗口失焦：这一轮拖拽作废（松在窗口外的 mouseup 到不了这里）
+    const onLeave = () => {
+      if (dragRef.current) endDrag()
+    }
+    window.addEventListener('mousemove', onMove)
+    window.addEventListener('mouseup', onUp)
+    window.addEventListener('keydown', onKeyDown)
+    document.addEventListener('mouseleave', onLeave)
+    window.addEventListener('blur', onLeave)
+    return () => {
+      window.removeEventListener('mousemove', onMove)
+      window.removeEventListener('mouseup', onUp)
+      window.removeEventListener('keydown', onKeyDown)
+      document.removeEventListener('mouseleave', onLeave)
+      window.removeEventListener('blur', onLeave)
+      document.body.style.userSelect = ''
+    }
+  }, [endDrag, moveToGroup, connect])
+
+  /** 在主机行上按下：起一轮"换分组"拖拽（位移过阈值才算，见 onMove） */
+  const beginDrag = (host: HostRecord) => (e: ReactMouseEvent) => {
+    // 只认左键；行里的按钮和标签 chip 自己处理点击，别在它们身上起拖
+    if (e.button !== 0) return
+    const t = e.target as HTMLElement
+    if (t.closest('button') || t.closest('[data-tag-chip]')) return
+    dragRef.current = { hostId: host.id, ox: e.clientX, oy: e.clientY, active: false }
   }
 
   const pickTag = (tag: string) => setActiveTag((cur) => (cur === tag ? null : tag))
@@ -325,12 +427,10 @@ export function SessionTree() {
     return (
       <div
         key={host.id}
-        draggable
-        onDragStart={(e) => {
-          e.dataTransfer.setData('application/x-easy-shell-host', host.id)
-          e.dataTransfer.effectAllowed = 'move'
-        }}
-        className="group rounded pl-5 pr-1 text-ink-muted transition-colors hover:bg-surface-2"
+        onMouseDown={beginDrag(host)}
+        className={`group rounded pl-5 pr-1 text-ink-muted transition-colors hover:bg-surface-2 ${
+          dragId === host.id ? 'opacity-50' : ''
+        }`}
         // 挂在整行上（含标签那一行）：行里空的地方右键也该出菜单，
         // 否则用户得精确点在名字上，而这一行本来就没多少像素
         onContextMenu={(e) => {
@@ -340,9 +440,10 @@ export function SessionTree() {
       >
         <div className="flex h-7 items-center">
           <div
-            onClick={() => void connect(host)}
-            // 这个 title 是探针（tools/probe.mjs）找主机行用的锚点，改 UI 时别顺手去掉
-            title="点击连接"
+            // 点击连接由 window mouseup 判定（见 onUp）：拖完浏览器会补一次 click，
+            // 挂 onClick 的话拖一下就蹦出个连接框
+            data-host-title={host.id}
+            title="点击连接，拖动换分组"
             className="flex min-w-0 flex-1 cursor-pointer items-center gap-1.5"
           >
             {/*
@@ -462,14 +563,7 @@ export function SessionTree() {
           >
             <Plus size={14} />
           </button>
-          {/* 收起侧栏。收起后入口在状态栏，这里只管关 */}
-          <button
-            onClick={toggleSidebar}
-            className="grid h-5 w-5 place-items-center rounded text-ink-subtle transition-colors hover:bg-surface-3 hover:text-ink"
-            title="收起侧栏（Ctrl+Shift+B）"
-          >
-            <PanelLeftClose size={14} />
-          </button>
+          {/* 收起侧栏的入口在全宽顶栏左上角（App.tsx），这里不再放 —— 收起后就找不着了 */}
         </div>
       </div>
 
@@ -527,22 +621,12 @@ export function SessionTree() {
           return (
             <div key={group.id} className="mb-1" data-group-id={group.id}>
               <div
-                className="group flex h-7 items-center gap-1 rounded px-1 text-ink-subtle transition-colors hover:bg-surface-2"
-                onDragOver={(e) => {
-                  if (e.dataTransfer.types.includes('application/x-easy-shell-host')) {
-                    e.preventDefault()
-                  }
-                }}
+                className={`group flex h-7 items-center gap-1 rounded px-1 text-ink-subtle transition-colors hover:bg-surface-2 ${
+                  dropTarget === group.id ? 'bg-accent/10 ring-1 ring-accent' : ''
+                }`}
                 onContextMenu={(e) => {
                   const at = menuAt(e)
                   if (at) setMenu({ ...at, kind: 'group', group })
-                }}
-                onDrop={(e) => {
-                  const hostId = e.dataTransfer.getData('application/x-easy-shell-host')
-                  if (hostId) {
-                    e.preventDefault()
-                    moveToGroup(hostId, group.id)
-                  }
                 }}
               >
                 <button
@@ -578,21 +662,11 @@ export function SessionTree() {
             className="mb-1"
             // 未分组这一块没有 id，用空串占位 —— 探针按 data-group-id 数每个组里有几行
             data-group-id=""
-            onDragOver={(e) => {
-              if (e.dataTransfer.types.includes('application/x-easy-shell-host')) {
-                e.preventDefault()
-              }
-            }}
-            onDrop={(e) => {
-              const hostId = e.dataTransfer.getData('application/x-easy-shell-host')
-              if (hostId) {
-                e.preventDefault()
-                moveToGroup(hostId, null)
-              }
-            }}
           >
             <div
-              className="flex h-7 items-center px-1 text-[12px] font-medium text-ink-subtle"
+              className={`flex h-7 items-center px-1 text-[12px] font-medium text-ink-subtle ${
+                dropTarget === '' ? 'rounded bg-accent/10 ring-1 ring-accent' : ''
+              }`}
               onContextMenu={(e) => {
                 const at = menuAt(e)
                 if (at) setMenu({ ...at, kind: 'ungrouped' })
@@ -675,6 +749,28 @@ export function SessionTree() {
           设置
         </button>
       </div>
+
+      {/*
+        拖拽浮签：跟着光标说清"要把它挪去哪"。fixed + pointer-events-none，
+        不参与布局也吃不到 mousemove（落点判的是它下面的元素）
+      */}
+      {dragId && ghost && (() => {
+        const dragged = hosts.find((h) => h.id === dragId)
+        return (
+        <div
+          className="pointer-events-none fixed z-50 rounded border border-hairline bg-surface-2 px-2 py-1 text-[11px] text-ink"
+          style={{ left: ghost.x + 12, top: ghost.y + 12 }}
+        >
+          {dropTarget === undefined
+            ? dragged
+              ? `移动「${hostLabel(dragged)}」`
+              : '移动主机'
+            : dropTarget === ''
+              ? '移到未分组'
+              : `移动到「${groups.find((g) => g.id === dropTarget)?.name ?? ''}」`}
+        </div>
+        )
+      })()}
 
       {/*
         会话树的两套右键菜单。主机行和分组行的动作差别很大（前者管一台机器、

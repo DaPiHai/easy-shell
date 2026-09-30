@@ -1,4 +1,5 @@
 import { useEffect } from 'react'
+import { PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen } from 'lucide-react'
 import { SessionTree } from '@/features/session/SessionTree'
 import { TabBar } from '@/features/terminal/TabBar'
 import { TerminalView } from '@/features/terminal/TerminalView'
@@ -15,9 +16,10 @@ import { SnippetsDialog } from '@/features/snippets/SnippetsDialog'
 import { EditorView } from '@/features/editor/EditorView'
 import { BatchPanel } from '@/features/batch/BatchPanel'
 import { PaneBatchBar } from '@/features/batch/PaneBatchBar'
+import { RightPanel } from '@/features/panel/RightPanel'
 import { UnlockScreen } from '@/features/session/UnlockScreen'
 import { EmptyState, StatusBar } from '@/components/EmptyState'
-import { useApp, DEFAULT_FONT_SIZE, layoutOf, panesOf } from '@/lib/store'
+import { useApp, DEFAULT_FONT_SIZE, panesOf, specOf } from '@/lib/store'
 import { PaneGrid } from '@/components/PaneGrid'
 import { ErrorBoundary } from '@/components/ErrorBoundary'
 
@@ -190,6 +192,8 @@ export default function App() {
   const activeTabId = useApp((s) => s.activeTabId)
   const error = useApp((s) => s.error)
   const deadPanes = useApp((s) => s.deadPanes)
+  const sidebarCollapsed = useApp((s) => s.sidebarCollapsed)
+  const rightPanelOpen = useApp((s) => s.rightPanelOpen)
 
   if (phase === 'loading') {
     return (
@@ -204,10 +208,33 @@ export default function App() {
 
   return (
     <div className="flex h-full flex-col bg-canvas text-ink">
+      {/*
+        全宽顶栏：☰ 恒在窗口左上角、📁 恒在右上角 —— 侧栏收起后开关也还在这两个角上
+        （改造前收起按钮长在侧栏头部，一收起入口就没了）。原生窗口控制按钮在
+        webview 之外的系统标题栏里，右上角不会打架。
+      */}
+      <div className="flex h-9 shrink-0 items-center gap-1 border-b border-hairline bg-canvas px-2">
+        <button
+          onClick={() => useApp.getState().toggleSidebar()}
+          title={sidebarCollapsed ? '展开会话侧栏（Ctrl+Shift+B）' : '收起会话侧栏（Ctrl+Shift+B）'}
+          data-sidebar-toggle
+          className="grid h-5 w-5 shrink-0 place-items-center rounded text-ink-subtle transition-colors hover:bg-surface-3 hover:text-ink"
+        >
+          {sidebarCollapsed ? <PanelLeftOpen size={14} /> : <PanelLeftClose size={14} />}
+        </button>
+        <TabBar />
+        <button
+          onClick={() => useApp.getState().toggleRightPanel()}
+          title={rightPanelOpen ? '收起右侧文件栏' : '展开右侧文件栏'}
+          data-right-panel-toggle
+          className="grid h-5 w-5 shrink-0 place-items-center rounded text-ink-subtle transition-colors hover:bg-surface-3 hover:text-ink"
+        >
+          {rightPanelOpen ? <PanelRightClose size={14} /> : <PanelRightOpen size={14} />}
+        </button>
+      </div>
       <div className="flex min-h-0 flex-1">
         <SessionTree />
         <main className="flex min-w-0 flex-1 flex-col">
-          <TabBar />
           <div className="min-h-0 flex-1">
             {tabs.length === 0 && <EmptyState />}
             {/* 所有标签都保持挂载，切换时只隐藏，避免终端被重建、会话丢失 */}
@@ -235,7 +262,8 @@ export default function App() {
                       <PaneGrid
                         tabId={tab.id}
                         panes={panesOf(tab)}
-                        layout={layoutOf(tab)}
+                        // 真格子表（不是形状的名字）：拖出来的自定义排布只有它画得出来
+                        spec={specOf(tab)}
                         // 每格各包一层 ErrorBoundary：一格炸了（xterm 渲染器那类问题）
                         // 不该把同一个标签里其它几格一起带走
                         renderPane={(pane) => (
@@ -274,6 +302,8 @@ export default function App() {
             ))}
           </div>
         </main>
+        {/* 右侧多功能栏（本轮「文件」一页）。开关在顶栏右上角，默认关 */}
+        {rightPanelOpen && <RightPanel />}
       </div>
       <StatusBar />
       <CommandPalette />

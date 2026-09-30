@@ -13,7 +13,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use easy_shell_lib::sftp::{
-    download_to, list_dir, upload_from, ConflictPolicy, TransferEvent,
+    copy_to, create_file, download_to, list_dir, local_create_file, upload_from, ConflictPolicy,
+    TransferEvent,
 };
 use easy_shell_lib::ssh::{connect_and_auth, ConnectConfig};
 use russh::keys::{Algorithm, PrivateKey};
@@ -856,4 +857,164 @@ async fn sftp_canonicalize_能拿到家目录绝对地址() {
     let pwd = sftp.canonicalize(".").await.unwrap();
     assert!(!pwd.is_empty(), "canonicalize 返回了空路径");
     assert_ne!(pwd, ".", "canonicalize 没把 . 展开成绝对路径：{pwd}");
+}
+
+/**
+ * 远端 → 远端对拷（跨主机）：整棵目录树从 A 机流式搬到 B 机。
+ *
+ * 用**两个**真服务端模拟两台主机 —— 一个服务端上开两条通道只能覆盖"同一台两个
+ * 目录"，跨主机那条（两台机器）才是这功能的主用例。数据在 Rust 侧流式中转，
+ * 不经本地落盘，所以断言的是 B 机磁盘上还原出来的树。
+ */
+#[tokio::test]
+async fn sftp_远端到远端对拷能还原整棵目录树() {
+    let fixture_a = build_fixture();
+    let fixture_b = build_fixture();
+    let port_a = spawn_server(fixture_a.clone()).await;
+    let port_b = spawn_server(fixture_b.clone()).await;
+    let sftp_a = Arc::new(connect_sftp(port_a).await);
+    let sftp_b = Arc::new(connect_sftp(port_b).await);
+
+    let (events, cb) = collector();
+    let result = copy_to(
+        sftp_a.clone(),
+        &fixture_a.to_string_lossy(),
+        sftp_b.clone(),
+        ".",
+        ConflictPolicy::Overwrite,
+        cb,
+    )
+    .await;
+
+    assert!(result.is_ok(), "远端对拷失败: {:?}", result.err());
+    assert!(
+        events
+            .lock()
+            .await
+            .iter()
+            .any(|e| matches!(e, TransferEvent::Done { .. })),
+        "没收到 Done 事件，进度回调没打通"
+    );
+
+    let name = fixture_a.file_name().unwrap();
+    let hello = fixture_b.join(name).join("hello.txt");
+    assert!(hello.exists(), "顶层文件没拷过去：{:?}", hello);
+    assert_eq!(std::fs::read_to_string(&hello).unwrap(), "hello world");
+
+    let nested = fixture_b.join(name).join("subdir").join("nested.txt");
+    assert!(nested.exists(), "子目录里的文件没拷过去：{:?}", nested);
+    assert_eq!(std::fs::read_to_string(&nested).unwrap(), "nested");
+}
+
+/// 同一台机器上把目录抄进它自己的子树 —— 必须拒绝，否则会拷出一个嵌套副本
+#[tokio::test]
+async fn sftp_对拷不许抄进自己的子目录() {
+    let fixture = build_fixture();
+    let port = spawn_server(fixture.clone()).await;
+    let sftp = Arc::new(connect_sftp(port).await);
+
+    // 同一条会话（同一个 SftpSession 句柄）才算"自己抄自己"
+    let into_child = copy_to(
+        sftp.clone(),
+        &fixture.to_string_lossy(),
+        sftp.clone(),
+        &fixture.join("subdir").to_string_lossy(),
+        ConflictPolicy::Overwrite,
+        |_e: TransferEvent| {},
+    )
+    .await;
+    assert!(into_child.is_err(), "抄进自己的子目录居然成功了");
+
+    let into_self = copy_to(
+        sftp.clone(),
+        &fixture.to_string_lossy(),
+        sftp.clone(),
+        &fixture.to_string_lossy(),
+        ConflictPolicy::Overwrite,
+        |_e: TransferEvent| {},
+    )
+    .await;
+    assert!(into_self.is_err(), "抄进自己居然成功了");
+}
+
+/// 对拷的冲突策略：选了跳过就一个字都不动，并且报出跳过
+#[tokio::test]
+async fn sftp_对拷冲突skip时不覆盖() {
+    let fixture_a = build_fixture();
+    let fixture_b = build_fixture();
+    let port_a = spawn_server(fixture_a.clone()).await;
+    let port_b = spawn_server(fixture_b.clone()).await;
+    let sftp_a = Arc::new(connect_sftp(port_a).await);
+    let sftp_b = Arc::new(connect_sftp(port_b).await);
+
+    std::fs::write(fixture_b.join("hello.txt"), b"B-version").unwrap();
+
+    let (events, cb) = collector();
+    copy_to(
+        sftp_a.clone(),
+        &fixture_a.join("hello.txt").to_string_lossy(),
+        sftp_b.clone(),
+        ".",
+        ConflictPolicy::Skip,
+        cb,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        std::fs::read_to_string(fixture_b.join("hello.txt")).unwrap(),
+        "B-version",
+        "选了跳过却把目标改了"
+    );
+    let reasons = skips(&events.lock().await);
+    assert!(
+        reasons.iter().any(|r| r.contains("目标已存在")),
+        "没报「目标已存在」的跳过事件，实际: {reasons:?}"
+    );
+}
+
+/// 新建文件是 create_new 语义：同名已存在报错，绝不覆盖
+#[tokio::test]
+async fn sftp_新建文件同名时报错不覆盖() {
+    let fixture = build_fixture();
+    let port = spawn_server(fixture.clone()).await;
+    let sftp = connect_sftp(port).await;
+
+    create_file(&sftp, &fixture.join("new.txt").to_string_lossy())
+        .await
+        .unwrap();
+    assert!(fixture.join("new.txt").exists(), "新建的文件没落盘");
+
+    let again = create_file(&sftp, &fixture.join("new.txt").to_string_lossy()).await;
+    assert!(again.is_err(), "同名已存在居然没报错");
+
+    let over_dir = create_file(&sftp, &fixture.join("subdir").to_string_lossy()).await;
+    assert!(over_dir.is_err(), "拿已存在的目录名建文件居然没报错");
+
+    assert_eq!(
+        std::fs::read_to_string(fixture.join("hello.txt")).unwrap(),
+        "hello world",
+        "新建文件把别的文件动了"
+    );
+}
+
+/// 本地侧的对称行为：local_create_file 同名报错、不覆盖
+#[tokio::test]
+async fn 本地新建文件同名时报错不覆盖() {
+    let dir = std::env::temp_dir().join(format!("easy-shell-newfile-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let target = dir.join("a.txt").to_string_lossy().to_string();
+    local_create_file(target.clone()).unwrap();
+    assert!(dir.join("a.txt").exists(), "新建的文件没落盘");
+
+    let again = local_create_file(target.clone());
+    assert!(again.is_err(), "同名已存在居然没报错");
+
+    std::fs::create_dir_all(dir.join("sub")).unwrap();
+    let over_dir = local_create_file(dir.join("sub").to_string_lossy().to_string());
+    assert!(over_dir.is_err(), "拿已存在的目录名建文件居然没报错");
+
+    let _ = std::fs::remove_dir_all(&dir);
 }

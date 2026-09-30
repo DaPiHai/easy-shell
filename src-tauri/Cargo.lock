@@ -1158,7 +1158,7 @@ checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 
 [[package]]
 name = "easy-shell"
-version = "0.1.0"
+version = "0.1.2"
 dependencies = [
  "aes-gcm 0.10.3",
  "argon2 0.5.3",
@@ -1181,6 +1181,7 @@ dependencies = [
  "tauri-plugin-dialog",
  "tokio",
  "uuid",
+ "winreg 0.55.0",
 ]
 
 [[package]]

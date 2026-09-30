@@ -7,8 +7,13 @@ interface Props {
   /** 锚点（clientX/clientY）：菜单从按钮底下展开 */
   x: number
   y: number
-  /** 当前生效的形状（打勾） */
-  current: PaneLayout
+  /**
+   * 当前生效的形状（打勾）。
+   *
+   * **null = 这一屏是拖出来的自定义排布**，菜单里一项都不打勾 —— 它本来就不在这张表里，
+   * 挑个"最像的"标上反而会让人以为点一下能回到那个形状。
+   */
+  current: PaneLayout | null
   onPick: (layout: PaneLayout) => void
   onClose: () => void
 }

@@ -10,9 +10,10 @@ import {
 } from 'lucide-react'
 import {
   isSplittable,
-  layoutOf,
   PANE_LAYOUTS,
   panesOf,
+  presetOf,
+  specOf,
   tabHasDeadPane,
   useApp,
   type Tab,
@@ -29,6 +30,17 @@ const DRAG_THRESHOLD = 5
 function focusedPaneOf(tab: Tab, focusedPane: Record<string, string>) {
   const panes = panesOf(tab)
   return panes.find((p) => p.id === focusedPane[tab.id]) ?? panes[0] ?? null
+}
+
+/**
+ * 形状的名字（提示里用）。
+ *
+ * 拖出来的排布对不上任何预设，这时如实写「自定义排布」—— 拿 `layoutOf` 回落出来的
+ * 那个默认形状的名字糊上去，用户会以为自己的排布丢了。
+ */
+function layoutName(tab: Tab): string {
+  const preset = presetOf(tab)
+  return preset ? PANE_LAYOUTS[preset].label : '自定义排布'
 }
 
 export function TabBar() {
@@ -276,8 +288,9 @@ export function TabBar() {
   if (tabs.length === 0) return null
 
   return (
-    // relative：插入指示线要绝对定位在这条栏里
-    <div ref={barRef} className="relative flex h-9 shrink-0 items-center border-b border-hairline bg-canvas">
+    // relative：插入指示线要绝对定位在这条栏里。边框与底色由全宽顶栏出（App.tsx），
+    // 这里只占顶栏中间那截
+    <div ref={barRef} className="relative flex h-full min-w-0 flex-1 items-center">
       {tabs.map((tab, index) => {
         const active = tab.id === activeTabId
         const panes = panesOf(tab)
@@ -402,7 +415,7 @@ export function TabBar() {
               // title 挂 span 上：svg 元素的 title 属性不弹提示
               <span
                 data-no-drag
-                title={`分屏布局（现在：${PANE_LAYOUTS[layoutOf(tab)].label}，${panes.length} 格）`}
+                title={`分屏布局（现在：${layoutName(tab)}，${panes.length} 格）`}
                 className="flex shrink-0"
               >
                 <span
@@ -417,7 +430,7 @@ export function TabBar() {
                     setLayoutMenu({ tabId: tab.id, x: r.left, y: r.bottom + 4 })
                   }}
                 >
-                  <LayoutIcon layout={layoutOf(tab)} size={12} />
+                  <LayoutIcon spec={specOf(tab)} size={12} />
                 </span>
               </span>
             )}
@@ -470,10 +483,8 @@ export function TabBar() {
         <LayoutMenu
           x={layoutMenu.x}
           y={layoutMenu.y}
-          current={(() => {
-            const target = tabs.find((t) => t.id === layoutMenu.tabId)
-            return layoutOf(target)
-          })()}
+          // 自定义排布（拖出来的）对不上任何预设 → 一项都不打勾，别谎报一个"最像的"
+          current={presetOf(tabs.find((t) => t.id === layoutMenu.tabId))}
           onPick={(key) => setPaneLayout(layoutMenu.tabId, key)}
           onClose={() => setLayoutMenu(null)}
         />

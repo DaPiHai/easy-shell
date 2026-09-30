@@ -8,6 +8,9 @@ pub mod batch;
 /// decode 对外可见，tests/local_pty.rs 要用 ShellDecoder 验证真实 PTY 输出
 pub mod decode;
 mod known_hosts;
+/// 系统字体枚举：设置面板的「字体族」下拉框列出本机真装了哪些字体
+/// （Windows 读注册表，其它平台试 fc-list，见模块头注释）
+mod fonts;
 /// 恢复密钥：把库密钥封给一把 SSH 公钥。单独成模块是为了能单测那套 ECDH 组合
 mod recovery;
 mod local;
@@ -48,6 +51,8 @@ pub fn run() {
             // 在已有会话上跑一条命令并收回 stdout / stderr / 退出码（批量执行用）
             batch::ssh_exec,
             known_hosts::known_hosts_forget,
+            // 设置面板的「字体族」下拉框：列出本机已安装的字体
+            fonts::list_system_fonts,
             store::vault_status,
             store::vault_setup,
             store::vault_unlock,
@@ -73,14 +78,17 @@ pub fn run() {
             sftp::sftp_list,
             sftp::sftp_download,
             sftp::sftp_upload,
+            sftp::sftp_copy,
             sftp::sftp_pwd,
             sftp::sftp_mkdir,
+            sftp::sftp_create_file,
             sftp::sftp_remove,
             sftp::sftp_rename,
             sftp::sftp_close,
             sftp::local_list,
             sftp::local_home,
             sftp::local_mkdir,
+            sftp::local_create_file,
             sftp::local_remove,
             sftp::local_rename,
             sftp::local_copy,

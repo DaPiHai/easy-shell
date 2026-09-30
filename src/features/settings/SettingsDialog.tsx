@@ -1,4 +1,3 @@
-import { useState } from 'react'
 import { RotateCcw, Settings as SettingsIcon } from 'lucide-react'
 import {
   DEFAULT_TERM_FONT,
@@ -18,6 +17,7 @@ import {
 import { isDesktop, pickFile } from '@/lib/api'
 import { ModalActions, ModalShell, modalButton } from '@/components/ModalShell'
 import { NumberField, Row, Section, Segmented } from './controls'
+import { FontFamilyPicker } from './FontFamilyPicker'
 import { TermSchemeSection } from './TermSchemeSection'
 
 /**
@@ -40,8 +40,6 @@ function SettingsBody({ onClose }: { onClose: () => void }) {
     setTheme,
     termFontSize,
     setTermFontSize,
-    termFontFamily,
-    setTermFontFamily,
     termLineHeight,
     setTermLineHeight,
     termCursorStyle,
@@ -64,8 +62,6 @@ function SettingsBody({ onClose }: { onClose: () => void }) {
     setConfirmPrompt,
     setError,
   } = useApp()
-
-  const [fontDraft, setFontDraft] = useState(termFontFamily)
 
   /**
    * 改主密码要开的是另一个弹窗。这里**先关掉设置面板**再开它 ——
@@ -181,22 +177,9 @@ function SettingsBody({ onClose }: { onClose: () => void }) {
       <Section title="终端">
         <Row
           label="字体族"
-          hint={`留空用内置字体栈。改了会立即重排已有终端`}
+          hint="点开挑本机已装的字体；要写一整串字体栈就用里面的「自定义…」。改了会立即重排已有终端"
         >
-          <input
-            value={fontDraft}
-            placeholder="例如 Fira Code, Consolas"
-            onChange={(e) => setFontDraft(e.target.value)}
-            onBlur={() => setTermFontFamily(fontDraft.trim())}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter') {
-                e.preventDefault()
-                setTermFontFamily(fontDraft.trim())
-              }
-            }}
-            style={{ width: 240 }}
-            className="h-7 rounded-md border border-hairline bg-surface-3 px-2 text-[12px] text-ink outline-none placeholder:text-ink-tertiary focus:border-accent"
-          />
+          <FontFamilyPicker />
         </Row>
         <Row label="行高" hint={`${MIN_LINE_HEIGHT} – ${MAX_LINE_HEIGHT}`}>
           <NumberField

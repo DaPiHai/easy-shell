@@ -29,6 +29,15 @@ import {
 } from './api'
 import { APP_SCHEME_ID, isKnownSchemeId, isValidScheme, type TermScheme } from './termSchemes'
 import { hostLabel } from './hosts'
+import {
+  layoutForCount,
+  matchPreset,
+  MAX_PANES,
+  PANE_LAYOUTS,
+  pruneSpec,
+  type LayoutSpec,
+  type PaneLayout,
+} from './paneLayout'
 
 /** 终端字号可调范围。再小就看不清，再大一个屏幕放不下几行 */
 export const MIN_FONT_SIZE = 9
@@ -51,6 +60,24 @@ export const MIN_RETRY_ATTEMPTS = 0
 export const MAX_RETRY_ATTEMPTS = 10
 export const MIN_RETRY_DELAY = 1
 export const MAX_RETRY_DELAY = 60
+
+/**
+ * 「本屏批量执行」条展开时的高度。
+ *
+ * 默认 240 = 命令区 + 结果区各看得见几行；上限 900 是"再高不如去关掉别的东西"的意思。
+ * 拖动时还有一层按窗口算的上限（总要给上面的终端留出看得见提示符的地方，见 PaneBatchBar），
+ * 这一对常量管的是"存下来的值和拖动的范围"。
+ */
+export const MIN_BATCH_BAR_H = 150
+export const MAX_BATCH_BAR_H = 900
+export const DEFAULT_BATCH_BAR_H = 240
+
+/** 右侧栏的页签。本轮只有「文件」，扩展时往这个联合里加 */
+export type RightPanelPage = 'files'
+/** 右侧栏宽度（px）。太窄放不下面包屑，太宽把终端挤没 */
+export const MIN_RIGHT_PANEL_W = 240
+export const MAX_RIGHT_PANEL_W = 560
+export const DEFAULT_RIGHT_PANEL_W = 320
 
 export type CursorStyle = 'bar' | 'block' | 'underline'
 
@@ -308,6 +335,14 @@ export interface Tab {
   panes?: Pane[]
   /** 这一屏怎么摆（左右二分 / 上下二分 / 三格的各种排法 / 四宫格…）。见 `PANE_LAYOUTS` */
   layout?: PaneLayout
+  /**
+   * 拖拽切出来的排布，对不上任何预设时放这儿（见 `specOf`）。
+   *
+   * 有它就以它为准，`layout` 只管"上次从菜单里选过哪个形状"。这么分是因为
+   * 一刀一刀切出来的排布有一大半无法用预设命名（三列里某一列上下分、两列再切一列…），
+   * 而用户明明在界面上看得见它 —— 与其强行塞进最接近的预设，不如原样存下来。
+   */
+  layoutSpec?: LayoutSpec
   /** kind 为 editor 时的打开目标 */
   editorTarget?: EditorTarget
   /**
@@ -320,239 +355,38 @@ export interface Tab {
   batchTargets?: string[]
 }
 
-/** 一个标签最多几格。2×2 的极限，也是 sshd `MaxSessions` 底下留得住的数 */
-export const MAX_PANES = 4
-
-/** 格子在网格里的位置：c / r 从 1 开始，cs / rs 是跨列 / 跨行数（默认 1） */
-interface CellSpec {
-  c: number
-  r: number
-  cs?: number
-  rs?: number
-}
-
-export interface LayoutSpec {
-  /** 菜单里显示的名字 */
-  label: string
-  /** 网格几列几行 */
-  cols: number
-  rows: number
-  /** 每个格子的位置，**下标 = panes 的下标**（也就是视觉顺序，拖拽换位换的就是这个顺序） */
-  cells: CellSpec[]
-}
-
 /**
- * 分屏的形状。
- *
- * 光有"几格"不够：两台机器横摆还是竖摆、三台怎么排，取决于屏幕形状和"这台要看什么"。
- * 所以形状是**每个标签自己的选择**（`Tab.layout`），比例（列 / 行）仍是全局的两个值
- * （`splitRatio` / `splitRatioY`）—— 比例是手感偏好，形状是这一屏的摆法。
- *
- * 格子数必须跟 `Tab.panes` 一样长：换形状时少则补格、多则收格，都在 `setPaneLayout` 里做。
+ * 分屏形状与「切开一格」的数学都在 `./paneLayout` 里了（纯模块，能离线穷举校验，见
+ * `tools/check-layout.mjs`）。这里转出去，组件和 store 都只从一处 import。
  */
-export type PaneLayout =
-  | 'single'
-  | 'cols2'
-  | 'rows2'
-  | 'cols3'
-  | 'rows3'
-  | 'cols4'
-  | 'rows4'
-  | 'left1Right2'
-  | 'left2Right1'
-  | 'left1Right3'
-  | 'left3Right1'
-  | 'top1Bottom2'
-  | 'top2Bottom1'
-  | 'top1Bottom3'
-  | 'top3Bottom1'
-  | 'grid4'
-
-export const PANE_LAYOUTS: Record<PaneLayout, LayoutSpec> = {
-  single: { label: '单格', cols: 1, rows: 1, cells: [{ c: 1, r: 1 }] },
-  cols2: {
-    label: '左右二分',
-    cols: 2,
-    rows: 1,
-    cells: [
-      { c: 1, r: 1 },
-      { c: 2, r: 1 },
-    ],
-  },
-  rows2: {
-    label: '上下二分',
-    cols: 1,
-    rows: 2,
-    cells: [
-      { c: 1, r: 1 },
-      { c: 1, r: 2 },
-    ],
-  },
-  cols3: {
-    label: '三列',
-    cols: 3,
-    rows: 1,
-    cells: [
-      { c: 1, r: 1 },
-      { c: 2, r: 1 },
-      { c: 3, r: 1 },
-    ],
-  },
-  rows3: {
-    label: '三行',
-    cols: 1,
-    rows: 3,
-    cells: [
-      { c: 1, r: 1 },
-      { c: 1, r: 2 },
-      { c: 1, r: 3 },
-    ],
-  },
-  cols4: {
-    label: '四列',
-    cols: 4,
-    rows: 1,
-    cells: [
-      { c: 1, r: 1 },
-      { c: 2, r: 1 },
-      { c: 3, r: 1 },
-      { c: 4, r: 1 },
-    ],
-  },
-  rows4: {
-    label: '四行',
-    cols: 1,
-    rows: 4,
-    cells: [
-      { c: 1, r: 1 },
-      { c: 1, r: 2 },
-      { c: 1, r: 3 },
-      { c: 1, r: 4 },
-    ],
-  },
-  left1Right3: {
-    label: '左一右三',
-    cols: 2,
-    rows: 3,
-    cells: [
-      { c: 1, r: 1, rs: 3 },
-      { c: 2, r: 1 },
-      { c: 2, r: 2 },
-      { c: 2, r: 3 },
-    ],
-  },
-  left3Right1: {
-    label: '左三右一',
-    cols: 2,
-    rows: 3,
-    cells: [
-      { c: 1, r: 1 },
-      { c: 1, r: 2 },
-      { c: 1, r: 3 },
-      { c: 2, r: 1, rs: 3 },
-    ],
-  },
-  top1Bottom3: {
-    label: '上一下三',
-    cols: 3,
-    rows: 2,
-    cells: [
-      { c: 1, r: 1, cs: 3 },
-      { c: 1, r: 2 },
-      { c: 2, r: 2 },
-      { c: 3, r: 2 },
-    ],
-  },
-  top3Bottom1: {
-    label: '上三下一',
-    cols: 3,
-    rows: 2,
-    cells: [
-      { c: 1, r: 1 },
-      { c: 2, r: 1 },
-      { c: 3, r: 1 },
-      { c: 1, r: 2, cs: 3 },
-    ],
-  },
-  left1Right2: {
-    label: '左一右二',
-    cols: 2,
-    rows: 2,
-    cells: [
-      { c: 1, r: 1, rs: 2 },
-      { c: 2, r: 1 },
-      { c: 2, r: 2 },
-    ],
-  },
-  left2Right1: {
-    label: '左二右一',
-    cols: 2,
-    rows: 2,
-    cells: [
-      { c: 1, r: 1 },
-      { c: 1, r: 2 },
-      { c: 2, r: 1, rs: 2 },
-    ],
-  },
-  top1Bottom2: {
-    label: '上一下二',
-    cols: 2,
-    rows: 2,
-    cells: [
-      { c: 1, r: 1, cs: 2 },
-      { c: 1, r: 2 },
-      { c: 2, r: 2 },
-    ],
-  },
-  top2Bottom1: {
-    label: '上二下一',
-    cols: 2,
-    rows: 2,
-    cells: [
-      { c: 1, r: 1 },
-      { c: 2, r: 1 },
-      { c: 1, r: 2, cs: 2 },
-    ],
-  },
-  grid4: {
-    label: '四宫格',
-    cols: 2,
-    rows: 2,
-    cells: [
-      { c: 1, r: 1 },
-      { c: 2, r: 1 },
-      { c: 1, r: 2 },
-      { c: 2, r: 2 },
-    ],
-  },
-}
-
-/** 菜单里的排列顺序：先按格数，再按形状 */
-export const LAYOUT_ORDER: PaneLayout[] = [
-  'single',
-  'cols2',
-  'rows2',
-  'cols3',
-  'rows3',
-  'cols4',
-  'rows4',
-  'left1Right2',
-  'left2Right1',
-  'left1Right3',
-  'left3Right1',
-  'top1Bottom2',
-  'top2Bottom1',
-  'top1Bottom3',
-  'top3Bottom1',
-  'grid4',
-]
-
+export {
+  DEFAULT_LAYOUT_BY_COUNT,
+  dividersOfSpec,
+  LAYOUT_ORDER,
+  layoutForCount,
+  matchPreset,
+  MAX_PANES,
+  PANE_LAYOUTS,
+  pruneSpec,
+  splitPlan,
+  splitPlanN,
+  validateSpec,
+} from './paneLayout'
+export type {
+  CellSpec,
+  Divider,
+  DropSide,
+  GrowResult,
+  LayoutSpec,
+  PaneLayout,
+} from './paneLayout'
 /**
  * 「成长」表：往一个窗口里并进一个标签时，形状该长成哪一档。
  *
- * 并标签会 +1 格，形状的格子数得跟着变 —— 若一律回落到"该格数的默认"，
- * 用户摆好的左一右二并进来一个就突然变四宫格。按家族成长：左一右二长成左一右三，
- * 新终端正好落在你指的那一格，其余格子顺移。
+ * **它现在只是兜底**（落点没命中任何格子时用）：正常的拖拽由 `splitPlanN` 切开落点
+ * 那一格算出确切形状（见 `layoutAfterMerge`）。留着它是因为"拖到窗口空白处"也得有个
+ * 结果，而那种情况没法说清该切哪一格。按家族长一档总比打回默认形状好：
+ * 用户摆好的左一右二并进来一个，不该突然变成四宫格。
  */
 const GROWN_LAYOUT: Record<PaneLayout, PaneLayout | null> = {
   single: 'cols2',
@@ -581,32 +415,96 @@ function grownLayout(current: PaneLayout, newCount: number): PaneLayout {
   return layoutForCount(newCount, current)
 }
 
-/**
- * 每种格数回落到哪个形状：关掉一格、并进一个标签之后格数会变，
- * 原来那个形状的格子数就对不上了。挑的是"换过去动得最少"的那个 ——
- * 从四宫格关掉右下角，剩下的正好是「上二下一」。
- */
-export const DEFAULT_LAYOUT_BY_COUNT: Record<number, PaneLayout> = {
-  1: 'single',
-  2: 'cols2',
-  3: 'top2Bottom1',
-  4: 'grid4',
-}
-
-/** 格数变了之后该用哪个形状：当前形状的格子数对得上就留着，对不上回落默认 */
-function layoutForCount(count: number, current: PaneLayout | undefined): PaneLayout {
-  if (current && PANE_LAYOUTS[current].cells.length === count) return current
-  return DEFAULT_LAYOUT_BY_COUNT[count] ?? 'single'
-}
-
 /** 标签当前的形状。没记过（或者记的跟格子数对不上）就按格数取默认 */
 export function layoutOf(tab: Tab | undefined | null): PaneLayout {
   return layoutForCount(panesOf(tab).length, tab?.layout)
 }
 
+/**
+ * 标签**实际**该怎么摆 —— 界面渲染只用它，别再直接读 `PANE_LAYOUTS[layoutOf(tab)]`。
+ *
+ * 一格数对不上的自定义表一律不认（收格 / 并格之后可能来不及清），这时回落到预设：
+ * 宁可摆成默认形状，也不能拿一张格子数对不上的表去数 `panes`。
+ */
+export function specOf(tab: Tab | undefined | null): LayoutSpec {
+  const custom = tab?.layoutSpec
+  if (custom && custom.cells.length === panesOf(tab).length) return custom
+  return PANE_LAYOUTS[layoutOf(tab)]
+}
+
 /** 标签的格子。非终端标签（SFTP / 编辑器）没有格子，返回空数组 */
 export function panesOf(tab: Tab | undefined | null): Pane[] {
   return tab?.panes ?? []
+}
+
+/**
+ * 这一屏对得上哪个预设（对不上就 null —— 它是拖出来的自定义排布）。
+ *
+ * 标签栏的图标和布局菜单的打勾看它：自定义排布下**一项都不打勾**，比挑一个"最像的"
+ * 预设标上更诚实（那会让用户以为菜单里点一下就能回到这个形状）。
+ */
+export function presetOf(tab: Tab | undefined | null): PaneLayout | null {
+  return matchPreset(specOf(tab))
+}
+
+/**
+ * 拖标签并进某个窗口的落点方案（`paneLayout.splitPlanN` 算出来的）。
+ *
+ * 界面上的高亮画的也是它，所以"亮在哪、新格落在哪"由同一份数据决定。
+ */
+export interface MergeDrop {
+  /** 新格子插进目标标签 `panes` 的下标 */
+  insertAt: number
+  /**
+   * 切开之后这一屏的格子表。
+   *
+   * **null = 没切出方案**（拖到了窗口空白处，或者算法算不出这个切法），这时退回
+   * "按家族长一档"（见 `layoutAfterMerge`）。
+   */
+  spec: LayoutSpec | null
+}
+
+/**
+ * 收掉第 `idx` 格之后这一屏该怎么摆。
+ *
+ * 先让邻居长过来（`pruneSpec`）—— 四宫格去掉右下角正好剩下「上二下一」，跟"关掉的是
+ * 右下角"对得上；长不过来（比如「左一右二」去掉右上那格，怎么填都会吃掉邻居）才按格数
+ * 回落默认形状。结果是预设就记 `layout`，不是就记 `layoutSpec`（拖出来的排法有一多半没有名字）。
+ */
+export function layoutAfterRemoving(
+  tab: Tab | undefined | null,
+  idx: number,
+): { layout: PaneLayout | undefined; layoutSpec: LayoutSpec | undefined } {
+  const pruned = pruneSpec(specOf(tab), idx)
+  if (pruned) {
+    const preset = matchPreset(pruned)
+    if (preset) return { layout: preset, layoutSpec: undefined }
+    return { layout: undefined, layoutSpec: pruned }
+  }
+  return { layout: layoutForCount(panesOf(tab).length - 1, tab?.layout), layoutSpec: undefined }
+}
+
+/**
+ * 并进若干格之后这一屏该怎么摆。
+ *
+ * 落点算出了格子表（`splitPlanN`）就以它为准 —— 对得上预设记 `layout`，对不上记
+ * `layoutSpec`（拖出来的排法有一多半没有名字，但界面画的就是它，所以原样留着）。
+ * 落点没算出方案（拖到窗口空白处）才退回"按家族长一档"，那一步只是为了别把用户
+ * 摆好的形状打回默认。
+ */
+export function layoutAfterMerge(
+  tab: Tab | undefined | null,
+  movedCount: number,
+  drop?: MergeDrop | null,
+): { layout: PaneLayout | undefined; layoutSpec: LayoutSpec | undefined } {
+  const total = panesOf(tab).length + movedCount
+  const spec = drop?.spec
+  if (spec && spec.cells.length === total) {
+    const preset = matchPreset(spec)
+    if (preset) return { layout: preset, layoutSpec: undefined }
+    return { layout: undefined, layoutSpec: spec }
+  }
+  return { layout: grownLayout(layoutOf(tab), total), layoutSpec: undefined }
 }
 
 /**
@@ -755,9 +653,15 @@ export function acceptsPanes(tab: Tab | undefined | null): boolean {
 
 export type TransferStatus = 'active' | 'done' | 'error'
 
+/**
+ * 传输方向。upload = 本地→远程，download = 远程→本地，
+ * copy = 远程→远程（Rust 侧流式中转，两台主机或同机两个目录之间）
+ */
+export type TransferDirection = 'upload' | 'download' | 'copy'
+
 export interface TransferItem {
   id: string
-  direction: 'upload' | 'download'
+  direction: TransferDirection
   name: string
   transferred: number
   total: number
@@ -932,10 +836,25 @@ interface AppState {
    * 会话侧栏收没收起。
    *
    * 终端一开宽，左边 240px 就是纯浪费 —— 而侧栏只在一开始选主机时有用。
-   * 收起状态跟其他偏好一样持久化：这是"我平时怎么用"，不该每次启动重设。
+   * **每次启动默认展开、开合不跨启动记忆**：用户明确要求"打开软件时默认开启
+   * 左侧边栏、关闭右侧边栏"，上次会话收着就一直收着不是他要的。
    */
   sidebarCollapsed: boolean
   toggleSidebar: () => void
+
+  /**
+   * 右侧多功能栏（本轮「文件」一页）开没开、多宽、当前哪一页。
+   *
+   * 页签行按 `rightPanelPage` 渲染，加一页 = 页签数组加一项 + 一个组件，
+   * 外壳不再动。**每次启动默认关**（开合不跨启动记忆，DESIGN.md「不堆面板」）；
+   * 宽度照旧持久化。
+   */
+  rightPanelOpen: boolean
+  toggleRightPanel: () => void
+  rightPanelWidth: number
+  setRightPanelWidth: (w: number) => void
+  rightPanelPage: RightPanelPage
+  setRightPanelPage: (p: RightPanelPage) => void
 
   /**
    * 哪个格子（paneId）的「在终端里查找」栏开着，全局只有一个。
@@ -1016,15 +935,14 @@ interface AppState {
    * 关通道那侧却不用等网络，这个赛跑几乎必输）。
    * 等新通道起来了再收源标签，会话两侧交接得上。
    *
-   * `insertAt` 是落点格的下标：新格子**插到那个位置**（其余顺移），形状按"成长规则"
-   * 选（cols2 长成 cols3、左一右二长成左一右三…，见 `GROWN_LAYOUT`）——
-   * 新终端就出现在你指的那一格附近，而不是永远追加到末尾再整屏重排。
+   * `plan` 是落点方案（`paneLayout.splitPlanN` 算出来的）：新格子插在哪个下标、这一屏
+   * 变成什么形状，**都由它一份决定** —— 界面上的高亮画的也是它，所以"亮在哪就落在哪"。
+   * 拖到窗口空白处（没命中任何格子）不给方案，这时退回"按家族长一档"（见 `layoutAfterMerge`）。
    */
   mergeTabIntoPane: (
     targetTabId: string,
     sourceTabId: string,
-    insertAt?: number,
-    layoutHint?: PaneLayout,
+    plan?: MergeDrop,
   ) => void
   /**
    * 正在被拖的标签（标签栏拖起来时写，放下或 Esc 取消时清）。
@@ -1089,6 +1007,15 @@ interface AppState {
   splitRowBands: Record<number, number[]>
   setSplitColBands: (bands: number, widths: number[]) => void
   setSplitRowBands: (bands: number, widths: number[]) => void
+
+  /**
+   * 「本屏批量执行」条展开时的高度（px）。
+   *
+   * 存一份全局的而不是每个标签一份：它是"我想看多大一块结果"，跟窗口大小、使用习惯
+   * 有关，跟哪个标签无关（同主题、字号）。拖动时按当前窗口可用高度夹取，见 PaneBatchBar。
+   */
+  batchBarHeight: number
+  setBatchBarHeight: (height: number) => void
 
   /**
    * 终端字号。13px 在 1080p 上刚好，高分屏上就偏小了 ——
@@ -1189,7 +1116,7 @@ interface AppState {
   transfers: TransferItem[]
   /** 跑一次传输并接管进度事件；结束后返回 true/false 表示成功 */
   runTransfer: (
-    direction: 'upload' | 'download',
+    direction: TransferDirection,
     name: string,
     run: (onProgress: Channel<TransferEvent>) => Promise<void>,
   ) => Promise<boolean>
@@ -1527,19 +1454,31 @@ export const useApp = create<AppState>((set, get) => ({
   collapsed: {},
   toggleGroup: (id) => set((s) => ({ collapsed: { ...s.collapsed, [id]: !s.collapsed[id] } })),
 
-  sidebarCollapsed: (() => {
-    try {
-      return localStorage.getItem('sidebarCollapsed') === '1'
-    } catch {
-      return false
-    }
-  })(),
-  toggleSidebar: () =>
-    set((s) => {
-      const next = !s.sidebarCollapsed
-      writeLocal('sidebarCollapsed', next ? '1' : '0')
-      return { sidebarCollapsed: next }
-    }),
+  // 每次启动都是「左侧栏展开、右侧栏收起」：开合状态只在本次运行内有效，不落 localStorage
+  sidebarCollapsed: false,
+  toggleSidebar: () => set((s) => ({ sidebarCollapsed: !s.sidebarCollapsed })),
+
+  rightPanelOpen: false,
+  toggleRightPanel: () => set((s) => ({ rightPanelOpen: !s.rightPanelOpen })),
+  rightPanelWidth: readNumber(
+    'rightPanelWidth',
+    DEFAULT_RIGHT_PANEL_W,
+    MIN_RIGHT_PANEL_W,
+    MAX_RIGHT_PANEL_W,
+  ),
+  setRightPanelWidth: (w) => {
+    const width = Math.round(
+      Math.min(MAX_RIGHT_PANEL_W, Math.max(MIN_RIGHT_PANEL_W, w)),
+    )
+    writeLocal('rightPanelWidth', String(width))
+    set({ rightPanelWidth: width })
+  },
+  // 只有「文件」一页时不必读回；加了第二页再从 localStorage 恢复（setRightPanelPage 已在写）
+  rightPanelPage: 'files',
+  setRightPanelPage: (p) => {
+    writeLocal('rightPanelPage', p)
+    set({ rightPanelPage: p })
+  },
 
   tabs: [],
   activeTabId: null,
@@ -1674,7 +1613,13 @@ export const useApp = create<AppState>((set, get) => ({
       if (!isSplittable(tab)) return {}
       const cells = PANE_LAYOUTS[layout].cells.length
       const panes = panesOf(tab)
-      if (layoutOf(tab) === layout && panes.length === cells) return {}
+      /*
+        比的是**当前真的是哪个预设**（`presetOf`，自定义排布时是 null），不是
+        `layoutOf`。`layoutOf` 在自定义排布下会回落成"该格数的默认"，于是
+        "拖出来的四格排布 + 点菜单里的四宫格"会被当成没变、点了没反应 ——
+        而用户看到的明明不是四宫格。
+      */
+      if (presetOf(tab) === layout && panes.length === cells) return {}
       const base = panes[0]
       const next = panes.slice(0, cells)
       // 新格子继承**第一格**的连接：同一条会话再开一条 shell 通道，不重新认证。
@@ -1701,7 +1646,10 @@ export const useApp = create<AppState>((set, get) => ({
         )
       }
       return {
-        tabs: s.tabs.map((t) => (t.id === tabId ? { ...t, panes: next, layout } : t)),
+        // 换成预设：把拖拽切出来的自定义排布一并丢掉（菜单里选的形状说了算）
+        tabs: s.tabs.map((t) =>
+          t.id === tabId ? { ...t, panes: next, layout, layoutSpec: undefined } : t,
+        ),
         deadPanes: nextDead,
         findPaneId: s.findPaneId && gone.includes(s.findPaneId) ? null : s.findPaneId,
         focusedPane: gone.includes(s.focusedPane[tabId] ?? '')
@@ -1722,9 +1670,15 @@ export const useApp = create<AppState>((set, get) => ({
       const nextDead = { ...s.deadPanes }
       delete nextDead[paneId]
       return {
-        // 格数变了，形状跟着回落（原来那个形状的格子数已经对不上了）
+        // 格数变了，形状跟着变：优先让邻居长过来，长不过来才按格数回落（见 layoutAfterRemoving）
         tabs: s.tabs.map((t) =>
-          t.id === tabId ? { ...t, panes: next, layout: layoutForCount(next.length, t.layout) } : t,
+          t.id === tabId
+            ? {
+                ...t,
+                panes: next,
+                ...layoutAfterRemoving(t, panes.findIndex((p) => p.id === paneId)),
+              }
+            : t,
         ),
         deadPanes: nextDead,
         findPaneId: s.findPaneId === paneId ? null : s.findPaneId,
@@ -1797,7 +1751,7 @@ export const useApp = create<AppState>((set, get) => ({
       return { livePanes: next }
     }),
 
-  mergeTabIntoPane: (targetTabId, sourceTabId, insertAt, layoutHint) => {
+  mergeTabIntoPane: (targetTabId, sourceTabId, plan) => {
     const s = get()
     const target = s.tabs.find((t) => t.id === targetTabId)
     const source = s.tabs.find((t) => t.id === sourceTabId)
@@ -1826,11 +1780,16 @@ export const useApp = create<AppState>((set, get) => ({
     // 阶段一：按同样的连接在目标标签里开新格子。这时候源标签的通道还开着，
     // 会话不会因为"最后一条通道关了"被回收。
     // 落到哪一格就插到哪个下标（其余顺移）——"拖到哪、新终端就在哪"；
-    // 没给落点（理论上来不到这儿）才退回追加末尾
+    // 没给落点（拖到窗口空白处）才退回追加末尾
     const clones = moving.map((p) =>
       makePane({ kind: p.kind, sessionId: p.sessionId, hostId: p.hostId, title: p.title }),
     )
-    const at = Math.max(0, Math.min(panesOf(target).length, insertAt ?? panesOf(target).length))
+    const targetPanes = panesOf(target)
+    const at = Math.max(0, Math.min(targetPanes.length, plan?.insertAt ?? targetPanes.length))
+    // 形状由落点方案给（切开那一格的结果），没有方案才按家族长一档
+    const shape = layoutAfterMerge(target, clones.length, plan)
+    /** 回滚时要还原的形状（阶段二失败时用，见下） */
+    const before = { layout: target.layout, layoutSpec: target.layoutSpec }
     set((st) => ({
       tabs: st.tabs.map((t) =>
         t.id === target.id
@@ -1841,9 +1800,7 @@ export const useApp = create<AppState>((set, get) => ({
                 ...clones,
                 ...panesOf(t).slice(at),
               ],
-              // 格数变了：形状按"成长规则"长一档（cols2→cols3、左一右二→左一右三…），
-              // 家族接不上才按新格数回落默认
-              layout: layoutHint ?? grownLayout(layoutOf(t), panesOf(t).length + clones.length),
+              ...shape,
             }
           : t,
       ),
@@ -1867,9 +1824,10 @@ export const useApp = create<AppState>((set, get) => ({
       if (Date.now() >= deadline) {
         const cloneIds = new Set(clones.map((c) => c.id))
         set((cur) => ({
+          // 格子撤回去，形状也要撤 —— 留着"长了一档"的形状，格子数就跟它对不上了
           tabs: cur.tabs.map((t) =>
             t.id === target.id
-              ? { ...t, panes: panesOf(t).filter((p) => !cloneIds.has(p.id)) }
+              ? { ...t, panes: panesOf(t).filter((p) => !cloneIds.has(p.id)), ...before }
               : t,
           ),
         }))
@@ -1953,6 +1911,13 @@ export const useApp = create<AppState>((set, get) => ({
     const next = { ...get().splitRowBands, [bands]: widths }
     writeBands('splitRowBands', next)
     set({ splitRowBands: next })
+  },
+
+  batchBarHeight: readNumber('batchBarHeight', DEFAULT_BATCH_BAR_H, MIN_BATCH_BAR_H, MAX_BATCH_BAR_H),
+  setBatchBarHeight: (height) => {
+    const h = Math.round(Math.min(MAX_BATCH_BAR_H, Math.max(MIN_BATCH_BAR_H, height)))
+    writeLocal('batchBarHeight', String(h))
+    set({ batchBarHeight: h })
   },
 
 

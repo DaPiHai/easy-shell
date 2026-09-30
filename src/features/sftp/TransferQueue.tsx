@@ -1,4 +1,18 @@
-import { Check, Loader2, AlertTriangle, ArrowDown, ArrowUp, MinusCircle } from 'lucide-react'
+import {
+  Check,
+  CopyPlus,
+  History,
+  ListX,
+  Loader2,
+  AlertTriangle,
+  ArrowDown,
+  ArrowRightLeft,
+  ArrowUp,
+  MinusCircle,
+  Replace,
+  SkipForward,
+  type LucideIcon,
+} from 'lucide-react'
 import { useApp } from '@/lib/store'
 import type { ConflictPolicy } from '@/lib/api'
 import { formatSize } from './FilePane'
@@ -10,12 +24,24 @@ interface Props {
   onConflictChange: (next: ConflictPolicy) => void
 }
 
-/** 同名文件的三种处理方式，按「用户看到选项时的直觉」排序 */
-const CONFLICT_OPTIONS: Array<{ value: ConflictPolicy; label: string; hint: string }> = [
-  { value: 'overwrite', label: '覆盖', hint: '目标已存在就直接覆盖' },
-  { value: 'skip', label: '跳过', hint: '目标已存在就不动它，并在队列里标出来' },
-  { value: 'keepBoth', label: '保留两者', hint: '目标改名为「xxx (2)」，两份都留下' },
+/**
+ * 同名文件的三种处理方式，按「用户看到选项时的直觉」排序。
+ * 一排文字按钮在右侧窄栏里挤不下，全换成图标 —— 名称与说明都在悬停提示里。
+ */
+const CONFLICT_OPTIONS: Array<{
+  value: ConflictPolicy
+  icon: LucideIcon
+  label: string
+  hint: string
+}> = [
+  { value: 'overwrite', icon: Replace, label: '覆盖', hint: '同名文件：目标已存在就直接覆盖' },
+  { value: 'skip', icon: SkipForward, label: '跳过', hint: '同名文件：目标已存在就不动它，并在队列里标出来' },
+  { value: 'keepBoth', icon: CopyPlus, label: '保留两者', hint: '同名文件：目标改名为「xxx (2)」，两份都留下' },
 ]
+
+/** 顶部一排工具按钮的公共样式（与 FilePane 工具栏同款） */
+const TOOL_BTN =
+  'grid h-6 w-6 place-items-center rounded transition-colors hover:bg-surface-2 hover:text-ink'
 
 export function TransferQueue({ resume, onToggleResume, conflict, onConflictChange }: Props) {
   const transfers = useApp((s) => s.transfers)
@@ -25,52 +51,51 @@ export function TransferQueue({ resume, onToggleResume, conflict, onConflictChan
 
   return (
     <div className="flex max-h-40 shrink-0 flex-col border-t border-hairline bg-surface-1">
-      <div className="flex h-7 shrink-0 items-center justify-between px-3">
-        <span className="text-[11px] font-medium tracking-[0.4px] text-ink-subtle">
+      <div className="flex h-7 shrink-0 items-center gap-1 px-2">
+        <span className="min-w-0 flex-1 truncate text-[11px] font-medium tracking-[0.4px] text-ink-subtle">
           传输{active.length > 0 ? ` · ${active.length} 个进行中` : ''}
         </span>
-        <div className="flex items-center gap-3">
-          <button
-            onClick={onToggleResume}
-            className="flex items-center gap-1 text-[11px] text-ink-tertiary transition-colors hover:text-ink"
-            title="只从上次没传完的 .part 文件接着传，不从头重传"
-          >
-            <span
-              className={`h-2.5 w-2.5 rounded-sm border transition-colors ${
-                resume ? 'border-accent bg-accent' : 'border-hairline-strong'
-              }`}
-            />
-            断点续传
-          </button>
 
-          {/* 同名文件怎么办做成面板级选项：传输是串行循环，逐文件弹框没法用 */}
-          <div className="flex items-center gap-1 text-[11px] text-ink-tertiary">
-            <span>同名文件</span>
-            <div className="flex overflow-hidden rounded border border-hairline">
-              {CONFLICT_OPTIONS.map((o) => (
-                <button
-                  key={o.value}
-                  onClick={() => onConflictChange(o.value)}
-                  title={o.hint}
-                  className={`px-1.5 py-0.5 transition-colors ${
-                    conflict === o.value
-                      ? 'bg-surface-3 text-ink'
-                      : 'text-ink-tertiary hover:text-ink-muted'
-                  }`}
-                >
-                  {o.label}
-                </button>
-              ))}
-            </div>
-          </div>
+        {/* 全是图标 + 悬停提示：右侧文件栏只有 240–560px 宽，文字按钮一排摆不下 */}
+        <button
+          onClick={onToggleResume}
+          title="断点续传：只从上次没传完的 .part 文件接着传，不从头重传"
+          data-transfer-resume
+          className={`${TOOL_BTN} ${resume ? 'bg-accent/15 text-accent' : 'text-ink-tertiary'}`}
+        >
+          <History size={13} />
+        </button>
 
-          <button
-            onClick={clearFinished}
-            className="text-[11px] text-ink-tertiary transition-colors hover:text-ink"
-          >
-            清除已完成
-          </button>
+        <div className="flex overflow-hidden rounded border border-hairline">
+          {CONFLICT_OPTIONS.map((o) => {
+            const Icon = o.icon
+            return (
+              <button
+                key={o.value}
+                onClick={() => onConflictChange(o.value)}
+                title={o.hint}
+                aria-label={o.label}
+                data-transfer-conflict={o.value}
+                className={`grid h-6 w-6 place-items-center transition-colors ${
+                  conflict === o.value
+                    ? 'bg-surface-3 text-ink'
+                    : 'text-ink-tertiary hover:bg-surface-2 hover:text-ink'
+                }`}
+              >
+                <Icon size={12} />
+              </button>
+            )
+          })}
         </div>
+
+        <button
+          onClick={clearFinished}
+          title="清除已完成"
+          data-transfer-clear
+          className={`${TOOL_BTN} text-ink-tertiary`}
+        >
+          <ListX size={13} />
+        </button>
       </div>
 
       <div className="min-h-0 flex-1 overflow-y-auto px-3 pb-2">
@@ -92,6 +117,9 @@ export function TransferQueue({ resume, onToggleResume, conflict, onConflictChan
 
               {t.direction === 'download' ? (
                 <ArrowDown size={11} className="shrink-0 text-ink-tertiary" />
+              ) : t.direction === 'copy' ? (
+                // 远程 → 远程对拷
+                <ArrowRightLeft size={11} className="shrink-0 text-ink-tertiary" />
               ) : (
                 <ArrowUp size={11} className="shrink-0 text-ink-tertiary" />
               )}

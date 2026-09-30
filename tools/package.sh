@@ -30,6 +30,10 @@ cd "$(dirname "$0")/.."
 # 打包是交付前的最后一道门，死命令（注册了没人调 / 调了没注册）不该跟着安装包出去
 npm run check:commands
 
+# 分屏排布也过一遍穷举校验：拖拽切出来的格子表是纯整数运算，畸形排布（洞、重叠、
+# 新格跑到隔壁）在界面上只表现为"有点怪"，指望点几下看出来不现实。几秒的事，别省
+npm run check:layout
+
 # 构建前 dist 必须**不存在**：vite 配了 `emptyOutDir: false`（它整目录 rm 会被环境的
 # 批量删除保护拦下），而 vite.config.ts 里那个 clean-old-assets 插件是逐个删
 # dist/assets —— 同样会撞上保护，然后以一个看不出因果的 `npm run build failed` 收场。

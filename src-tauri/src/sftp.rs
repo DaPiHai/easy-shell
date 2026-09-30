@@ -892,6 +892,173 @@ pub async fn sftp_upload(
     .await
 }
 
+/**
+ * 远端 → 远端对拷：把 from（文件或目录）复制到另一个远端目录 to_dir 下。
+ *
+ * 数据在 Rust 侧**流式中转**（读一块写一块），不经过本地落盘 —— 本地中转要两倍
+ * 磁盘 IO 和一份临时文件，跨主机拷大目录时完全没必要。
+ *
+ * 不做断点续传：中转流没有"上次那半截"可认（源和目标都在远端，校验前缀要来回
+ * 拉两份数据），中断就整体重来，`.part` 机制照旧保证目标只可能是完整的。
+ */
+pub async fn copy_to<F>(
+    src: Arc<SftpSession>,
+    from: &str,
+    dst: Arc<SftpSession>,
+    to_dir: &str,
+    conflict: ConflictPolicy,
+    on_progress: F,
+) -> Result<(), String>
+where
+    F: Fn(TransferEvent),
+{
+    let fail = |e: String| {
+        on_progress(TransferEvent::Error { message: e.clone() });
+        e
+    };
+
+    // 同一条 SSH 会话上自己抄自己时，抄进源目录的子树会让新拷出来的文件又成为
+    // 源（collect 先展开倒是不会无限递归，但结果是个谁也不想要的嵌套副本）。
+    // 跨主机时两条会话的路径字面量可能一模一样（都是 /home/u），不能只比字符串 ——
+    // 同会话 ⇔ 同一个 SftpSession 句柄（SftpRegistry 按会话复用同一个 Arc）。
+    // 比较前把 \ 统一成 /：远端可能是 OpenSSH on Windows（反斜杠），测试里也是
+    if Arc::ptr_eq(&src, &dst) {
+        let norm = |p: &str| p.trim_end_matches(['/', '\\']).replace('\\', "/");
+        let from_n = norm(from);
+        let to_n = norm(to_dir);
+        if to_n == from_n || to_n.starts_with(&format!("{from_n}/")) {
+            return Err("不能把目录复制进它自己的子目录".to_string());
+        }
+    }
+
+    let meta = src
+        .metadata(from)
+        .await
+        .map_err(|e| fail(format!("读取源属性失败: {e}")))?;
+
+    let items: Vec<Item> = if meta.file_type().is_dir() {
+        let name = base_name(from).to_string();
+        let mut v = vec![Item {
+            src: from.to_string(),
+            rel: name.clone(),
+            size: 0,
+            is_dir: true,
+            modified: None,
+        }];
+        v.extend(collect_remote(src.clone(), from.to_string(), name).await.map_err(&fail)?);
+        v
+    } else {
+        let name = base_name(from).to_string();
+        vec![Item {
+            src: from.to_string(),
+            rel: name,
+            size: meta.len(),
+            is_dir: false,
+            modified: secs(meta.modified()),
+        }]
+    };
+
+    let total: u64 = items.iter().map(|i| i.size).sum();
+    let mut transferred = 0u64;
+    let mut buf = vec![0u8; CHUNK];
+
+    // 先把目录骨架建好（已存在就忽略），空目录才不会丢
+    for item in items.iter().filter(|i| i.is_dir) {
+        let _ = dst.create_dir(remote_join(to_dir, &item.rel)).await;
+    }
+
+    for item in items.iter().filter(|i| !i.is_dir) {
+        let mut target = remote_join(to_dir, &item.rel);
+
+        // 与上传/下载同一套判断：先看目标是不是已经和源一致，再按冲突策略处理
+        if let Ok(existing) = dst.metadata(&target).await {
+            if is_up_to_date(existing.len(), secs(existing.modified()), item) {
+                transferred += item.size;
+                on_progress(TransferEvent::Progress { transferred, total });
+                on_progress(TransferEvent::Skip {
+                    name: item.rel.clone(),
+                    reason: "已是最新".to_string(),
+                });
+                continue;
+            }
+            match conflict {
+                ConflictPolicy::Skip => {
+                    transferred += item.size;
+                    on_progress(TransferEvent::Progress { transferred, total });
+                    on_progress(TransferEvent::Skip {
+                        name: item.rel.clone(),
+                        reason: "目标已存在".to_string(),
+                    });
+                    continue;
+                }
+                ConflictPolicy::KeepBoth => {
+                    target = remote_unique_path(&dst, &target).await;
+                }
+                ConflictPolicy::Overwrite => {}
+            }
+        }
+
+        // 目标侧同样先写 `<目标>.part` 再改名：目标文件只可能是完整的
+        let tmp = format!("{target}.part");
+        let _ = dst.remove_file(&tmp).await;
+
+        let mut reader = src
+            .open(&item.src)
+            .await
+            .map_err(|e| fail(format!("打开源文件 {} 失败: {e}", item.src)))?;
+        let mut writer = dst
+            .create(&tmp)
+            .await
+            .map_err(|e| fail(format!("创建目标临时文件 {tmp} 失败: {e}")))?;
+
+        loop {
+            let n = reader
+                .read(&mut buf)
+                .await
+                .map_err(|e| fail(format!("读取源文件失败: {e}")))?;
+            if n == 0 {
+                break;
+            }
+            writer
+                .write_all(&buf[..n])
+                .await
+                .map_err(|e| fail(format!("写入目标文件失败: {e}")))?;
+            transferred += n as u64;
+            on_progress(TransferEvent::Progress { transferred, total });
+        }
+
+        // 关掉写句柄再改名：先把数据刷出去，也避免服务端还持着旧名字
+        writer
+            .close()
+            .await
+            .map_err(|e| fail(format!("关闭目标临时文件失败: {e}")))?;
+        dst.rename(&tmp, &target)
+            .await
+            .map_err(|e| fail(format!("改名到 {target} 失败: {e}")))?;
+    }
+
+    on_progress(TransferEvent::Done { transferred });
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn sftp_copy(
+    state: State<'_, SftpState>,
+    from_sftp_id: u32,
+    from_path: String,
+    to_sftp_id: u32,
+    to_dir: String,
+    conflict: ConflictPolicy,
+    on_progress: IpcChannel<TransferEvent>,
+) -> Result<(), String> {
+    let src = state.get(from_sftp_id).await?;
+    let dst = state.get(to_sftp_id).await?;
+    copy_to(src, &from_path, dst, &to_dir, conflict, |e| {
+        let _ = on_progress.send(e);
+    })
+    .await
+}
+
 /// 内置编辑器能扛的最大文件。再大就不是"编辑"了，该用 vim
 const MAX_EDIT_BYTES: u64 = 2 * 1024 * 1024;
 
@@ -978,6 +1145,34 @@ pub async fn sftp_mkdir(
     sftp.create_dir(&path)
         .await
         .map_err(|e| format!("创建目录失败: {e}"))
+}
+
+/// 新建空文件。**同名已存在就报错、绝不覆盖**（create_new 语义）——
+/// 「新建文件」顺手把旧内容抹掉是文件管理器最不能犯的错。
+/// 抽成 pub fn 是为了集成测试能直接调（命令壳要 Tauri 的 State，测试里搭不起来）
+pub async fn create_file(sftp: &SftpSession, path: &str) -> Result<(), String> {
+    if sftp.metadata(path).await.is_ok() {
+        return Err(format!("已存在同名文件或目录: {path}"));
+    }
+    // 建完立刻关句柄：「新建空文件」到此为止，句柄留着只会占服务端资源
+    let file = sftp
+        .create(path)
+        .await
+        .map_err(|e| format!("创建文件失败: {e}"))?;
+    file.close()
+        .await
+        .map_err(|e| format!("创建文件失败: {e}"))?;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn sftp_create_file(
+    state: State<'_, SftpState>,
+    sftp_id: u32,
+    path: String,
+) -> Result<(), String> {
+    let sftp = state.get(sftp_id).await?;
+    create_file(&sftp, &path).await
 }
 
 #[tauri::command]
@@ -1072,6 +1267,20 @@ pub fn local_rename(from: String, to: String) -> Result<(), String> {
 #[tauri::command]
 pub fn local_mkdir(path: String) -> Result<(), String> {
     std::fs::create_dir_all(&path).map_err(|e| format!("创建目录失败: {e}"))
+}
+
+/// 新建本地空文件。**同名已存在就报错、绝不覆盖**（create_new 语义），与远端那条对称
+#[tauri::command]
+pub fn local_create_file(path: String) -> Result<(), String> {
+    if Path::new(&path).exists() {
+        return Err(format!("已存在同名文件或目录: {path}"));
+    }
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+        .map_err(|e| format!("创建文件失败: {e}"))?;
+    Ok(())
 }
 
 /// 本地权限串。Windows 没有 unix mode，只能给个只读标记，干脆返回 null 让前端占位

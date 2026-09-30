@@ -5,33 +5,22 @@ import { copyQuietly } from '@/lib/clipboard'
 import {
   acceptsPanes,
   bandWidths,
+  dividersOfSpec,
   MAX_PANES,
-  PANE_LAYOUTS,
   panesOf,
+  specOf,
+  splitPlanN,
   useApp,
+  type Divider,
+  type DropSide,
+  type LayoutSpec,
   type Pane,
-  type PaneLayout,
 } from '@/lib/store'
 
 /** 拖拽判定阈值：手抖点一下不该被当成拖动 */
 const DRAG_THRESHOLD = 5
 /** 分割线离两端的最近距离，别让某一格被拖到看不见 */
 const MIN_PANE = 120
-
-/**
- * 一条可拖的分割线。
- *
- * `at` 是它在轴上的位置（前若干带宽度之和），`from` / `to` 是它在**另一条轴**上的跨度 ——
- * 三格、四格的混合排法里，短线只画在真正分界的那一段（「左一右二」的横线只在右列里）。
- * `band` 记着它分开的是哪两带：拖动时改的就是这两带的宽度。
- */
-interface Divider {
-  axis: 'col' | 'row'
-  at: number
-  from: number
-  to: number
-  band: number
-}
 
 /** 投放高亮覆盖层的形状：新格子会长在哪一块，就点亮哪一块 */
 const ZONE_CLASS: Record<DropZone, string> = {
@@ -40,65 +29,6 @@ const ZONE_CLASS: Record<DropZone, string> = {
   right: 'inset-y-0 right-0 w-1/2',
   top: 'inset-x-0 top-0 h-1/2',
   bottom: 'inset-x-0 bottom-0 h-1/2',
-}
-
-/** 第 i 条边界在轴上的位置 = 前 i+1 带宽度之和 */
-function edgeAt(widths: number[], band: number): number {
-  return widths.slice(0, band + 1).reduce((a, b) => a + b, 0)
-}
-
-/** 这一形状有哪些可拖的分割线。落点由带宽度算出，跨度按形状给 */
-function dividersOf(layout: PaneLayout, colW: number[], rowW: number[]): Divider[] {
-  const colEdge = (band: number, from: number, to: number): Divider => ({
-    axis: 'col',
-    at: edgeAt(colW, band),
-    band,
-    from,
-    to,
-  })
-  const rowEdge = (band: number, from: number, to: number): Divider => ({
-    axis: 'row',
-    at: edgeAt(rowW, band),
-    band,
-    from,
-    to,
-  })
-  const full = { from: 0, to: 1 }
-
-  switch (layout) {
-    case 'cols2':
-      return [colEdge(0, full.from, full.to)]
-    case 'rows2':
-      return [rowEdge(0, full.from, full.to)]
-    case 'cols3':
-      return [colEdge(0, 0, 1), colEdge(1, 0, 1)]
-    case 'rows3':
-      return [rowEdge(0, 0, 1), rowEdge(1, 0, 1)]
-    case 'cols4':
-      return [colEdge(0, 0, 1), colEdge(1, 0, 1), colEdge(2, 0, 1)]
-    case 'rows4':
-      return [rowEdge(0, 0, 1), rowEdge(1, 0, 1), rowEdge(2, 0, 1)]
-    case 'grid4':
-      return [colEdge(0, 0, 1), rowEdge(0, 0, 1)]
-    case 'left1Right2':
-      return [colEdge(0, 0, 1), rowEdge(0, colW[0], 1)]
-    case 'left2Right1':
-      return [colEdge(0, 0, 1), rowEdge(0, 0, colW[0])]
-    case 'left1Right3':
-      return [colEdge(0, 0, 1), rowEdge(0, colW[0], 1), rowEdge(1, colW[0], 1)]
-    case 'left3Right1':
-      return [colEdge(0, 0, 1), rowEdge(0, 0, colW[0]), rowEdge(1, 0, colW[0])]
-    case 'top1Bottom2':
-      return [rowEdge(0, 0, 1), colEdge(0, rowW[0], 1)]
-    case 'top2Bottom1':
-      return [rowEdge(0, 0, 1), colEdge(0, 0, rowW[0])]
-    case 'top1Bottom3':
-      return [rowEdge(0, 0, 1), colEdge(0, rowW[0], 1), colEdge(1, rowW[0], 1)]
-    case 'top3Bottom1':
-      return [rowEdge(0, 0, 1), colEdge(0, 0, rowW[0]), colEdge(1, 0, rowW[0])]
-    default:
-      return []
-  }
 }
 
 /** 拖标签落到本窗口时的结果：能并 / 拖到了自己身上 / 满了 / 放不下 / 有一边不是终端 */
@@ -123,7 +53,8 @@ let pendingTabDrop: {
   targetTabId: string
   sourceTabId: string
   insertAt: number
-  layoutHint?: PaneLayout
+  /** 切开落点那一格之后这一屏的格子表（`splitPlanN` 给的）；没命中格子或算不出就是 null */
+  spec: LayoutSpec | null
 } | null = null
 
 /** 拒绝时的浮签文案（能并的时候文案跟着落点走，见 onMove） */
@@ -141,8 +72,13 @@ interface Props {
   tabId: string
   /** 1–4 个格子，**顺序就是视觉顺序**（见 store 的 `Tab.panes`） */
   panes: Pane[]
-  /** 这一屏摆成什么形状（见 store 的 `PANE_LAYOUTS`） */
-  layout: PaneLayout
+  /**
+   * 这一屏摆成什么形状 —— **真格子表**，不是形状的名字（见 store 的 `specOf`）。
+   *
+   * 拖拽切出来的排布有一大半对不上任何预设（三列里某一列上下分、两列再切一列…），
+   * 那些排布只存在 `Tab.layoutSpec` 里。传名字的话它们根本画不出来，所以这里要的是表。
+   */
+  spec: LayoutSpec
   /** 渲染某一格的终端。PaneGrid 只管摆位，不关心里面是什么 */
   renderPane: (pane: Pane) => React.ReactNode
 }
@@ -164,7 +100,7 @@ interface Props {
  *    wry 装的 IDropTarget 会让内部 HTML5 拖拽在 Windows 上整体失效 —— 同一套
  *    手法在 SftpPanel 的双栏拖拽上已经跑通，这里照搬。
  */
-export function PaneGrid({ tabId, panes, layout, renderPane }: Props) {
+export function PaneGrid({ tabId, panes, spec, renderPane }: Props) {
   const containerRef = useRef<HTMLDivElement>(null)
   /** 每一格的 DOM，拖拽换位时做命中测试用 */
   const cellsRef = useRef(new Map<string, HTMLDivElement>())
@@ -173,7 +109,6 @@ export function PaneGrid({ tabId, panes, layout, renderPane }: Props) {
   const splitColBands = useApp((s) => s.splitColBands)
   const splitRowBands = useApp((s) => s.splitRowBands)
 
-  const spec = PANE_LAYOUTS[layout]
   const count = panes.length
   // 单格不显示标题条（保持现在的干净外观），但**位置留着**，用 hidden 藏 —— 理由见文件头第 1 条
   const showTitle = count > 1
@@ -184,7 +119,8 @@ export function PaneGrid({ tabId, panes, layout, renderPane }: Props) {
   const rowWidths = bandWidths(splitRowBands, spec.rows)
   const gridColumns = colWidths.map((w) => `${w}fr`).join(' ')
   const gridRows = rowWidths.map((w) => `${w}fr`).join(' ')
-  const dividers = dividersOf(layout, colWidths, rowWidths)
+  // 分割线从格子表推出来（见 paneLayout 的 dividersOfSpec）：自定义排布也有，不用一张张形状写死
+  const dividers: Divider[] = dividersOfSpec(spec, colWidths, rowWidths)
 
   /* ---------------- 分隔条 ---------------- */
 
@@ -369,7 +305,7 @@ export function PaneGrid({ tabId, panes, layout, renderPane }: Props) {
         }
 
         /**
-         * 落点：插到这一格的**哪一侧**。
+         * 落点：插到这一格的**哪一侧**，以及切开它之后这一屏变成什么形状。
          *
          * **所有情况都按半格判**（以前只有"单格窗口"这么算，多格窗口退化成整格 +
          * 插到那一格**之前**）—— 于是把标签拖到右格上，高亮盖着右格、新格子却出现在
@@ -377,13 +313,14 @@ export function PaneGrid({ tabId, panes, layout, renderPane }: Props) {
          * `dev-box | db-primary | web-01`）。高亮画在哪儿，新格子就该出现在哪儿：
          * 压在这一格的左/上半边 = 插到它之前，右/下半边 = 插到它之后。
          *
-         * `layoutHint` 只给单格窗口：那时横竖由这一次落点决定（cols2 / rows2）；
-         * 多格窗口的形状交给 `grownLayout` 长一档 —— 硬塞一个形状会打乱原有排布。
+         * **形状由 `splitPlanN` 切开落点那一格算出**（源标签有几格就切几刀），
+         * 不再交给"下一档预设"（`GROWN_LAYOUT`）—— 那正是"三四分屏拖不出所有形式"
+         * 的根因：拖到某一格的半边不会真的切开它，于是「左二右一」「上二下一」这些
+         * 只能去菜单里点。splitPlanN 切不出来（拖到窗口空白处）才不给方案，由 store 兜底。
          */
         const hitIndex = targetPanes.findIndex((p) => p.id === hit)
-        const solo = targetPanes.length === 1 && panesOf(src).length === 1
         let insertAt = hitIndex >= 0 ? hitIndex : targetPanes.length
-        let layoutHint: PaneLayout | undefined
+        let dropSpec: LayoutSpec | null = null
         let zone: DropZone = 'full'
         let text = '松手：并到这一格（那一格会重开一个 shell）'
         const r = (hit ? cellsRef.current.get(hit) : null)?.getBoundingClientRect()
@@ -397,7 +334,15 @@ export function PaneGrid({ tabId, panes, layout, renderPane }: Props) {
             : e.clientY - r.top > r.height / 2
           zone = horizontal ? (after ? 'right' : 'left') : after ? 'bottom' : 'top'
           insertAt = (hitIndex >= 0 ? hitIndex : targetPanes.length) + (after ? 1 : 0)
-          if (solo) layoutHint = horizontal ? 'cols2' : 'rows2'
+          if (hitIndex >= 0) {
+            const side: DropSide = zone
+            dropSpec = splitPlanN(
+              specOf(target),
+              hitIndex,
+              side,
+              Math.min(panesOf(src).length, MAX_PANES - targetPanes.length),
+            )?.spec ?? null
+          }
           const sideText = horizontal
             ? after
               ? '右侧'
@@ -405,9 +350,9 @@ export function PaneGrid({ tabId, panes, layout, renderPane }: Props) {
             : after
               ? '下方'
               : '上方'
-          text = `松手：插到这一格的${sideText}（重开一个 shell）`
+          text = `松手：插到这一格的${sideText}（这一格会被切成两半，那一格重开一个 shell）`
         }
-        pendingTabDrop = { targetTabId: tabId, sourceTabId: dragTabId, insertAt, layoutHint }
+        pendingTabDrop = { targetTabId: tabId, sourceTabId: dragTabId, insertAt, spec: dropSpec }
         setTabDrop({ state, paneId: hit, zone })
         setGhost((cur) =>
           cur && cur.text === text ? cur : { x: e.clientX, y: e.clientY, text },
@@ -451,7 +396,7 @@ export function PaneGrid({ tabId, panes, layout, renderPane }: Props) {
         if (insideMe(e.clientX, e.clientY)) {
           useApp
             .getState()
-            .mergeTabIntoPane(tabId, plan.sourceTabId, plan.insertAt, plan.layoutHint)
+            .mergeTabIntoPane(tabId, plan.sourceTabId, { insertAt: plan.insertAt, spec: plan.spec })
         }
         return
       }
@@ -524,7 +469,7 @@ export function PaneGrid({ tabId, panes, layout, renderPane }: Props) {
         }}
       >
         {panes.map((pane, i) => {
-          // 位置由形状决定：panes 的下标 → 网格里的行列（见 store 的 PANE_LAYOUTS）。
+          // 位置由形状表决定：panes 的下标 → 网格里的行列（见 paneLayout 的 LayoutSpec）。
           // 这层映射是"形状"唯一的落地点，换形状时格子挪窝但组件不重建
           const cell = spec.cells[i] ?? { c: 1, r: 1 }
           return (

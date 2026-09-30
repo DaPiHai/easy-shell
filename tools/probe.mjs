@@ -18,19 +18,32 @@
  *   node tools/probe.mjs connect        # 只跑「新建会话表单的状态清理」
  *   node tools/probe.mjs paste          # 只跑「粘贴次数」
  *   node tools/probe.mjs sidebar        # 只跑「收起会话侧栏」
- *   node tools/probe.mjs dropzone       # 只跑「多分屏拖拽落点」
+ *   node tools/probe.mjs dropzone       # 只跑「多分屏拖拽落点 + 拖出来的形状」
+ *   node tools/probe.mjs batchbar       # 只跑「本屏批量执行：拖高度 + 逐行运行」
+ *   node tools/probe.mjs fonts          # 只跑「设置里的字体下拉框（清单/筛选/自定义栈）」
  *   node tools/probe.mjs rename         # 只跑「双击标签改名」
+ *   node tools/probe.mjs sessiondrag    # 只跑「拖主机换分组」
+ *   node tools/probe.mjs rightpanel     # 只跑「右侧文件栏 + 空白右键」
  *
  * 环境变量：EDGE_PATH / PROBE_PORT / PROBE_URL 可覆盖默认值。
  * 截图落在 `.workbuddy-ai/shots/`（该目录不进版本库）。
  *
  * 场景里用到的 DOM 约定（改 UI 时留意，探针断了多半是这里变了）：
  *   - 标签栏的标签：`div[title]` 且 class 含 `h-9` + `cursor-pointer`
- *   - 会话树主机行的可点区：`div[title="点击连接"]`
+ *   - 会话树主机行的可点区：`div[data-host-title]`
+ *   - 本屏批量执行条：`[data-batch-bar]`、上沿把手 `[data-batch-resizer]`、
+ *     「逐行」勾选框 `[data-batch-linebyline]`、每格的结果卡 `[data-batch-card]`
  *   - 会话树过滤框：`[data-host-filter]`；标签快捷条：`[data-tag-filter="<标签>"]`
+ *   - 顶栏开关：`[data-sidebar-toggle]`（会话侧栏）、`[data-right-panel-toggle]`（右侧文件栏）
+ *   - 右侧文件栏：`[data-right-panel]`、拖宽手柄 `[data-right-panel-resizer]`
+ *   - 文件栏栏头换绑按钮：`[data-pane-binding]`；文件行菜单项 `data-menu-item`
+ *     （`file-*` / `blank-new-file` / `blank-new-folder` / `blank-refresh`）
  *   - 主机行里的标签 chip：`[data-tag-chip]`；主机行编辑按钮：`[data-host-edit="<hostId>"]`
  *   - 分组块：`[data-group-id]`（未分组用空串），组里有几台 = 里面 `[data-host-edit]` 的个数
  *   - 终端窗口：`[data-pane-grid]`，格数 = 里面 `[data-pane-title]` 的个数
+ *   - 设置面板的字体下拉框：`[data-font-picker]`（触发器）、`[data-font-panel]`、
+ *     `[data-font-search]`、`[data-font-mono-only]`、`[data-font-list]`、
+ *     `[data-font-option="<字体名>"]`、`[data-font-custom]` / `[data-font-custom-input]`
  *   - 投放高亮层：`div[aria-hidden]` 且 class 含 `border-dashed`
  *   - 右下角提示条：`div.fixed.bottom-8.right-4`
  */
@@ -195,6 +208,8 @@ async function launch() {
  * 注意：整段是**模板字符串**，里面不能出现反引号 —— 连注释里拿来当代码引号也不行，
  * 会把模板截断成语法错误，报的还是「Invalid left-hand side expression in postfix operation」
  * 这种完全看不出因果的话（被自己坑过一次）。要用引号就老实写引号。
+ * 正则也留神：反斜杠会被模板字符串先吃掉一层，`\d` 到了页面里就成了 `d`，
+ * 报的是「missing ) after argument list」（这条也踩过），所以正则一律写双反斜杠。
  */
 const HELPERS = `
 window.__probe = {
@@ -209,7 +224,7 @@ window.__probe = {
   },
   /** 会话树里的主机行 */
   hosts() {
-    return [...document.querySelectorAll('div[title="点击连接"]')].map((el) => {
+    return [...document.querySelectorAll('div[data-host-title]')].map((el) => {
       const r = el.getBoundingClientRect()
       return { text: el.textContent, x: r.left + r.width / 2, y: r.top + r.height / 2 }
     })
@@ -244,7 +259,7 @@ window.__probe = {
   },
   /** 会话树里当前**可见**的主机行文字（过滤生效后剩几行，看它） */
   hostsVisible() {
-    return [...document.querySelectorAll('div[title="点击连接"]')].map((el) => el.textContent)
+    return [...document.querySelectorAll('div[data-host-title]')].map((el) => el.textContent)
   },
   /** 顶部标签快捷条上的标签 */
   tagBar() {
@@ -482,6 +497,115 @@ window.__probe = {
     if (!el) return null
     return el.tagName + (el.className ? '.' + String(el.className).split(' ')[0] : '')
   },
+  /** 「本屏批量执行」条：高度、上边缘把手的坐标、展开没 */
+  batchBar() {
+    const el = document.querySelector('[data-batch-bar]')
+    if (!el) return null
+    const r = el.getBoundingClientRect()
+    const grip = el.querySelector('[data-batch-resizer]')
+    const g = grip ? grip.getBoundingClientRect() : null
+    return {
+      h: Math.round(r.height),
+      top: Math.round(r.top),
+      gripX: g ? Math.round(g.left + g.width / 2) : null,
+      gripY: g ? Math.round(g.top + g.height / 2) : null,
+      open: !!el.querySelector('textarea'),
+    }
+  },
+  /** 批量执行每格一张结果卡：标题 + 全文（逐行的状态就在里面） */
+  batchCards() {
+    return [...document.querySelectorAll('[data-batch-card]')].map((el) => ({
+      title: el.getAttribute('data-batch-card'),
+      text: el.textContent,
+    }))
+  },
+  /** 一批结果卡里某段文字出现了几次（判"整段跑一次"还是"按行跑了 N 次"） */
+  countInCards(needle) {
+    return [...document.querySelectorAll('[data-batch-card]')]
+      .map((el) => el.textContent.split(needle).length - 1)
+      .reduce((a, b) => a + b, 0)
+  },
+  /** mock 记下的 ssh_exec 命令原文（一次调用一条）：逐行 = N 条，整段 = 1 条 */
+  execLog() {
+    return window.__execLog
+  },
+  clearExecLog() {
+    window.__execLog.length = 0
+    return 'cleared'
+  },
+  /**
+   * 往批量执行那个 textarea 塞多行命令（React 受控 → 原生 setter + input 事件）。
+   *
+   * 选择器必须**限定在这条栏里**：xterm 自己也藏着一个 textarea（helper），
+   * 而它在 DOM 里更靠前 —— 直接 querySelector('textarea') 抓到的是它，
+   * 命令写进去静默消失，表现成"点了执行什么都没发生"。
+   */
+  fillBatch(text) {
+    const el = document.querySelector('[data-batch-bar] textarea')
+    if (!el) return 'no-textarea'
+    const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set
+    setter.call(el, text)
+    el.dispatchEvent(new Event('input', { bubbles: true }))
+    return el.value
+  },
+  /** 当前可见那一屏里的分割线（拖比例的那几条）：自定义排布也该有 */
+  separators() {
+    const grid = [...document.querySelectorAll('[data-pane-grid]')].find((g) => !g.closest('.hidden'))
+    if (!grid) return []
+    return [...grid.querySelectorAll('[role=separator]')].map((el) => {
+      const r = el.getBoundingClientRect()
+      return {
+        axis: el.getAttribute('aria-orientation') === 'vertical' ? 'col' : 'row',
+        left: Math.round(r.left),
+        top: Math.round(r.top),
+        w: Math.round(r.width),
+        h: Math.round(r.height),
+        x: Math.round(r.left + r.width / 2),
+        y: Math.round(r.top + r.height / 2),
+      }
+    })
+  },
+  /** 字体下拉框：触发器上写的名字、面板开没开、列出哪些字体、勾的是哪个 */
+  fontPicker() {
+    const trigger = document.querySelector('[data-font-picker]')
+    const panel = document.querySelector('[data-font-panel]')
+    const opts = [...document.querySelectorAll('[data-font-option]')]
+    return {
+      trigger: trigger ? trigger.textContent : null,
+      open: !!panel,
+      options: opts.map((el) => el.getAttribute('data-font-option')),
+      checked: opts
+        .filter((el) => el.querySelector('svg.lucide-check'))
+        .map((el) => el.getAttribute('data-font-option')),
+      monoOnly: panel ? panel.querySelector('[data-font-mono-only]').getAttribute('aria-pressed') : null,
+      countText: panel ? (panel.textContent.match(/\\d+ \\/ \\d+ 个字体/) || [''])[0] : '',
+    }
+  },
+  /**
+   * 候选行的名字是不是真用它自己的字体画的。
+   *
+   * 无效的 font-family（比如多词族名不加引号）浏览器会整条丢掉、退回继承的字体，
+   * 所以这里读计算值：里头必须出现这个族名。
+   */
+  fontOptionCss(label) {
+    const el = document.querySelector('[data-font-option="' + label + '"] span')
+    return el ? getComputedStyle(el).fontFamily : null
+  },
+  /**
+   * 终端字符格子的物理痕迹：xterm 按当前字体量出格子尺寸，
+   * 字体一换这个数字就变（这是"字体真作用到终端上了"唯一的可观察点 ——
+   * 画布渲染器不在 DOM 里写 font-family，ctx.font 也被 save/restore 复位了）。
+   */
+  termMetrics() {
+    const canvases = [...document.querySelectorAll('.xterm canvas')]
+    const atlas = canvases[canvases.length - 1]
+    const screen = document.querySelector('.xterm-screen')
+    return {
+      canvases: canvases.length,
+      atlas: atlas ? [atlas.width, atlas.height] : null,
+      screen: screen ? screen.getAttribute('style') : null,
+    }
+  },
 }
 'injected'
 `
@@ -511,6 +635,27 @@ async function boxOf(cdp, sel) {
 /** 真鼠标点一下某个选择器 */
 async function clickSel(cdp, sel) {
   const box = await boxOf(cdp, sel)
+  await cdp.mouse('mousePressed', box.x, box.y)
+  await cdp.mouse('mouseReleased', box.x, box.y)
+  return box
+}
+
+/**
+ * 先滚进可视区再点。
+ *
+ * 设置面板的内容区是滚动的，字体那一行在下面 —— 不滚的话 `getBoundingClientRect()`
+ * 给的坐标落在面板外面（那一层正好是"点一下就关面板"的遮罩），表现成
+ * 「点了没反应，面板还关了」。列表内部的滚动条 `scrollIntoView` 也一起管。
+ */
+async function clickSelScrolled(cdp, sel) {
+  const box = await cdp.eval(`(() => {
+    const el = document.querySelector(${JSON.stringify(sel)})
+    if (!el) return null
+    el.scrollIntoView({ block: 'center' })
+    const r = el.getBoundingClientRect()
+    return { x: r.left + r.width / 2, y: r.top + r.height / 2 }
+  })()`)
+  if (!box) throw new Error(`找不到元素：${sel}`)
   await cdp.mouse('mousePressed', box.x, box.y)
   await cdp.mouse('mouseReleased', box.x, box.y)
   return box
@@ -615,6 +760,192 @@ async function scenarioDragTab(cdp) {
 }
 
 /** 只有换行的命令应该也能发出去（曾经的 bug：trim 后判空 → 被拦下） */
+
+/**
+ * 场景：拖主机换分组。
+ *
+ * 曾经用 HTML5 拖拽（draggable + onDragOver/onDrop），而 `tauri.conf.json` 开着
+ * `dragDropEnabled` —— wry 的 IDropTarget 会让内部 HTML5 拖拽在 Windows 打包版
+ * 整体失效，拖了没有任何反应（用户报的问题 1）。现在照 PaneGrid 那套用鼠标事件
+ * 自绘，这条探针钉住三件事：拖着走时有说清去向的浮签、松手真的换了分组、
+ * 拖完不会误触发「点击连接」（浏览器会在拖完补一次 click）。
+ */
+async function scenarioSessionDrag(cdp) {
+  await cdp.send('Page.navigate', { url: PAGE })
+  await sleep(1200)
+  await cdp.eval(HELPERS)
+  await waitFor(cdp, '__probe.hosts().length > 0', '会话树里的主机行')
+
+  const counts = () =>
+    cdp.eval(`[...document.querySelectorAll('[data-group-id]')].map((b) => ({
+      group: b.getAttribute('data-group-id'),
+      hosts: b.querySelectorAll('[data-host-edit]').length,
+    }))`)
+  console.log('拖之前各组行数:', JSON.stringify(await counts()))
+
+  /** 未分组里那台的标题中心，和「内网」分组行的中心 */
+  const from = await cdp.eval(`(() => {
+    const r = document.querySelector('[data-group-id=""] [data-host-title]').getBoundingClientRect()
+    return { x: r.left + r.width / 2, y: r.top + r.height / 2 }
+  })()`)
+  const to = await cdp.eval(`(() => {
+    const r = document.querySelector('[data-group-id="g-intra"] > div').getBoundingClientRect()
+    return { x: r.left + r.width / 2, y: r.top + r.height / 2 }
+  })()`)
+
+  const tabsBefore = (await cdp.eval('__probe.tabs()')).length
+
+  await cdp.mouse('mousePressed', from.x, from.y)
+  for (const t of [0.25, 0.5, 0.75, 1]) {
+    await cdp.mouse('mouseMoved', from.x + (to.x - from.x) * t, from.y + (to.y - from.y) * t)
+    await sleep(60)
+  }
+  // 拖着走时的浮签得说清"要挪去哪"
+  const ghost = await cdp.eval(`(() => {
+    const el = [...document.querySelectorAll('div')].find(
+      (d) => d.className.includes('fixed') && d.textContent.trim().startsWith('移动'),
+    )
+    return el ? el.textContent.trim() : null
+  })()`)
+  console.log('拖到一半时的浮签:', JSON.stringify(ghost))
+  if (!ghost || !ghost.includes('内网')) throw new Error(`浮签没说目标分组：${ghost}`)
+  await cdp.shot('probe-session-drag-0-hover.png')
+
+  await cdp.mouse('mouseReleased', to.x, to.y, { buttons: 0 })
+  await sleep(500)
+
+  const after = await counts()
+  console.log('拖之后各组行数:', JSON.stringify(after))
+  const intra = after.find((g) => g.group === 'g-intra')
+  const none = after.find((g) => g.group === '')
+  if (!intra || intra.hosts !== 3) throw new Error(`拖进「内网」没生效：${JSON.stringify(after)}`)
+  if (!none || none.hosts !== 0) throw new Error(`未分组里还剩人：${JSON.stringify(after)}`)
+
+  // 松手后浏览器会补一次 click —— 不能连带触发「点击连接」
+  const tabsAfter = (await cdp.eval('__probe.tabs()')).length
+  if (tabsAfter !== tabsBefore) throw new Error('拖完误触发了连接（标签数变了）')
+
+  // 再拖回未分组：反方向也要通（顺便把数据还原，不然后面的场景数不对）
+  const from2 = await cdp.eval(`(() => {
+    const r = document.querySelector('[data-group-id="g-intra"] [data-host-title]').getBoundingClientRect()
+    return { x: r.left + r.width / 2, y: r.top + r.height / 2 }
+  })()`)
+  const to2 = await cdp.eval(`(() => {
+    const r = document.querySelector('[data-group-id=""] > div').getBoundingClientRect()
+    return { x: r.left + r.width / 2, y: r.top + r.height / 2 }
+  })()`)
+  await cdp.mouse('mousePressed', from2.x, from2.y)
+  for (const t of [0.25, 0.5, 0.75, 1]) {
+    await cdp.mouse('mouseMoved', from2.x + (to2.x - from2.x) * t, from2.y + (to2.y - from2.y) * t)
+    await sleep(60)
+  }
+  await cdp.mouse('mouseReleased', to2.x, to2.y, { buttons: 0 })
+  await sleep(500)
+
+  const back = await counts()
+  console.log('拖回未分组后:', JSON.stringify(back))
+  const noneBack = back.find((g) => g.group === '')
+  if (!noneBack || noneBack.hosts !== 1) throw new Error(`拖回未分组没生效：${JSON.stringify(back)}`)
+  await cdp.shot('probe-session-drag-1-done.png')
+
+  console.log('拖拽换分组探针：全部通过')
+}
+
+/**
+ * 场景：右侧文件栏（问题 3 / 5 的冒烟）。
+ *
+ * 顶栏右上角的 📁 开出文件栏；空白区右键给「新建文件 / 新建文件夹 / 刷新」；
+ * 栏头「本机 ▾」能换绑定（本机 / 已连接会话 / 连接主机）。
+ */
+async function scenarioRightPanel(cdp) {
+  await cdp.send('Page.navigate', { url: PAGE })
+  await sleep(1200)
+  await cdp.eval(HELPERS)
+  await waitFor(cdp, '__probe.hosts().length > 0', '会话树里的主机行')
+
+  if ((await cdp.eval(`!!document.querySelector('[data-right-panel]')`)))
+    throw new Error('文件栏默认不该开着')
+
+  await clickSel(cdp, '[data-right-panel-toggle]')
+  await sleep(400)
+  const panel = await cdp.eval(`(() => {
+    const el = document.querySelector('[data-right-panel]')
+    if (!el) return null
+    const r = el.getBoundingClientRect()
+    return { w: Math.round(r.width), text: el.textContent.slice(0, 80) }
+  })()`)
+  console.log('文件栏:', JSON.stringify(panel))
+  if (!panel) throw new Error('点 📁 之后文件栏没出来')
+  await cdp.shot('probe-right-panel-0-open.png')
+
+  // 底部那排操作按钮：图标 + 悬停提示，窄栏里不许溢出/换行
+  // （文字按钮版在 320px 宽的文件栏里挤成一团，就是用户报的"显示问题"）
+  const bar = await cdp.eval(`(() => {
+    const btn = document.querySelector('[data-transfer-resume]')
+    const row = btn.parentElement
+    const r = row.getBoundingClientRect()
+    return {
+      scroll: row.scrollWidth,
+      client: row.clientWidth,
+      h: Math.round(r.height),
+      titles: [...row.querySelectorAll('button')].map((b) => b.getAttribute('title')),
+    }
+  })()`)
+  console.log('底部工具条:', JSON.stringify(bar))
+  if (bar.scroll > bar.client + 1 || bar.h > 30)
+    throw new Error(`底部工具条溢出/换行了：${JSON.stringify(bar)}`)
+  if (bar.titles.length < 5 || bar.titles.some((t) => !t))
+    throw new Error(`有按钮没挂悬停提示：${JSON.stringify(bar.titles)}`)
+
+  // 空白区右键：新建文件 / 新建文件夹 / 刷新
+  const blank = await cdp.eval(`(() => {
+    const r = document.querySelector('[data-right-panel]').getBoundingClientRect()
+    return { x: r.left + r.width / 2, y: r.bottom - 80 }
+  })()`)
+  await cdp.rightClick(blank.x, blank.y)
+  await sleep(250)
+  const menu = await cdp.eval(`[...document.querySelectorAll('[data-menu-item]')].map((e) => e.getAttribute('data-menu-item'))`)
+  console.log('空白右键菜单:', JSON.stringify(menu))
+  for (const id of ['blank-new-file', 'blank-new-folder', 'blank-refresh']) {
+    if (!menu.includes(id)) throw new Error(`空白菜单少了 ${id}（现有：${menu.join(', ')}）`)
+  }
+
+  // 新建文件 → 弹「新建本地文件」输入框（文件栏默认绑本机）
+  await clickMenuItem(cdp, 'blank-new-file')
+  await sleep(300)
+  const dialog = await cdp.eval(`document.body.innerText.includes('新建本地文件')`)
+  console.log('新建文件弹窗:', dialog)
+  if (!dialog) throw new Error('点「新建文件」没弹输入框')
+  await cdp.shot('probe-right-panel-1-newfile.png')
+  const cancel = await cdp.eval(`__probe.buttonBox('取消')`)
+  if (cancel) {
+    await cdp.mouse('mousePressed', cancel.x, cancel.y)
+    await cdp.mouse('mouseReleased', cancel.x, cancel.y)
+  }
+  await sleep(200)
+
+  // 栏头换绑菜单
+  await clickSel(cdp, '[data-pane-binding]')
+  await sleep(250)
+  const bind = await cdp.eval(`[...document.querySelectorAll('[data-menu-item]')].map((e) => e.getAttribute('data-menu-item'))`)
+  console.log('换绑菜单:', JSON.stringify(bind))
+  for (const id of ['bind-local', 'bind-live', 'bind-connect']) {
+    if (!bind.includes(id)) throw new Error(`换绑菜单少了 ${id}（现有：${bind.join(', ')}）`)
+  }
+  await cdp.mouse('mouseMoved', blank.x, blank.y)
+  await cdp.mouse('mousePressed', blank.x, blank.y)
+  await cdp.mouse('mouseReleased', blank.x, blank.y)
+  await sleep(150)
+
+  // 再点一次收起
+  await clickSel(cdp, '[data-right-panel-toggle]')
+  await sleep(300)
+  if (await cdp.eval(`!!document.querySelector('[data-right-panel]')`))
+    throw new Error('再点 📁 文件栏没收起')
+  await cdp.shot('probe-right-panel-2-closed.png')
+
+  console.log('右侧文件栏探针：全部通过')
+}
 async function scenarioNewlineOnly(cdp) {
   await cdp.eval(HELPERS)
 
@@ -1151,8 +1482,9 @@ async function scenarioConnectForm(cdp) {
 /**
  * 场景：收起会话侧栏
  *
- * 用户报的：收起之后整块内容变黑，只剩窗口标题栏。侧栏的收起状态存在 localStorage，
- * 所以"刷新一下就黑"也能复现 —— 这条比点按钮更值得验，用户重启后就是这么撞上的。
+ * 用户报的：收起之后整块内容变黑，只剩窗口标题栏。开合状态不跨启动记忆
+ * （每次启动默认「左开右关」），所以刷新这一下验的是"全新启动回到默认展开、
+ * 且页面不许塌" —— 用户重启后就是这么撞上黑屏的。
  */
 async function scenarioSidebar(cdp) {
   await cdp.send('Page.navigate', { url: PAGE })
@@ -1169,7 +1501,7 @@ async function scenarioSidebar(cdp) {
   console.log('收起前:', JSON.stringify(await cdp.eval('__probe.layout()')))
   await cdp.shot('probe-sidebar-0-expanded.png')
 
-  await clickSel(cdp, 'aside button[title^="收起侧栏"]')
+  await clickSel(cdp, '[data-sidebar-toggle]')
   await sleep(900)
   const collapsed = await cdp.eval('__probe.layout()')
   console.log('收起后:', JSON.stringify(collapsed))
@@ -1192,55 +1524,60 @@ async function scenarioSidebar(cdp) {
     throw new Error(`终端区比视口还高：${collapsed.grid.h} > ${collapsed.inner[1]}`)
   }
 
-  /* 刷新一次（收起状态是持久化的）也得是好的 */
+  /* 刷新 = 一次全新启动：侧栏应回到「默认展开」，并且页面不许塌 */
   await cdp.send('Page.reload')
   await sleep(1500)
   await cdp.eval(HELPERS)
   await waitFor(cdp, '__probe.tabs().length > 0 || document.body.innerText.length > 0', '刷新后')
   await sleep(800)
   const reloaded = await cdp.eval('__probe.layout()')
-  console.log('收起状态下刷新:', JSON.stringify(reloaded))
+  console.log('刷新后（应恢复默认展开）:', JSON.stringify(reloaded))
+  if (!reloaded.aside) throw new Error('刷新后侧栏没有恢复默认展开（开合不该跨启动记忆）')
   if (reloaded.docScroll[1] > reloaded.inner[1] + 1) {
-    throw new Error('收起状态下刷新，整页还是被撑破：' + JSON.stringify(reloaded.docScroll))
+    throw new Error('刷新后整页被撑破：' + JSON.stringify(reloaded.docScroll))
   }
   await cdp.shot('probe-sidebar-2-reloaded.png')
 
-  // 收尾：展开回去，别把持久化状态留给后面的场景
-  await cdp.eval(`window.localStorage.setItem('sidebarCollapsed', '0')`)
   console.log('\n侧栏探针：全部通过')
 }
 
+/** 把某个标签拖到 (x,y) 上，按住不松（拖标签并分屏与拖标签拼窗口共用） */
+async function dragTabTo(cdp, tab, x, y) {
+  await cdp.mouse('mousePressed', tab.x, tab.y)
+  await sleep(60)
+  for (let i = 1; i <= 10; i += 1) {
+    const t = i / 10
+    await cdp.mouse('mouseMoved', tab.x + (x - tab.x) * t, tab.y + (y - tab.y) * t)
+    await sleep(40)
+  }
+  await sleep(250)
+}
+
 /**
- * 场景：多分屏窗口里的拖拽落点
+ * 场景：多分屏窗口里的拖拽落点 + 拖得出哪些形状
  *
- * 用户报的：多分屏时"特殊显示的区域"不对 —— 高亮盖住的那一格，
- * 并不是新格子真正会落下的位置。
+ * 用户报的两件事：
+ *   1. 多分屏时"特殊显示的区域"不对 —— 高亮盖住的那一格，并不是新格子真正会落下的位置；
+ *   2. 三、四分屏**拖不出所有形式** —— 拖到某一格的半边本该"切开那一格"，
+ *      旧实现却只会给"下一档预设"，于是「左二右一」「上二下一」这类只能去菜单里点。
+ *
+ * 所以这个场景分两半：前半验高亮与落点一致（老），后半验**形状**真的切开了（新）。
  */
 async function scenarioDropZone(cdp) {
   await cdp.send('Page.navigate', { url: PAGE })
   await sleep(1200)
   await cdp.eval(HELPERS)
-  await waitFor(cdp, '__probe.hosts().length > 2', '至少三台主机')
+  await waitFor(cdp, '__probe.hosts().length > 3', '至少四台主机')
 
-  const hosts = await cdp.eval('__probe.hosts()')
-  for (const h of hosts.slice(0, 3)) {
+  // 挑四台**连得上**的主机：老交换机（10.0.0.1）是预览里专门用来演练
+  // "算法不兼容 → 勾兼容模式重试"的那台，点它只会弹一条连接失败，起不来标签
+  const hosts = (await cdp.eval('__probe.hosts()')).filter((h) => !h.text.includes('老交换机'))
+  for (const h of hosts.slice(0, 4)) {
     await cdp.mouse('mousePressed', h.x, h.y)
     await cdp.mouse('mouseReleased', h.x, h.y)
     await sleep(500)
   }
-  await waitFor(cdp, '__probe.tabs().length >= 3', '三个标签')
-
-  /** 把某个标签拖到 (x,y) 上，按住不松 */
-  const dragTabTo = async (tab, x, y) => {
-    await cdp.mouse('mousePressed', tab.x, tab.y)
-    await sleep(60)
-    for (let i = 1; i <= 10; i += 1) {
-      const t = i / 10
-      await cdp.mouse('mouseMoved', tab.x + (x - tab.x) * t, tab.y + (y - tab.y) * t)
-      await sleep(40)
-    }
-    await sleep(250)
-  }
+  await waitFor(cdp, '__probe.tabs().length >= 4', '四个标签')
 
   /* ---------- 1. 先拼出两格（左右二分） ---------- */
   // 先**切到第 1 个标签**再量它的窗口：隐藏的标签 display:none，矩形全是 0，
@@ -1252,7 +1589,7 @@ async function scenarioDropZone(cdp) {
   const g0 = (await cdp.eval('__probe.grids()')).find((g) => !g.hidden)
   const halfX = Math.round(g0.left + (g0.right - g0.left) * 0.25)
   const midY = Math.round((g0.top + g0.bottom) / 2)
-  await dragTabTo(tabs[2], halfX, midY)
+  await dragTabTo(cdp, tabs[2], halfX, midY)
   console.log('拖到一半时的浮签:', JSON.stringify(await cdp.eval('__probe.ghost()')))
   console.log('拖到一半时的高亮:', JSON.stringify(await cdp.eval('__probe.highlights()')))
   await cdp.mouse('mouseReleased', halfX, midY, { buttons: 0 })
@@ -1267,7 +1604,7 @@ async function scenarioDropZone(cdp) {
   const right = two[1]
   const hoverX = Math.round(right.left + right.w * 0.75)
   const hoverY = Math.round(right.top + right.h / 2)
-  await dragTabTo(src, hoverX, hoverY)
+  await dragTabTo(cdp, src, hoverX, hoverY)
   const ghost = await cdp.eval('__probe.ghost()')
   const zone = await cdp.eval('__probe.highlights()')
   console.log('悬停右格（偏右）时的浮签:', JSON.stringify(ghost))
@@ -1307,7 +1644,297 @@ async function scenarioDropZone(cdp) {
     throw new Error(`新格子没落在最右边：${JSON.stringify(after)}`)
   }
 
+  /* ---------- 3. 四格：拖到**左格的下半边**，那一格要被切开 ---------- */
+  /*
+   * 这一步是"三四分屏拖不出所有形式"的正面验证：三格时拖到左格下半边，
+   * 期望左列被切成上下两格、右两格整高（几何排布 cols3×rows2，对不上任何预设 ——
+   * 所以它同时验了"自定义排布能存下来、能画出来、还能拖比例"）。
+   * 旧实现会按"下一档预设"给个四宫格之类，格子落不到你指的那半边。
+   */
+  tabs = await cdp.eval('__probe.tabs()')
+  const src3 = tabs[tabs.length - 1]
+  const leftCell = after[0]
+  const dropX = Math.round(leftCell.left + leftCell.w / 2)
+  const dropY = Math.round(leftCell.top + leftCell.h * 0.75)
+  await dragTabTo(cdp, src3, dropX, dropY)
+  const ghost3 = await cdp.eval('__probe.ghost()')
+  const hl3 = (await cdp.eval('__probe.highlights()'))[0]
+  console.log('悬停左格（偏下）时的浮签:', JSON.stringify(ghost3))
+  console.log('悬停左格（偏下）时的高亮:', JSON.stringify(hl3))
+  await cdp.shot('probe-dropzone-3-hover-left-bottom.png')
+  if (!ghost3?.text.includes('下方')) throw new Error(`浮签没说清落点：${ghost3?.text}`)
+  if (
+    !hl3 ||
+    Math.abs(hl3.left - leftCell.left) > 3 ||
+    Math.abs(hl3.top - (leftCell.top + leftCell.h / 2)) > 3 ||
+    Math.abs(hl3.h - leftCell.h / 2) > 3
+  ) {
+    throw new Error(`高亮不是左格的下半边：${JSON.stringify(hl3)}，左格 ${JSON.stringify(leftCell)}`)
+  }
+
+  await cdp.mouse('mouseReleased', dropX, dropY, { buttons: 0 })
+  await sleep(1800)
+  const four = await cdp.eval('__probe.cells()')
+  const seps = await cdp.eval('__probe.separators()')
+  console.log('松手后（四格）:', JSON.stringify(four))
+  console.log('分割线:', JSON.stringify(seps))
+  await cdp.shot('probe-dropzone-4-custom-layout.png')
+
+  if (four.length !== 4) throw new Error(`应该变成四格，实际 ${four.length}`)
+  // 左列上下两格：左边对齐、上格在下格之上、宽度一样
+  if (Math.abs(four[0].left - four[1].left) > 3) {
+    throw new Error(`新格子没落在左列（第 1、2 格左边不对齐）：${JSON.stringify(four)}`)
+  }
+  if (!(four[1].top > four[0].top + 10)) {
+    throw new Error(`新格子没落在左格下方：${JSON.stringify(four)}`)
+  }
+  if (Math.abs(four[0].w - four[1].w) > 3) {
+    throw new Error(`左列两格宽度不一致：${JSON.stringify(four)}`)
+  }
+  // 第 3、4 格整高（跨两行），且在左边两格的右侧
+  for (const i of [2, 3]) {
+    if (Math.abs(four[i].top - four[0].top) > 3) {
+      throw new Error(`第 ${i + 1} 格没有从顶部开始（应该整高）：${JSON.stringify(four)}`)
+    }
+    if (!(four[i].h > four[1].h)) {
+      throw new Error(`第 ${i + 1} 格不是整高：${JSON.stringify(four)}`)
+    }
+  }
+  if (!(four[2].left > four[1].left && four[3].left > four[2].left)) {
+    throw new Error(`右边两格的顺序不对：${JSON.stringify(four)}`)
+  }
+  // 分割线：两条竖的整高 + 一条只画在左列的横线（自定义排布也得能拖比例）
+  const cols = seps.filter((s) => s.axis === 'col')
+  const rows = seps.filter((s) => s.axis === 'row')
+  if (cols.length !== 2 || rows.length !== 1) {
+    throw new Error(`分割线数量不对：竖 ${cols.length} 条、横 ${rows.length} 条 —— ${JSON.stringify(seps)}`)
+  }
+  if (Math.abs(rows[0].w - four[0].w) > 4 || Math.abs(rows[0].left - four[0].left) > 4) {
+    throw new Error(`那条横线应该只画在左列里：${JSON.stringify(rows[0])}，左格 ${JSON.stringify(four[0])}`)
+  }
+  for (const s of cols) {
+    if (Math.abs(s.h - (four[2].top + four[2].h - four[0].top)) > 4) {
+      throw new Error(`竖分割线应该整高：${JSON.stringify(s)}`)
+    }
+  }
+
+  /* ---------- 4. 自定义排布下的布局菜单：一项都不打勾，点一个预设要真的换过去 ---------- */
+  /*
+   * 这一条钉的是 `setPaneLayout` 的幂等守卫：它以前比的是 `layoutOf`（形状的**名字**），
+   * 而自定义排布的 layoutOf 会回落成"该格数的默认" —— 于是"拖出来的四格排布 +
+   * 点菜单里的四宫格"被当成没变，点了没反应（用户看到的明明不是四宫格）。
+   */
+  await clickSel(cdp, '[title^="分屏布局"][title*="4 格"]')
+  await sleep(350)
+  const menu = await cdp.eval(
+    `[...document.querySelectorAll('[role=menu] button')].map((b) => ({ title: b.getAttribute('title'), active: b.className.includes('border-accent/60') }))`,
+  )
+  const active = menu.filter((m) => m.active)
+  console.log(`布局菜单 ${menu.length} 项，打勾的：${JSON.stringify(active)}`)
+  if (menu.length === 0) throw new Error('布局菜单没打开')
+  if (active.length !== 0) {
+    throw new Error(`自定义排布下不该有项打勾（会让人以为点一下能回到那个形状）：${JSON.stringify(active)}`)
+  }
+  if (!menu.some((m) => m.title === '四宫格')) throw new Error(`菜单里没有「四宫格」：${JSON.stringify(menu)}`)
+  await clickSel(cdp, '[role=menu] button[title="四宫格"]')
+  await sleep(800)
+  const quad = await cdp.eval('__probe.cells()')
+  console.log('点了「四宫格」之后:', JSON.stringify(quad))
+  await cdp.shot('probe-dropzone-5-after-menu.png')
+  if (quad.length !== 4) throw new Error(`点四宫格后还是 ${quad.length} 格`)
+  if (Math.abs(quad[0].left - quad[2].left) > 3 || Math.abs(quad[1].left - quad[3].left) > 3) {
+    throw new Error(`不是两列：${JSON.stringify(quad)}`)
+  }
+  if (Math.abs(quad[0].top - quad[1].top) > 3 || !(quad[2].top > quad[0].top + 10)) {
+    throw new Error(`不是两行：${JSON.stringify(quad)}`)
+  }
+
   console.log('\n多分屏落点探针：全部通过')
+}
+
+/**
+ * 场景：本屏批量执行 —— 拖高度 + 逐行运行
+ *
+ * 用户提的两件事：这条栏"无法调整大小"；批量执行要能"逐行运行"。
+ *
+ * 逐行这条在预览里能真验：mock 的 `ssh_exec` 对含 `fail` 的命令返回退出码 1，
+ * 于是"第 1 行成功 → 第 2 行非零退出 → 第 3 行已跳过"这一串状态是**跑出来的**，
+ * 不是看代码推的。而且"整段跑一次"与"按行跑三次"的结果长得不一样（输出里
+ * `mock-host: ` 出现几次），所以能直接断言它确实是逐行。
+ */
+async function scenarioBatchBar(cdp) {
+  await cdp.send('Page.navigate', { url: PAGE })
+  await sleep(1200)
+  await cdp.eval(HELPERS)
+  await waitFor(cdp, '__probe.hosts().length > 1', '至少两台主机')
+
+  /* ---------- 0. 先拼一个两格窗口（批量执行条只有多格标签才有） ---------- */
+  const hosts = await cdp.eval('__probe.hosts()')
+  for (const h of hosts.slice(0, 2)) {
+    await cdp.mouse('mousePressed', h.x, h.y)
+    await cdp.mouse('mouseReleased', h.x, h.y)
+    await sleep(500)
+  }
+  await waitFor(cdp, '__probe.tabs().length >= 2', '两个标签')
+  let tabs = await cdp.eval('__probe.tabs()')
+  await cdp.mouse('mousePressed', tabs[0].x, tabs[0].y)
+  await cdp.mouse('mouseReleased', tabs[0].x, tabs[0].y)
+  await sleep(600)
+  const g0 = (await cdp.eval('__probe.grids()')).find((g) => !g.hidden)
+  const halfX = Math.round(g0.left + (g0.right - g0.left) * 0.25)
+  const midY = Math.round((g0.top + g0.bottom) / 2)
+  await dragTabTo(cdp, tabs[1], halfX, midY)
+  await cdp.mouse('mouseReleased', halfX, midY, { buttons: 0 })
+  await sleep(1800)
+  if ((await cdp.eval('__probe.cells()')).length !== 2) throw new Error('没拼成两格')
+
+  const collapsed = await cdp.eval('__probe.batchBar()')
+  console.log('折叠时:', JSON.stringify(collapsed))
+  if (!collapsed) throw new Error('这一屏没有批量执行条')
+  if (collapsed.open) throw new Error('批量执行条一开始应该是折叠的')
+
+  /* ---------- 1. 展开、拖高度 ---------- */
+  await clickSel(cdp, '[data-batch-bar] button')
+  await sleep(300)
+  const opened = await cdp.eval('__probe.batchBar()')
+  console.log('展开后:', JSON.stringify(opened))
+  if (!opened.open) throw new Error('点把手没展开')
+  /*
+   * 把手必须**点得到**：上面 PaneGrid 的分割线命中层往外多探 8px，位置正好落在
+   * 这条栏的上沿（实测过：栏中心 x=745 也正是一条竖分割线的位置），
+   * 而它是绝对定位、栏不是 —— 绘制顺序上就压住了把手，"拖高度"成了"拖分割线"。
+   */
+  const gripHit = await cdp.eval(
+    `(() => { const el = document.querySelector('[data-batch-resizer]'); const r = el.getBoundingClientRect()
+      const t = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2)
+      return { ok: !!t?.hasAttribute?.('data-batch-resizer'), tag: t?.tagName, cls: String(t?.className ?? '').slice(0, 40) } })()`,
+  )
+  console.log('把手位置上最顶层的元素:', JSON.stringify(gripHit))
+  if (!gripHit.ok) throw new Error(`把手被别的东西盖住了，点不到：${JSON.stringify(gripHit)}`)
+  const gridBefore = (await cdp.eval('__probe.grids()')).find((g) => !g.hidden)
+  const gridH0 = Math.round(gridBefore.bottom - gridBefore.top)
+
+  // 往上拖 120px：栏变高、终端区变矮（终端由 TerminalView 自己的 ResizeObserver refit）
+  const want = 120
+  await cdp.mouse('mousePressed', opened.gripX, opened.gripY)
+  for (let i = 1; i <= 6; i += 1) {
+    await cdp.mouse('mouseMoved', opened.gripX, opened.gripY - (want * i) / 6)
+    await sleep(50)
+  }
+  await cdp.mouse('mouseReleased', opened.gripX, opened.gripY - want, { buttons: 0 })
+  await sleep(400)
+  const resized = await cdp.eval('__probe.batchBar()')
+  const gridAfter = (await cdp.eval('__probe.grids()')).find((g) => !g.hidden)
+  const gridH1 = Math.round(gridAfter.bottom - gridAfter.top)
+  const stored = await cdp.eval(`window.localStorage.getItem('batchBarHeight')`)
+  console.log(`拖高 ${want}px 后: 栏 ${opened.h} → ${resized.h}，终端区 ${gridH0} → ${gridH1}，存下 ${stored}`)
+  if (Math.abs(resized.h - (opened.h + want)) > 6) {
+    throw new Error(`栏高没跟上拖动：${opened.h} + ${want} ≠ ${resized.h}`)
+  }
+  if (Math.abs(gridH0 - gridH1 - want) > 6) {
+    throw new Error(`终端区没跟着让位：${gridH0} → ${gridH1}（少${gridH0 - gridH1}）`)
+  }
+  if (Number(stored) !== resized.h) throw new Error(`高度没存进 localStorage：${stored} ≠ ${resized.h}`)
+  await cdp.shot('probe-batchbar-1-resized.png')
+
+  /* ---------- 2. 逐行「执行」：第 2 行失败 → 第 3 行已跳过 ---------- */
+  await cdp.eval(`__probe.fillBatch('echo one\\necho fail two\\necho three')`)
+  await clickSel(cdp, '[data-batch-linebyline]')
+  await sleep(150)
+  const runBox = await cdp.eval(
+    `(() => { const b = [...document.querySelectorAll('button')].find((b) => b.textContent.trim() === '执行')
+      if (!b) return null
+      const r = b.getBoundingClientRect()
+      return { x: r.left + r.width / 2, y: r.top + r.height / 2 } })()`,
+  )
+  if (!runBox) throw new Error('找不到「执行」按钮')
+  await cdp.mouse('mousePressed', runBox.x, runBox.y)
+  await cdp.mouse('mouseReleased', runBox.x, runBox.y)
+  await sleep(1600)
+
+  const cards = await cdp.eval('__probe.batchCards()')
+  console.log('逐行执行的结果卡:', JSON.stringify(cards))
+  await cdp.shot('probe-batchbar-2-linebyline.png')
+  if (cards.length !== 2) throw new Error(`应该有 2 张结果卡（两格），实际 ${cards.length}`)
+  const text = cards[0].text
+  for (const want of ['第 1 行', '第 2 行', '第 3 行', '非零退出', '已跳过', '后面 1 行没跑']) {
+    if (!text.includes(want)) throw new Error(`结果里没有「${want}」：${text}`)
+  }
+  /*
+   * 走的是 exec 而不是"整段跑一次"：mock 每条命令回一行 `mock-host: <命令>`，
+   * 光看输出认不出来（失败那行本来就没有回显），所以数 mock 收到的 exec 调用：
+   * 三行里跑了两行、两格各一遍 → 4 次；整段跑只会是 2 次（每格一次）。
+   */
+  const execs = await cdp.eval('__probe.execLog()')
+  console.log(`exec 调用 ${execs.length} 次:`, JSON.stringify(execs))
+  if (execs.length !== 4) throw new Error(`不像逐行：exec 调了 ${execs.length} 次，逐行应该是 4 次`)
+  if (execs.some((c) => c.includes('\n'))) {
+    throw new Error(`有一条 exec 里塞了好几行（那就是整段跑了）：${JSON.stringify(execs)}`)
+  }
+  // 格子之间是并行的，所以这 4 条是交错的 —— 按内容数，不按顺序
+  const count = (s) => execs.filter((c) => c === s).length
+  if (count('echo one') !== 2 || count('echo fail two') !== 2) {
+    throw new Error(`两格各该跑前两行各一次：${JSON.stringify(execs)}`)
+  }
+  if (count('echo three') !== 0) {
+    throw new Error(`第 3 行不该被执行（上一行非零退出就该停）：${JSON.stringify(execs)}`)
+  }
+
+  /* ---------- 3. 逐行「发送」：按行敲进去，行间等间隔 ---------- */
+  await cdp.eval('__probe.clearShellLog()')
+  await cdp.eval(`__probe.fillBatch('echo a\\necho b')`)
+  await sleep(150)
+  const sendBox = await cdp.eval(
+    `(() => { const b = [...document.querySelectorAll('button')].find((b) => b.textContent.trim() === '发送')
+      if (!b) return null
+      const r = b.getBoundingClientRect()
+      return { x: r.left + r.width / 2, y: r.top + r.height / 2 } })()`,
+  )
+  if (!sendBox) throw new Error('找不到「发送」按钮')
+  await cdp.mouse('mousePressed', sendBox.x, sendBox.y)
+  await cdp.mouse('mouseReleased', sendBox.x, sendBox.y)
+  await sleep(1500)
+
+  const log = await cdp.eval('__probe.shellLog()')
+  console.log('终端收到:', JSON.stringify(log))
+  const sentCards = await cdp.eval('__probe.batchCards()')
+  console.log('逐行发送的结果卡:', JSON.stringify(sentCards.map((c) => c.text)))
+  // 两行 × 两格 = 4 次投递，且每次都以换行结尾（一行就是一条命令）
+  const expectLines = ['echo a\n', 'echo b\n']
+  if (log.length !== 4) throw new Error(`应该投递 4 次（两行 × 两格），实际 ${log.length}：${JSON.stringify(log)}`)
+  for (const want of expectLines) {
+    const n = log.filter((l) => l === want).length
+    if (n !== 2) throw new Error(`「${want.trim()}」应该各投 2 次（两格），实际 ${n} 次`)
+  }
+  if ((await cdp.eval(`__probe.countInCards('已按行发送')`)) !== 2) {
+    throw new Error(`两张卡都该写「已按行发送」：${JSON.stringify(sentCards.map((c) => c.text))}`)
+  }
+
+  /* ---------- 4. 折叠状态下拖那条把手 = 直接把它拉出来 ---------- */
+  await clickSel(cdp, '[data-batch-bar] button')
+  await sleep(250)
+  const shut = await cdp.eval('__probe.batchBar()')
+  console.log('折叠回去:', JSON.stringify(shut))
+  if (shut.open) throw new Error('点把手没折叠回去')
+  const pullTo = 220
+  await cdp.mouse('mousePressed', shut.gripX, shut.gripY)
+  for (let i = 1; i <= 5; i += 1) {
+    await cdp.mouse('mouseMoved', shut.gripX, shut.gripY - (pullTo * i) / 5)
+    await sleep(50)
+  }
+  await cdp.mouse('mouseReleased', shut.gripX, shut.gripY - pullTo, { buttons: 0 })
+  await sleep(350)
+  const pulled = await cdp.eval('__probe.batchBar()')
+  console.log(`从折叠状态往上拖 ${pullTo}px:`, JSON.stringify(pulled))
+  if (!pulled.open) throw new Error('拖折叠状态的把手没把它拉出来')
+  if (Math.abs(pulled.h - pullTo) > 8) {
+    throw new Error(`拉出来的高度不对：${pulled.h}，期望 ≈${pullTo}（高度应当跟拖了多远走）`)
+  }
+  await cdp.shot('probe-batchbar-3-pulled-open.png')
+
+  // 收尾：把高度恢复默认，别把持久化状态留给后面的场景
+  await cdp.eval(`window.localStorage.removeItem('batchBarHeight')`)
+  console.log('\n批量执行条探针：全部通过')
 }
 
 /** 真按键（带修饰键）。modifiers 是位掩码：1=Alt 2=Ctrl 4=Meta 8=Shift */
@@ -1341,6 +1968,151 @@ async function pressPasteShortcut(cdp) {
     commands: ['pasteAndMatchStyle'],
   })
   await cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', ...base })
+}
+
+/**
+ * 场景：设置面板的「字体族」下拉框
+ *
+ * 这条链路有四层，探针逐层钉：Rust 给出清单 → `lib/fonts.ts` 标出等宽 → 下拉框过滤/搜索/
+ * 勾选 → store 与 localStorage → 终端按新字体重新量格子。
+ *
+ * 清单在预览里来自 `tauriMock`（假数据），但**等宽与否是真量出来的** ——
+ * 所以假清单里挑的都是这台机器上真装了的字体，断言才立得住（Consolas 等宽、
+ * Microsoft YaHei 非等宽，都实测过）。
+ */
+async function scenarioFonts(cdp) {
+  const exceptions = () => cdp.logs.filter((l) => l.startsWith('[exception]'))
+  await cdp.send('Page.navigate', { url: PAGE })
+  await sleep(1200)
+  await cdp.eval(HELPERS)
+  await waitFor(cdp, '__probe.hosts().length > 0', '会话树里的主机行')
+
+  /* ---------- 0. 开一个终端：后面要看字体有没有真的落到终端上 ---------- */
+  const host = (await cdp.eval('__probe.hosts()'))[0]
+  await cdp.mouse('mousePressed', host.x, host.y)
+  await cdp.mouse('mouseReleased', host.x, host.y)
+  await waitFor(cdp, `document.querySelectorAll('.xterm canvas').length > 0`, '终端画布')
+  await sleep(500)
+  /*
+   * 记一条异常基线。预览里开终端本身就会冒一条 xterm 内部的
+   * `Cannot read properties of undefined (reading 'dimensions')`（Viewport.syncScrollArea，
+   * webgl 渲染器在无头下的老问题，跟字体无关）—— 所以这里只盯"换字体的这一段有没有新异常"。
+   */
+  const excBase = exceptions().length
+
+  /* ---------- 1. 打开设置面板 ---------- */
+  // 侧栏可能被上一个场景收起来了（localStorage 是跨场景留着的），设置按钮在侧栏底部
+  if (!(await cdp.eval(`!!document.querySelector('[title="主题、终端外观、重连策略、传输默认值"]')`))) {
+    const toggle = await cdp.eval(`__probe.buttonBox('侧栏')`)
+    if (!toggle) throw new Error('侧栏收着，又找不到状态栏那个「侧栏」按钮')
+    await cdp.mouse('mousePressed', toggle.x, toggle.y)
+    await cdp.mouse('mouseReleased', toggle.x, toggle.y)
+    await sleep(400)
+  }
+  await clickSelScrolled(cdp, '[title="主题、终端外观、重连策略、传输默认值"]')
+  await waitFor(cdp, `!!document.querySelector('[data-font-picker]')`, '设置面板里的字体下拉框')
+
+  /* ---------- 2. 展开：清单读出来了、默认只看等宽 ---------- */
+  await clickSelScrolled(cdp, '[data-font-picker]')
+  await waitFor(cdp, `__probe.fontPicker().options.length > 1`, '字体清单')
+  let picker = await cdp.eval('__probe.fontPicker()')
+  console.log('展开后:', JSON.stringify({ ...picker, options: undefined }), '\n  列出的字体:', picker.options.join(' | '))
+  if (!picker.options.includes('内置字体栈')) throw new Error('清单里没有「内置字体栈」这一项')
+  if (!picker.options.includes('Consolas')) throw new Error('清单里没有 Consolas（mock 里给了它）')
+  if (picker.monoOnly !== 'true') throw new Error('「只看等宽」默认该是开的')
+  if (picker.options.includes('Microsoft YaHei')) {
+    throw new Error('开着「只看等宽」却列出了非等宽的 Microsoft YaHei')
+  }
+  // 候选行得真用它自己的字体画（多词族名不加引号的话这条 CSS 会被浏览器整条丢掉）
+  const rowCss = await cdp.eval(`__probe.fontOptionCss('Cascadia Code')`)
+  console.log('候选行上的字体:', rowCss)
+  if (!rowCss || !rowCss.includes('Cascadia Code')) {
+    throw new Error(`候选行没用自己的字体渲染（font-family 成了 ${rowCss}）—— 多半是族名没加引号`)
+  }
+  await cdp.shot('probe-fonts-1-picker-open.png')
+
+  /* ---------- 3. 关掉「只看等宽」：非等宽的字体带着标注出现 ---------- */
+  await clickSelScrolled(cdp, '[data-font-mono-only]')
+  await waitFor(cdp, `__probe.fontPicker().monoOnly === 'false'`, '「只看等宽」关掉')
+  picker = await cdp.eval('__probe.fontPicker()')
+  console.log('关掉只看等宽:', picker.countText, '·', picker.options.join(' | '))
+  if (!picker.options.includes('Microsoft YaHei')) throw new Error('关掉筛选后仍看不到非等宽字体')
+  await clickSelScrolled(cdp, '[data-font-mono-only]')
+  await sleep(200)
+
+  /* ---------- 4. 搜索过滤 ---------- */
+  await typeInto(cdp, '[data-font-search]', 'cons')
+  await sleep(300)
+  const filtered = await cdp.eval('__probe.fontPicker()')
+  console.log('搜「cons」:', filtered.countText, '·', filtered.options.join(' | '))
+  if (!filtered.options.includes('Consolas')) throw new Error('搜索把 Consolas 也过滤掉了')
+  if (filtered.options.some((o) => o !== '内置字体栈' && !o.toLowerCase().includes('cons'))) {
+    throw new Error(`搜索没起作用，还列着无关的字体：${filtered.options.join(' | ')}`)
+  }
+  await typeInto(cdp, '[data-font-search]', '')
+  await sleep(300)
+
+  /* ---------- 5. 挑一个字体：写进 store，并且终端真换了字体 ---------- */
+  const before = await cdp.eval('__probe.termMetrics()')
+  // 挑 Lucida Console：它的字符格子跟默认栈明显不同（本机实测 32×30 → 32×27），
+  // 这样"终端重新量过格子"这件事是能看出来的
+  await clickSelScrolled(cdp, '[data-font-option="Lucida Console"]')
+  await sleep(600)
+  const after = await cdp.eval('__probe.termMetrics()')
+  const stored = await cdp.eval(`window.localStorage.getItem('termFontFamily')`)
+  picker = await cdp.eval('__probe.fontPicker()')
+  console.log(`挑「Lucida Console」: 触发器显示「${picker.trigger}」，本地存 ${stored}`)
+  console.log('  终端格子:', JSON.stringify(before), '→', JSON.stringify(after))
+  if (picker.trigger !== 'Lucida Console') throw new Error(`触发器上该是选中的字体，实际「${picker.trigger}」`)
+  if (stored !== JSON.stringify('Lucida Console')) {
+    throw new Error(`localStorage 里该是带引号的字体名，实际 ${stored}`)
+  }
+  if (picker.open) throw new Error('挑完字体面板该收起来')
+  if (JSON.stringify(before) === JSON.stringify(after)) {
+    throw new Error('字体没落到终端上：xterm 量出来的格子尺寸一点没变')
+  }
+  if (after.canvases === 0) throw new Error('终端被换字体搞没了（画布不见了）')
+
+  /* ---------- 6. 再打开：勾在选中的那一项上 ---------- */
+  await clickSelScrolled(cdp, '[data-font-picker]')
+  await waitFor(cdp, `__probe.fontPicker().options.length > 1`, '再次展开')
+  await typeInto(cdp, '[data-font-search]', 'lucida')
+  await sleep(300)
+  picker = await cdp.eval('__probe.fontPicker()')
+  console.log('重新打开并搜 lucida:', JSON.stringify(picker.checked))
+  if (!picker.checked.includes('Lucida Console')) throw new Error('选中的字体没有打勾')
+
+  /* ---------- 7. 「自定义…」手写一整串字体栈 ---------- */
+  const stack = '"Microsoft YaHei", Consolas, monospace'
+  await clickSelScrolled(cdp, '[data-font-custom]')
+  await waitFor(cdp, `!!document.querySelector('[data-font-custom-input]')`, '自定义输入框')
+  await typeInto(cdp, '[data-font-custom-input]', stack)
+  await clickSelScrolled(cdp, '[data-font-custom-apply]')
+  await sleep(400)
+  const storedStack = await cdp.eval(`window.localStorage.getItem('termFontFamily')`)
+  picker = await cdp.eval('__probe.fontPicker()')
+  console.log(`自定义字体栈: 本地存 ${JSON.stringify(storedStack)}，触发器显示 ${JSON.stringify(picker.trigger)}`)
+  if (storedStack !== stack) throw new Error(`自定义字体栈没存对：${storedStack}`)
+  if (picker.trigger !== 'Microsoft YaHei') {
+    throw new Error(`触发器该显示栈里第一个字体，实际「${picker.trigger}」`)
+  }
+
+  /* ---------- 8. 回到内置栈：存空串 ---------- */
+  await clickSelScrolled(cdp, '[data-font-picker]')
+  await waitFor(cdp, `__probe.fontPicker().options.length > 1`, '第三次展开')
+  await clickSelScrolled(cdp, '[data-font-option="内置字体栈"]')
+  await sleep(400)
+  const backToBuiltin = await cdp.eval(`window.localStorage.getItem('termFontFamily')`)
+  picker = await cdp.eval('__probe.fontPicker()')
+  console.log(`选回内置栈: 本地存「${backToBuiltin}」，触发器显示「${picker.trigger}」`)
+  if (backToBuiltin !== '') throw new Error(`内置栈该存空串（终端那边空串=用默认栈），实际 ${backToBuiltin}`)
+  if (picker.trigger !== '内置字体栈') throw new Error('触发器该显示「内置字体栈」')
+
+  const fresh = exceptions().slice(excBase)
+  if (fresh.length) throw new Error('换字体的过程里冒出了页面异常：' + fresh.join(' / '))
+
+  await cdp.shot('probe-fonts-1-picker.png')
+  console.log('\n字体下拉框探针：全部通过')
 }
 
 /**
@@ -1469,12 +2241,16 @@ try {
   if (want === 'all' || want === 'drag' || want === 'newline') await scenarioDragTab(cdp)
   if (want === 'all' || want === 'newline') await scenarioNewlineOnly(cdp)
   if (want === 'all' || want === 'tags') await scenarioTags(cdp)
+  if (want === 'all' || want === 'sessiondrag') await scenarioSessionDrag(cdp)
+  if (want === 'all' || want === 'rightpanel') await scenarioRightPanel(cdp)
   if (want === 'rename') await scenarioTabRename(cdp)
   if (want === 'all' || want === 'menu') await scenarioContextMenu(cdp)
   if (want === 'all' || want === 'connect') await scenarioConnectForm(cdp)
   if (want === 'all' || want === 'paste') await scenarioPaste(cdp)
   if (want === 'all' || want === 'sidebar') await scenarioSidebar(cdp)
   if (want === 'all' || want === 'dropzone') await scenarioDropZone(cdp)
+  if (want === 'all' || want === 'batchbar') await scenarioBatchBar(cdp)
+  if (want === 'all' || want === 'fonts') await scenarioFonts(cdp)
 } catch (e) {
   console.error('探针失败:', e)
   console.log('--- 页面控制台 ---')

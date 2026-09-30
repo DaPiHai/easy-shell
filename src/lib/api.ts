@@ -367,12 +367,32 @@ export function sftpUpload(
   return invoke<void>('sftp_upload', { sftpId, local, remoteDir, resume, conflict, onProgress })
 }
 
+/**
+ * 远端 → 远端对拷（两台主机之间、或同一台的两个目录之间）。
+ * Rust 侧流式中转，不经本地落盘
+ */
+export function sftpCopy(
+  fromSftpId: number,
+  fromPath: string,
+  toSftpId: number,
+  toDir: string,
+  conflict: ConflictPolicy,
+  onProgress: Channel<TransferEvent>,
+): Promise<void> {
+  return invoke<void>('sftp_copy', { fromSftpId, fromPath, toSftpId, toDir, conflict, onProgress })
+}
+
 export function sftpPwd(sftpId: number): Promise<string> {
   return invoke<string>('sftp_pwd', { sftpId })
 }
 
 export function sftpMkdir(sftpId: number, path: string): Promise<void> {
   return invoke<void>('sftp_mkdir', { sftpId, path })
+}
+
+/** 新建远端空文件。同名已存在会报错，绝不覆盖（create_new 语义） */
+export function sftpCreateFile(sftpId: number, path: string): Promise<void> {
+  return invoke<void>('sftp_create_file', { sftpId, path })
 }
 
 export function sftpRemove(sftpId: number, path: string, isDir: boolean): Promise<void> {
@@ -393,6 +413,11 @@ export function localHome(): Promise<string> {
 
 export function localMkdir(path: string): Promise<void> {
   return invoke<void>('local_mkdir', { path })
+}
+
+/** 新建本地空文件。同名已存在会报错，绝不覆盖（create_new 语义） */
+export function localCreateFile(path: string): Promise<void> {
+  return invoke<void>('local_create_file', { path })
 }
 
 export function localRemove(path: string, isDir: boolean): Promise<void> {
@@ -543,6 +568,22 @@ export async function syncWindowTheme(theme: 'dark' | 'light'): Promise<void> {
     await getCurrentWindow().setTheme(theme)
   } catch (e) {
     console.warn('[easy-shell] 同步窗口主题失败:', e)
+  }
+}
+
+/**
+ * 本机装了哪些字体（设置面板的「字体族」下拉框用）。
+ *
+ * 为什么问后端要：浏览器侧查不到 —— `document.fonts.check()` 对不存在的字体名也返回 true，
+ * `queryLocalFonts()` 在 WebView2 里没有授权入口。Rust 那边在 Windows 上读字体注册表。
+ * 读不出来只返回空数组，调用方（`lib/fonts.ts`）自己退回候选表，不当错误处理。
+ */
+export async function listSystemFonts(): Promise<string[]> {
+  try {
+    return await invoke<string[]>('list_system_fonts')
+  } catch (e) {
+    console.warn('[easy-shell] 读取系统字体清单失败:', e)
+    return []
   }
 }
 

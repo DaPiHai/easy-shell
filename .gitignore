@@ -19,3 +19,10 @@ desktop.ini
 .workbuddy/
 .workbuddy-ai/
 .zcode/
+
+# 本地内部文档与安装包产物：不随仓库公开（文档备份在 Desktop/easy-shell-local-docs）
+*.zip
+PLAN.md
+AGENTS.md
+CODEBUDDY.md
+DESIGN.md

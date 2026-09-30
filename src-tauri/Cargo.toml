@@ -1,6 +1,6 @@
 [package]
 name = "easy-shell"
-version = "0.1.0"
+version = "0.1.2"
 description = "A minimal SSH and SFTP client"
 edition = "2021"
 rust-version = "1.77.2"
@@ -40,6 +40,12 @@ portable-pty = "0.9.0"
 curve25519-dalek = "5"
 sha2 = "0.10"
 hkdf = "0.12"
+
+# 枚举本机装了哪些字体（设置面板的字体下拉框）。Windows 读字体注册表，
+# 其它平台试 `fc-list`，见 `fonts.rs`。0.55 本来就躺在 Cargo.lock 里
+# （tauri 的构建依赖 embed-resource 用的就是它），提成直接依赖不用新增下载。
+[target.'cfg(windows)'.dependencies]
+winreg = "0.55"
 
 [dev-dependencies]
 # russh 0.63 依赖 rand 0.10，而主代码用的是 0.9，两边 semver 不兼容只能并存。

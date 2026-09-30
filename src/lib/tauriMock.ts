@@ -220,6 +220,16 @@ function feedShell(channel: Channel<{ type: string; data?: string; message?: str
 const shellLog: string[] = []
 ;(window as unknown as { __shellLog?: string[] }).__shellLog = shellLog
 
+/**
+ * 预览里收到的 `ssh_exec` 命令原文（一次调用一条）。
+ *
+ * 和 shellLog 同一个理由，回答的是另一个问题：**"逐行执行"到底是按行跑了 N 次
+ * exec，还是把多行整段塞进了一次** —— 从界面上看不出来（输出都收在同一张卡里）。
+ * 探针（tools/probe.mjs 的 batchbar 场景）读 `window.__execLog`。
+ */
+const execLog: string[] = []
+;(window as unknown as { __execLog?: string[] }).__execLog = execLog
+
 // ---- 假的 invoke -----------------------------------------------------------
 
 const DELAY = 60
@@ -346,6 +356,7 @@ export async function invoke<T>(cmd: string, args: Record<string, unknown> = {})
      */
     case 'ssh_exec': {
       const command = String(args.command ?? '')
+      execLog.push(command)
       const failing = /fail|error/i.test(command)
       const out = failing
         ? ''
@@ -363,6 +374,23 @@ export async function invoke<T>(cmd: string, args: Record<string, unknown> = {})
       // 但**必须显式返回**，否则落到 default 的 console.warn，
       // 「忘掉旧密钥并重连」按钮会静默地假装成功
       return later(undefined as T)
+
+    case 'list_system_fonts':
+      // 假清单，但挑的都是**这台机器上真装了**的字体：等宽与否是 `lib/fonts.ts` 当场用
+      // canvas 量出来的，编不得（编了预览里的「只看等宽」会筛出错误的结果）。
+      // 顺序跟真后端一样：大小写不敏感地排好。探针按 Consolas（等宽）和
+      // Microsoft YaHei（非等宽）断言筛选。
+      return later([
+        'Cascadia Code',
+        'Cascadia Mono',
+        'Consolas',
+        'Courier New',
+        'FiraCodeNerdFontMono',
+        'Lucida Console',
+        'Microsoft YaHei',
+        'Segoe UI',
+        '宋体',
+      ] as T)
 
     case 'local_open': {
       const ch = args.onData as Channel<{ type: string; data?: string; message?: string }>
@@ -386,6 +414,7 @@ export async function invoke<T>(cmd: string, args: Record<string, unknown> = {})
       return later(REMOTE_FILES as T)
     case 'sftp_close':
     case 'sftp_mkdir':
+    case 'sftp_create_file':
     case 'sftp_remove':
     case 'sftp_rename':
     case 'sftp_write_text':
@@ -399,7 +428,8 @@ export async function invoke<T>(cmd: string, args: Record<string, unknown> = {})
      * 是个会骗人的假象。现在分几步把进度推出去，进度条真的会动。
      */
     case 'sftp_download':
-    case 'sftp_upload': {
+    case 'sftp_upload':
+    case 'sftp_copy': {
       const progress = args.onProgress as Channel<TransferEvent> | undefined
       const total = 2_411_724
       // 选了「跳过」就演一遍跳过：队列里那个「跳过 N」的标记在预览里才看得到
@@ -408,7 +438,7 @@ export async function invoke<T>(cmd: string, args: Record<string, unknown> = {})
           () =>
             progress?.emit({
               type: 'skip',
-              name: String(args.remote ?? args.local ?? 'file'),
+              name: String(args.remote ?? args.local ?? args.fromPath ?? 'file'),
               reason: '目标已存在',
             }),
           DELAY * 2,
@@ -433,6 +463,7 @@ export async function invoke<T>(cmd: string, args: Record<string, unknown> = {})
     case 'local_home':
       return later('C:\\Users\\hhdlj' as T)
     case 'local_mkdir':
+    case 'local_create_file':
     case 'local_remove':
     case 'local_rename':
     case 'local_write_text':

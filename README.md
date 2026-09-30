@@ -7,7 +7,7 @@
 - 技术栈：**Tauri 2 + React 19 + TypeScript + Vite**（前端）/ **Rust**（内核）
 - SSH 引擎是 **`russh` 纯 Rust 直连**，不依赖系统 `ssh.exe`；终端仿真交给 **xterm.js**，Rust 只搬字节流
 - 目标平台 **Windows 优先**，代码保持跨平台（macOS / Linux 尚未适配）
-- 里程碑 M0–M9 已完成，见 `PLAN.md` 的进度表
+- 里程碑 M0–M9 已完成
 
 ## 开发
 
@@ -52,7 +52,7 @@ npm run check:commands    # 后端命令注册 ↔ api.ts 包装 ↔ 预览 mock
 React 前端  ──Tauri IPC(invoke + Channel)──  Rust 核心  ──russh / russh-sftp / portable-pty──  远端
 ```
 
-三条铁律（详见 `PLAN.md`）：
+三条铁律：
 
 1. **一条 SSH 连接复用**终端 / SFTP / 端口转发，不为每个功能单独建连。
 2. **前端不持有连接状态**，连接、凭据、通道全在 Rust 侧 state 管理器，前端只有 id + 事件流。
@@ -62,8 +62,4 @@ React 前端  ──Tauri IPC(invoke + Channel)──  Rust 核心  ──russh 
 
 | 文件 | 内容 |
 | --- | --- |
-| `PLAN.md` | 产品决策、里程碑与进度、风险与对策，**动架构前必读** |
 | `TODO.md` | 已完成之外的功能缺口，按优先级排序（唯一待办清单） |
-| `DESIGN.md` | Linear 设计系统落地（从 Linear 抽取的 token），**改 UI 前必读** |
-| `AGENTS.md` | 给 AI 助手的工作指引：命令、模块职责、高危坑位 |
-| `CODEBUDDY.md` | 同上但更详细的历史坑位清单 |

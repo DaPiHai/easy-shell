@@ -57,7 +57,11 @@ export function parentPath(path: string): string | null {
 
 interface FilePaneProps {
   side: Side
-  title: string
+  /**
+   * 栏头左上角的标题。双栏文件窗口传「本地 / 远程」这种纯文本；
+   * 能换绑定的场合传一个「主机名 ▾」按钮（见 binding.tsx 的 BindingButton）
+   */
+  title: ReactNode
   path: string
   entries: FileEntry[]
   loading: boolean
@@ -73,8 +77,11 @@ interface FilePaneProps {
   /**
    * 把选中的东西传到对侧。本地栏是"上传"、远程栏是"下载" ——
    * 以前只能双击行或拖过去，工具栏上看不到任何传文件的入口。
+   * 单栏场合（右侧文件栏）没有"对侧"，语义由调用方定，用 transferTitle 覆盖提示。
    */
   onTransfer: () => void
+  /** 传输按钮的提示文案。不给就按 side 走「上传到远程 / 下载到本地」 */
+  transferTitle?: string
   /**
    * 按下某一行的瞬间，交给上层去准备拖拽。
    *
@@ -93,6 +100,11 @@ interface FilePaneProps {
    * 而且是在删东西的时候才发现。
    */
   onRowMenu?: (e: ReactMouseEvent, entry: FileEntry) => void
+  /**
+   * 在**空白区域**（列表下方的空余处、空目录占位）右键。
+   * 行上的右键归 onRowMenu（menuAt 已经 stopPropagation，这里再按 tr 双保险）
+   */
+  onBlankMenu?: (e: ReactMouseEvent) => void
   /** 当前是不是拖拽的落点，用来画高亮框 */
   dropActive: boolean
   paneRef: React.Ref<HTMLDivElement>
@@ -156,8 +168,10 @@ export function FilePane({
   onRename,
   onEdit,
   onTransfer,
+  transferTitle,
   onRowMouseDown,
   onRowMenu,
+  onBlankMenu,
   sort,
   onSort,
   dropActive,
@@ -197,9 +211,10 @@ export function FilePane({
             onClick={onTransfer}
             disabled={selected.length === 0}
             title={
-              side === 'local'
+              transferTitle ??
+              (side === 'local'
                 ? '把选中的项目上传到远程当前目录'
-                : '把选中的项目下载到本地当前目录'
+                : '把选中的项目下载到本地当前目录')
             }
             className="grid h-6 w-6 place-items-center rounded text-ink-subtle transition-colors hover:bg-surface-2 hover:text-accent disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:text-ink-subtle"
           >
@@ -257,7 +272,20 @@ export function FilePane({
         </div>
       </div>
 
-      <div className="min-h-0 flex-1 overflow-auto">
+      <div
+        className="min-h-0 flex-1 overflow-auto"
+        // 空白区右键 = 「新建文件 / 新建文件夹 / 刷新」这类目录级操作的入口。
+        // 行上的右键由 onRowMenu 接（menuAt 已 stopPropagation），这里再按 tr 双保险
+        onContextMenu={(e) => {
+          if ((e.target as HTMLElement).closest('tbody tr')) return
+          onBlankMenu?.(e)
+        }}
+        onClick={(e) => {
+          // 点空白清空选择（表头那一行不算空白，点它排序不该把选择丢了）
+          if ((e.target as HTMLElement).closest('tbody tr, thead')) return
+          onSelect([])
+        }}
+      >
         {loading && entries.length === 0 ? (
           <div className="grid h-full place-items-center text-ink-tertiary">
             <Loader2 size={16} className="animate-spin" />

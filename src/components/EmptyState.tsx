@@ -213,7 +213,7 @@ export function StatusBar() {
         >
           {theme === 'dark' ? '浅色' : '深色'}
         </button>
-        <span className="text-ink-tertiary">v0.1.0</span>
+        <span className="text-ink-tertiary">v0.1.2</span>
       </div>
     </footer>
   )
