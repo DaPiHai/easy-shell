@@ -1,6 +1,6 @@
 # easy-shell
 
-一个「够用且克制」的 SSH + SFTP 客户端 —— 用来替代已停更的 WindTerm。
+一个「够用且克制」的 SSH + SFTP 客户端。
 
 终端 + SFTP + 会话管理，别的不做。视觉规范取自 Linear，代码完全自有，可长期维护。
 
